@@ -11,8 +11,7 @@
  * @module cs-myfree
  */
 
-import { createAdapter, providerRetryPolicy } from './adapter/index.js'
-import { DEFAULT_CANDIDATES } from './adapter/index.js'
+import { createAdapter, providerRetryPolicy, DEFAULT_CANDIDATES } from './adapter/index.js'
 import { keylessSources, SOURCES, buildOrder } from './pools/registry.js'
 import { evaluate, DECISION } from './policy/paid-gate.js'
 import { shouldEgress, MODE } from './vision/bridge.js'
