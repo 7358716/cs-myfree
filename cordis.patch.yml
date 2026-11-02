@@ -1,0 +1,9 @@
+# cs-myfree bundle patch —— 只 insert 自己的一行，绝不 insert 官方行。
+#
+# 安装：dsh plugin --profile <name> add github:<owner>/cs-myfree
+# 本 patch 由 bundle 机制自动应用，不要再往 profile 的 cordis.patch.yml
+# 手动 insert 同一 id（重复 loader entry id 会让加载失败）。
+
+- insert:
+    - id: cs-myfree
+      name: 'cs-myfree'
