@@ -1,6 +1,6 @@
 {
   "name": "cs-myfree",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "description": "cs-myfree — 免费模型提供方：供给 / 降级链 / 渠道层 / 搜索 / 识图 / 费用闸门 / 模型工作台",
   "main": "src/index.js",
@@ -19,11 +19,17 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    },
     "compat": {
       "tested": [
         ">=0.2.1-rc.2"
       ],
-      "note": "宿主 <0.2.1 时客户端界面自动不加载"
+      "note": "宿主 rc1 也能加载（宿主机兼容层 + 客户端防御式注册）"
     }
   },
   "license": "MIT",

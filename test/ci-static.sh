@@ -55,5 +55,18 @@ echo "[6] src 下不得出现第三方 import（只允许 node: 与相对路径�
 BAD=$(grep -rhoE "from ['\"][^'\"]+['\"]" src/*.js 2>/dev/null | sed -E "s/from ['\"]//;s/['\"]//" | grep -vE "^(node:|\./|\.\./)" | sort -u || true)
 if [ -n "$BAD" ]; then no "发现外部 import: $(echo "$BAD" | tr '\n' ' ')"; else ok "无外部 import"; fi
 
+echo "[7] 客户端半身格式（必须 __ModuleLoader__.load，不是裸 ESM）"
+if [ -f src/client.js ]; then
+  if head -20 src/client.js | grep -q "__ModuleLoader__"; then
+    ok "client.js 使用 __ModuleLoader__.load"
+  else
+    no "client.js 不是 __ModuleLoader__.load 格式 ⇒ 设置页会静默不出现"
+  fi
+  if grep -q "exports.apply" src/client.js; then ok "导出 apply"; else no "缺 exports.apply"; fi
+  if grep -q "exports.inject" src/client.js; then ok "导出 inject"; else no "缺 exports.inject"; fi
+else
+  no "缺 src/client.js"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then echo "全部通过 ✅"; exit 0; else echo "失败 $FAIL 项 ❌"; exit 1; fi

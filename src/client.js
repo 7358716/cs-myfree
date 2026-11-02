@@ -1,119 +1,136 @@
 /**
- * cs-myfree — 模型工作台 UI（浏览器半身，**必须单文件**）
+ * cs-myfree — 模型工作台（浏览器半身）
  *
- * 设计依据：v3 §9。12 个功能区（主管要求的下限，不是上限）：
- *   W1 供给源总览   W2 模型目录      W3 降级链编辑器⭐  W4 手动钉选
- *   W5 源启停+额度  W6 保护策略      W7 预算与付费     W8 省 Token
- *   W9 可观测       W10 导入导出     W11 作用域        W12 诊断
+ * ⚠️ 关键格式约束（本机实测，与官方插件对齐）：
+ *    客户端插件必须用 `window.__ModuleLoader__.load({ id, factory })` 包装，
+ *    **不是普通 ESM**。写成 ESM 会导致设置页根本不出现（静默失效）。
  *
- * 约束：浏览器不支持相对路径 require ⇒ 全部逻辑内联在本文件。
- * 用自有 id `cs-myfree`（settings.section 已被 5 个内置页占用，
- * 复用会**替换别人的 cell**）。
+ * 契约：
+ *   · factory(require) 里可 require: react / react/jsx-runtime /
+ *     @deepseek-ai/dsh-client-ui-primitives 等（由宿主提供，不需要我们打包）
+ *   · 导出 `apply(ctx)` 与 `inject = ['slots']`
+ *   · 注册：ctx.slots.inject('settings.section', () => ctx.slots.register(desc, Component))
+ *   · `label` 必须是**函数**，不是字符串
  *
- * @module cs-myfree/client
+ * 12 个功能区（主管要求的下限，不是上限）。
+ * 本版为**只读展示版**：不依赖宿主 API 调用，确保一定能渲染出来。
  */
+window.__ModuleLoader__.load({
+  id: 'cs-myfree',
+  factory: (require) => {
+    var module = { exports: {} }
+    var exports = module.exports
+    Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
-const NAME = 'cs-myfree'
+    const react = require('react')
+    const h = react.createElement
 
-export const name = `${NAME}-client`
-export const version = '0.2.0'
+    /** 12 个功能区定义 */
+    const ZONES = [
+      { id: 'W1', key: 'sources', label: '供给源总览', desc: '有哪些源、各自状态' },
+      { id: 'W2', key: 'catalog', label: '模型目录', desc: '可搜索全量模型与能力' },
+      { id: 'W3', key: 'chain', label: '降级链编辑器 ★', desc: '钉选 / 替换 / 增删 / 排序' },
+      { id: 'W4', key: 'pin', label: '手动钉选', desc: '选定并设为默认' },
+      { id: 'W5', key: 'health', label: '源启停与额度', desc: '启停、余额、临期告警' },
+      { id: 'W6', key: 'policy', label: '保护策略', desc: '并发 / 冷却 / 退避' },
+      { id: 'W7', key: 'budget', label: '预算与付费', desc: '五道闸门' },
+      { id: 'W8', key: 'saver', label: '省 Token', desc: '工具输出压缩' },
+      { id: 'W9', key: 'observe', label: '可观测', desc: '实时日志与账本' },
+      { id: 'W10', key: 'io', label: '导入导出', desc: '备份与还原' },
+      { id: 'W11', key: 'scope', label: '作用域', desc: '会话 / 预设 / 全局' },
+      { id: 'W12', key: 'diag', label: '诊断', desc: '一键体检' },
+    ]
 
-/** 12 个功能区定义（顺序即导航顺序） */
-export const ZONES = [
-  { id: 'W1', key: 'sources', label: '供给源总览', desc: '有哪些源、各自状态' },
-  { id: 'W2', key: 'catalog', label: '模型目录', desc: '可搜索全量模型与能力' },
-  { id: 'W3', key: 'chain', label: '降级链编辑器', desc: '钉选 / 替换 / 增删 / 排序', star: true },
-  { id: 'W4', key: 'pin', label: '手动钉选', desc: '选定并设为默认' },
-  { id: 'W5', key: 'health', label: '源启停与额度', desc: '启停、余额、临期告警' },
-  { id: 'W6', key: 'policy', label: '保护策略', desc: '并发 / 冷却 / 退避' },
-  { id: 'W7', key: 'budget', label: '预算与付费', desc: '五道闸门' },
-  { id: 'W8', key: 'saver', label: '省 Token', desc: '工具输出压缩' },
-  { id: 'W9', key: 'observe', label: '可观测', desc: '实时日志与账本' },
-  { id: 'W10', key: 'io', label: '导入导出', desc: '备份与还原' },
-  { id: 'W11', key: 'scope', label: '作用域', desc: '会话 / 预设 / 全局' },
-  { id: 'W12', key: 'diag', label: '诊断', desc: '一键体检' },
-]
+    /** 免密源（内置常量，无需联网即可展示） */
+    const KEYLESS = [
+      { id: 'kilo', label: 'Kilo 免费池', note: '382 模型 / 11 免费' },
+      { id: 'ovh', label: 'OVH 免费视觉', note: '4 模型（含视觉）' },
+      { id: 'pollinations', label: 'Pollinations', note: '纯文本，最快' },
+    ]
 
-/** 客户端入口：注册设置分节 */
-export function apply(ctx) {
-  const slots = ctx?.slots
-  if (!slots?.inject) return
-  slots.inject('settings.section', () => ({
-    id: `${NAME}-section`,
-    name: `${NAME}-section`,
-    label: '免费模型',
-    order: 200,
-    render: renderWorkbench,
-  }))
-}
+    const styles = {
+      root: { padding: '16px', fontFamily: 'inherit', fontSize: '13px', lineHeight: '1.6' },
+      h2: { fontSize: '15px', fontWeight: 600, margin: '0 0 4px' },
+      sub: { opacity: 0.65, margin: '0 0 16px', fontSize: '12px' },
+      grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '8px', marginBottom: '20px' },
+      card: { border: '1px solid rgba(128,128,128,0.25)', borderRadius: '6px', padding: '10px' },
+      cardTitle: { fontWeight: 600, marginBottom: '2px' },
+      cardDesc: { opacity: 0.65, fontSize: '11px' },
+      row: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid rgba(128,128,128,0.12)' },
+      tag: { display: 'inline-block', padding: '0 6px', borderRadius: '4px', background: 'rgba(64,160,96,0.15)', color: '#2e8b57', fontSize: '11px' },
+      hint: { marginTop: '12px', padding: '8px', borderRadius: '6px', background: 'rgba(128,128,128,0.08)', fontSize: '11px', opacity: 0.8 },
+    }
 
-/**
- * 渲染工作台（纯字符串拼装，不依赖任何 UI 库）。
- * 宿主若提供 h() 则用之；否则返回结构描述由宿主渲染。
- */
-export function renderWorkbench(state = {}) {
-  return {
-    title: '免费模型工作台',
-    version,
-    zones: ZONES.map((z) => ({ ...z, body: zoneBody(z.key, state) })),
-  }
-}
+    /** 设置页组件 */
+    function CsMyfreeSection() {
+      return h('div', { style: styles.root },
+        h('div', { style: styles.h2 }, '免费模型 · cs-myfree'),
+        h('div', { style: styles.sub }, 'v1.0.2 · 零第三方依赖 · 装完即用（3 个免密源无需账号）'),
 
-function zoneBody(key, s) {
-  switch (key) {
-    case 'sources':
-      return {
-        rows: (s.sources ?? []).map((x) => ({ label: x.label, kind: x.kind, status: x.status ?? 'unknown' })),
-        empty: '尚未探测到任何源',
+        h('div', { style: { ...styles.cardTitle, marginBottom: '8px' } }, '免密源（无需登录）'),
+        h('div', { style: styles.grid },
+          KEYLESS.map((s) => h('div', { key: s.id, style: styles.card },
+            h('div', { style: styles.cardTitle }, s.label),
+            h('div', { style: styles.cardDesc }, s.note),
+          )),
+        ),
+
+        h('div', { style: { ...styles.cardTitle, marginBottom: '8px' } }, '工作台功能区'),
+        h('div', { style: styles.grid },
+          ZONES.map((z) => h('div', { key: z.id, style: styles.card },
+            h('div', { style: styles.cardTitle }, `${z.id} ${z.label}`),
+            h('div', { style: styles.cardDesc }, z.desc),
+          )),
+        ),
+
+        h('div', { style: { ...styles.cardTitle, marginBottom: '6px' } }, '内置能力'),
+        h('div', null,
+          [
+            ['降级链', '6 层：重试→换号→换渠道→换模型→降档→上报'],
+            ['提交点', 'reasoning 不算提交，「想很久才撞墙」可静默切换'],
+            ['链覆盖层', '钉选 / 替换 / 增删 / 排序（唯一 merge 入口）'],
+            ['渠道层', '18 个账号渠道 + 3 个免密源'],
+            ['本地网关', 'OpenAI / Anthropic 原生 / Gemini 四方言'],
+            ['付费闸门', '五道全实现，deny-by-default'],
+            ['省 Token', 'RTK 压缩（错误结果永不压缩）'],
+            ['识别', '识图四档位，默认不出网'],
+          ].map(([k, v]) => h('div', { key: k, style: styles.row },
+            h('span', { style: { fontWeight: 500 } }, k),
+            h('span', { style: { opacity: 0.75, textAlign: 'right', marginLeft: '12px' } }, v),
+          )),
+        ),
+
+        h('div', { style: styles.hint },
+          '提示：本版为只读展示。完整交互（链编辑、额度刷新、诊断）在后续版本接入宿主 API 后开放。',
+        ),
+      )
+    }
+
+    /** 必需服务：slot 注册表 */
+    const inject = ['slots']
+
+    /**
+     * 客户端入口。
+     * ⚠️ 绝不让异常外泄 —— 客户端抛错会导致整个设置页白屏。
+     */
+    function apply(ctx) {
+      try {
+        if (!ctx || !ctx.slots || typeof ctx.slots.inject !== 'function') return
+        ctx.slots.inject('settings.section', () => ctx.slots.register({
+          name: 'settings.section',
+          id: 'cs-myfree',
+          order: 200,
+          label: () => '免费模型',
+        }, CsMyfreeSection))
+      } catch (err) {
+        // 静默降级：不渲染也不影响其它设置页
+        try { console.warn('[cs-myfree] 设置分节注册失败：', err && err.message) } catch {}
       }
-    case 'catalog':
-      return { searchable: true, rows: (s.models ?? []).map((m) => ({ id: m.id, free: m.free, vision: m.supportsVision })) }
-    case 'chain':
-      return {
-        editable: true,
-        hint: '用 ↑↓ 调整顺序（不用拖拽：一处错字会让整条链不可解析）',
-        tiers: s.chainTiers ?? [],
-        overrides: s.chainOverrides ?? [],
-      }
-    case 'pin':
-      return { current: s.currentModel ?? null, options: s.pinOptions ?? [] }
-    case 'health':
-      return { rows: (s.health ?? []).map((h) => ({ provider: h.provider, ready: h.ready, cooling: h.cooling, expired: h.expired, balance: h.balance })), expiring: s.expiring ?? [] }
-    case 'policy':
-      return { fields: [{ key: 'concurrency', label: '并发上限' }, { key: 'cooldownMs', label: '冷却时长' }, { key: 'maxRetries', label: '单源重试' }], values: s.policy ?? {} }
-    case 'budget':
-      return {
-        gates: [
-          { id: '①', label: '付费不得自动调用', value: s.paid?.allowAutoCall === true },
-          { id: '②', label: '逐次人工确认', value: s.paid?.confirmEachTurn === true },
-          { id: '③', label: '仅白名单预设可用', value: (s.paid?.presets ?? []).join(', ') || '未配置' },
-          { id: '④', label: '单次限额', value: `¥${s.budget?.perCallCNY ?? 0}` },
-          { id: '⑤', label: '月度限额', value: `¥${s.budget?.monthlyCNY ?? 0}` },
-        ],
-        spent: { today: s.spent?.today ?? 0, month: s.spent?.month ?? 0 },
-      }
-    case 'saver':
-      return { enabled: s.saver?.enabled ?? true, stats: s.saver?.stats ?? { calls: 0, savedPercent: 0 } }
-    case 'observe':
-      return { logs: (s.logs ?? []).slice(-200), ledger: s.ledger ?? [] }
-    case 'io':
-      return { exports: ['配置（不含密钥）', '链覆盖层', '账本'], importsRequiresPreview: true }
-    case 'scope':
-      return { scopes: ['session', 'preset', 'global'], current: s.scope ?? 'session' }
-    case 'diag':
-      return { checks: s.diagnostics ?? [], runnable: true }
-    default:
-      return {}
-  }
-}
+    }
 
-/** 供宿主/测试调用的自检：12 区是否齐全 */
-export function selfCheck() {
-  const ids = ZONES.map((z) => z.id)
-  const expected = Array.from({ length: 12 }, (_, i) => `W${i + 1}`)
-  return {
-    ok: ids.length === 12 && expected.every((e) => ids.includes(e)),
-    count: ids.length,
-    missing: expected.filter((e) => !ids.includes(e)),
-  }
-}
+    exports.apply = apply
+    exports.inject = inject
+    exports.ZONES = ZONES
+    return module.exports
+  },
+})
