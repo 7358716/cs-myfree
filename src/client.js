@@ -61,6 +61,64 @@ window.__ModuleLoader__.load({
       hint: { marginTop: '12px', padding: '8px', borderRadius: '6px', background: 'rgba(128,128,128,0.08)', fontSize: '11px', opacity: 0.8 },
     }
 
+    // ── 左下角实时余额 chip（仿本机 myfree：sidebar.footer.action 槽位）──
+    const CASH_PATH = '/cs-myfree/cash'
+
+    function CashChip() {
+      const [cash, setCash] = react.useState(null)
+      const [tick, setTick] = react.useState(0)
+
+      react.useEffect(() => {
+        let alive = true
+        const load = () => {
+          try {
+            fetch(CASH_PATH, { credentials: 'same-origin' })
+              .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+              .then((d) => { if (alive) setCash(d) })
+              .catch(() => { if (alive) setCash((prev) => prev || { ok: false, errors: ['查询失败'] }) })
+          } catch (_) { /* ignore */ }
+        }
+        load()
+        const timer = setInterval(load, 60000)
+        return () => { alive = false; clearInterval(timer) }
+      }, [tick])
+
+      const ds = cash && cash.deepseek
+      const text = ds && Array.isArray(ds.balances) && ds.balances.length > 0
+        ? ds.balances.map((b) => (b.currency === 'CNY' ? '¥' : b.currency + ' ') + Number(b.total).toFixed(2)).join(' ')
+        : '¥ \u2014'
+      const available = ds && ds.available
+      const color = available ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-secondary)'
+      const tip = cash == null
+        ? '正在查询 DeepSeek 余额…'
+        : (available ? 'DeepSeek 余额可用' : '余额未知 / 未配置 Key')
+          + '（每 60 秒刷新，点击立即刷新）'
+          + (cash && cash.errors && cash.errors.length ? ' | ' + cash.errors[0] : '')
+
+      return h('span', {
+        title: tip,
+        style: {
+          cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          height: 28,
+          padding: '0 8px',
+          marginRight: 2,
+          borderRadius: 6,
+          fontSize: 13,
+          lineHeight: '28px',
+          fontWeight: 600,
+          color,
+          whiteSpace: 'nowrap',
+        },
+        onClick: () => setTick((n) => n + 1),
+      },
+        h('span', { style: { fontSize: 13, opacity: 0.85 } }, '¥'),
+        h('span', { style: { fontSize: 13 } }, text.replace(/^¥\s?/, '')),
+      )
+    }
+
     /** 设置页组件 */
     function CsMyfreeSection() {
       return h('div', { style: styles.root },
@@ -126,11 +184,23 @@ window.__ModuleLoader__.load({
         // 静默降级：不渲染也不影响其它设置页
         try { console.warn('[cs-myfree] 设置分节注册失败：', err && err.message) } catch {}
       }
+      // 左下角余额 chip（宿主没有该槽位时静默跳过 —— 不同版本槽位名可能不同）
+      try {
+        ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+          name: 'sidebar.footer.action',
+          id: 'cs-myfree-cash',
+          order: 40,
+          label: () => '余额',
+        }, CashChip))
+      } catch (err) {
+        try { console.warn('[cs-myfree] 余额 chip 槽位不可用（不影响其它功能）：', err && err.message) } catch {}
+      }
     }
 
     exports.apply = apply
     exports.inject = inject
     exports.ZONES = ZONES
+    exports.CashChip = CashChip
     return module.exports
   },
 })

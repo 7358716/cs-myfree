@@ -137,3 +137,57 @@ test('导出的 ZONES 必须是 12 个（主管要求的 12 区）', () => {
   const ids = mod.ZONES.map((z) => z.id)
   for (let i = 1; i <= 12; i++) assert.ok(ids.includes('W' + i), '缺少 W' + i)
 })
+
+test('apply 同时注册设置页与余额 chip（两个槽位）', () => {
+  const { decl } = loadClient('src/client.js')
+  const mod = decl.factory((id) => {
+    if (id === 'react') return fakeReact
+    throw new Error('unexpected ' + id)
+  })
+  const slots = []
+  const ctx = {
+    slots: {
+      inject: (name, f) => { f() },
+      register: (desc, C) => { slots.push({ desc, C }); return () => {} },
+    },
+  }
+  mod.apply(ctx)
+  const names = slots.map((s) => s.desc.name)
+  assert.ok(names.includes('settings.section'), '必须有设置页')
+  assert.ok(names.includes('sidebar.footer.action'), '必须有余额 chip')
+})
+
+test('余额 chip 的 id 与 order 正确', () => {
+  const { decl } = loadClient('src/client.js')
+  const mod = decl.factory((id) => (id === 'react' ? fakeReact : null))
+  const slots = []
+  mod.apply({
+    slots: { inject: (n, f) => f(), register: (d, C) => { slots.push(d); return () => {} } },
+  })
+  const chip = slots.find((d) => d.name === 'sidebar.footer.action')
+  assert.equal(chip.id, 'cs-myfree-cash')
+  assert.equal(chip.order, 40)
+})
+
+test('CashChip 组件已导出', () => {
+  const { decl } = loadClient('src/client.js')
+  const mod = decl.factory((id) => (id === 'react' ? fakeReact : null))
+  assert.equal(typeof mod.CashChip, 'function')
+})
+
+test('无 sidebar.footer.action 槽位时不影响设置页', () => {
+  const { decl } = loadClient('src/client.js')
+  const mod = decl.factory((id) => (id === 'react' ? fakeReact : null))
+  let settingsRegistered = 0
+  const ctx = {
+    slots: {
+      inject: (name, f) => {
+        if (name === 'sidebar.footer.action') throw new Error('slot not found')
+        f()
+      },
+      register: (d) => { if (d.name === 'settings.section') settingsRegistered++; return () => {} },
+    },
+  }
+  assert.doesNotThrow(() => mod.apply(ctx))
+  assert.equal(settingsRegistered, 1, '设置页仍应注册成功')
+})
