@@ -14,6 +14,8 @@ import vm from 'node:vm'
 const fakeReact = {
   createElement: (type, props, ...children) => ({ type, props, children }),
   Fragment: 'Fragment',
+  useState: (init) => [init, () => {}],
+  useEffect: () => {},
 }
 
 /** 执行 client.js，返回被 ModuleLoader 收到的声明 */
@@ -190,4 +192,55 @@ test('无 sidebar.footer.action 槽位时不影响设置页', () => {
   }
   assert.doesNotThrow(() => mod.apply(ctx))
   assert.equal(settingsRegistered, 1, '设置页仍应注册成功')
+})
+
+/** 深度遍历构造出来的元素树，收集所有 element.type */
+function collectTypes(node, out = []) {
+  if (!node || typeof node !== 'object') return out
+  if (node.type) out.push(node.type)
+  const kids = node.children
+  if (Array.isArray(kids)) for (const k of kids) {
+    if (Array.isArray(k)) for (const kk of k) collectTypes(kk, out)
+    else collectTypes(k, out)
+  }
+  return out
+}
+
+test('设置页必须包含余额卡片（不能被漏掉）', () => {
+  const { decl } = loadClient('src/client.js')
+  const mod = decl.factory((id) => (id === 'react' ? fakeReact : null))
+  let Section = null
+  mod.apply({
+    slots: { inject: (n, f) => f(), register: (d, C) => { if (d.name === 'settings.section') Section = C; return () => {} } },
+  })
+  assert.ok(Section, '设置页组件必须注册')
+  const tree = Section()
+  const types = collectTypes(tree)
+  assert.ok(types.includes(mod.CashCard), '设置页必须渲染 CashCard 元素')
+})
+
+test('CashCard 自身能渲染出「DeepSeek 账户余额」', () => {
+  const { decl } = loadClient('src/client.js')
+  const mod = decl.factory((id) => (id === 'react' ? fakeReact : null))
+  // 只验证组件骨架包含该文案：用假 hooks 让 useEffect 不执行副作用
+  const realUseState = fakeReact.useState
+  const realUseEffect = fakeReact.useEffect
+  fakeReact.useState = (init) => [init, () => {}]
+  fakeReact.useEffect = () => {}
+  try {
+    const tree = mod.CashCard()
+    const json = JSON.stringify(tree, (k, v) => (typeof v === 'function' ? '[fn]' : v))
+    assert.ok(json.includes('DeepSeek 账户余额'), '卡片必须显示标题')
+  } finally {
+    fakeReact.useState = realUseState
+    fakeReact.useEffect = realUseEffect
+  }
+})
+
+test('余额卡片与 chip 都导出了', () => {
+  const { decl } = loadClient('src/client.js')
+  const mod = decl.factory((id) => (id === 'react' ? fakeReact : null))
+  assert.equal(typeof mod.CashCard, 'function')
+  assert.equal(typeof mod.CashChip, 'function')
+  assert.equal(typeof mod.CsMyfreeSection, 'function')
 })

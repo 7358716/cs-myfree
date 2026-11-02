@@ -48,34 +48,46 @@ export function hasAuthCookie(req) {
 
 /**
  * 判定一个请求是否放行。
+ *
+ * 🔑 核心判据（本机踩过的坑）：
+ *    DSH 常被 nginx 反代到公网。此时 `remoteAddress` 是 **127.0.0.1**（nginx 自己），
+ *    而 `Host` 是**公网域名/IP** —— 于是「必须是 localhost」的判据会把**所有正常请求**
+ *    都挡成 403（本插件 v1.0.3 的实际故障）。
+ *
+ * 正确判据（按强度递增）：
+ *   ① **Origin 同源**（防 CSRF）—— 带了 Origin 就必须与 Host 一致
+ *   ② **直连本地**（回环 + localhost）→ 放行
+ *   ③ **其余一律要求登录 cookie**（内核发的 `dsh-auth-*`）
+ *      —— cookie 只发给已登录浏览器，攻击者伪造不了
+ *
  * @returns {{ok:boolean, reason?:string}}
  */
 export function judge(req, { trustedHosts = [] } = {}) {
-  const addr = req?.socket && req.socket.remoteAddress
-
-  // ① 非回环 ⇒ 必须「可信 Host + 已登录」
-  if (!isLoopbackAddr(addr)) {
-    const host = req?.headers && req.headers.host
-    if (!(isTrustedHostHeader(host, trustedHosts) && hasAuthCookie(req))) {
-      return { ok: false, reason: 'external-without-auth' }
-    }
-  }
-
-  // ② Host 校验（回环来源也要校验，防 DNS rebinding）
   const hostHeader = req?.headers && req.headers.host
-  if (!isLocalHostHeader(hostHeader) && !isTrustedHostHeader(hostHeader, trustedHosts)) {
-    return { ok: false, reason: 'unexpected-host' }
-  }
-
-  // ③ Origin 同源（防 CSRF）
   const origin = req?.headers && req.headers.origin
+
+  // ① Origin 同源（防 CSRF）—— 放在最前，命中即拒
   if (typeof origin === 'string' && origin !== '') {
     let originHost = null
     try { originHost = new URL(origin).host } catch { originHost = null }
     if (originHost !== hostHeader) return { ok: false, reason: 'cross-origin' }
   }
 
-  return { ok: true }
+  const addr = req?.socket && req.socket.remoteAddress
+
+  // ② 直连本地（不经代理）→ 放行
+  if (isLoopbackAddr(addr) && isLocalHostHeader(hostHeader)) {
+    return { ok: true }
+  }
+
+  // ③ 其余：必须有登录 cookie（这是真正的门禁）
+  if (hasAuthCookie(req)) return { ok: true }
+
+  // ④ 没 cookie：仅在「显式可信 Host + 回环」时才给出明确原因，便于排查
+  if (isLoopbackAddr(addr) && isTrustedHostHeader(hostHeader, trustedHosts)) {
+    return { ok: false, reason: 'trusted-host-without-auth-cookie' }
+  }
+  return { ok: false, reason: isLoopbackAddr(addr) ? 'proxied-without-auth-cookie' : 'external-without-auth' }
 }
 
 /** 统一 JSON 响应（带 no-store，防缓存泄漏） */
