@@ -19,6 +19,7 @@ import { shouldEgress, MODE } from './vision/bridge.js'
 import { fuseResults, toHostSources } from './search/fuse.js'
 import { PARSERS } from './search/sources.js'
 import { readJson, atomicWrite, withDefaults, DEFAULTS } from './config/store.js'
+import { guardApply, makeLogger, safeInject, safeEffect, safeRegisterAdapter, safeRegisterSearch, detectHostVersion } from './compat.js'
 
 const NAME = 'cs-myfree'
 const VERSION = '0.2.0'
@@ -73,50 +74,68 @@ export async function* parseSse(body, now = () => Date.now()) {
   }
 }
 
-/** 插件入口 */
-export function apply(ctx, rawConfig = {}) {
-  const log = (m) => ctx.logger?.info?.(m)
-  const warn = (m) => ctx.logger?.warn?.(m)
-  const cfg = withDefaults(rawConfig)
+/**
+ * 插件入口（**经 guardApply 包装：任何异常都不会弄坏宿主启动**）
+ *
+ * 教训：DSH 在插件加载抛错时会报 `N entry did not activate`
+ * 并落进恢复模式自动禁用插件 —— 用户表现为「重启就起不来」。
+ * 所以这里所有宿主 API 都走 compat 层的安全调用。
+ */
+export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
+  const log = makeLogger(ctx, NAME)
+  const hostVer = detectHostVersion(ctx)
+  log.info(`v${VERSION} 启动（宿主 ${hostVer ?? '版本未知'}）`)
 
-  // ── 组装 adapter ──
-  const send = cfg.transportBaseUrl
-    ? createFetchTransport({ baseUrl: cfg.transportBaseUrl, headers: cfg.transportHeaders ?? {} })
-    : async () => { throw new Error('尚未配置传输层（transportBaseUrl）') }
+  let cfg
+  try { cfg = withDefaults(rawConfig ?? {}) }
+  catch { cfg = withDefaults({}); log.warn('配置解析失败，已用默认值') }
 
-  const adapter = createAdapter({
-    builtin: cfg.chainBase ?? DEFAULT_CANDIDATES,
-    overrides: cfg.chain?.overrides ?? [],
-    send,
-    budget: cfg.budgetTurns ?? {},
-    onEvent: (e) => ctx.logger?.debug?.(`[${NAME}] ${e.type}`, e),
-  })
+  // 传输层：没配就给出「不可用」的明确错误，而不是静默失败
+  let send
+  try {
+    send = cfg.transportBaseUrl
+      ? createFetchTransport({ baseUrl: cfg.transportBaseUrl, headers: cfg.transportHeaders ?? {} })
+      : async () => { throw new Error('尚未配置传输层（transportBaseUrl）') }
+  } catch (err) {
+    log.warn(`传输层初始化失败：${err?.message ?? err}`)
+    send = async () => { throw new Error('传输层不可用') }
+  }
 
-  // ── 注册到宿主（唯一入口）──
-  ctx.inject(['llm'], (scoped) => {
-    if (typeof scoped.llm?.registerAdapter === 'function') {
-      scoped.effect(
-        () => scoped.llm.registerAdapter('cs-myfree', adapter),
-        `${NAME}: adapter`,
-      )
-      log(`[${NAME}] adapter 已注册（${adapter.describe().chain.length} 条候选）`)
-    } else {
-      warn(`[${NAME}] 宿主无 registerAdapter，降级为仅内建能力`)
-    }
-  })
+  let adapter
+  try {
+    adapter = createAdapter({
+      builtin: cfg.chainBase ?? DEFAULT_CANDIDATES,
+      overrides: cfg.chain?.overrides ?? [],
+      send,
+      budget: cfg.budgetTurns ?? {},
+      onEvent: (e) => log.debug(`${e.type}`, e),
+    })
+  } catch (err) {
+    log.error(`adapter 创建失败（跳过注册）：${err?.message ?? err}`)
+  }
 
-  // ── 搜索 provider（可选，缺 web 服务不影响其他功能）──
-  ctx.inject(['web'], (scoped) => {
-    if (typeof scoped.web?.registerSearchProvider !== 'function') return
-    scoped.effect(
-      () => scoped.web.registerSearchProvider(buildSearchProvider(cfg)),
-      `${NAME}: search`,
-    )
-    log(`[${NAME}] 搜索 provider 已注册`)
-  })
+  // ── 注册到宿主（全部走安全调用）──
+  if (adapter) {
+    const ok = safeInject(ctx, ['llm'], (scoped) => {
+      const registered = safeRegisterAdapter(scoped?.llm, 'cs-myfree', adapter)
+      if (registered) log.info(`adapter 已注册（${adapter.describe().chain.length} 条候选）`)
+      else log.warn('宿主无 registerAdapter：adapter 未注册（降级为仅内建能力）')
+    }, `${NAME}: llm`)
+    if (!ok) log.warn('宿主无 inject：跳过 llm 注册')
+  }
 
-  log(`[${NAME}] v${VERSION} 已加载`)
-}
+  // ── 搜索 provider（可选）──
+  const searchOk = safeInject(ctx, ['web'], (scoped) => {
+    let provider
+    try { provider = buildSearchProvider(cfg) }
+    catch (err) { log.warn(`搜索 provider 构造失败：${err?.message ?? err}`); return }
+    if (safeRegisterSearch(scoped?.web, provider)) log.info('搜索 provider 已注册')
+    else log.warn('宿主无 registerSearchProvider：搜索未注册')
+  }, `${NAME}: web`)
+  if (!searchOk) log.debug('宿主无 inject：跳过搜索注册')
+
+  log.info('启动完成')
+}, NAME)
 
 /** 构造搜索 provider（供宿主调用） */
 export function buildSearchProvider(cfg = DEFAULTS, deps = {}) {

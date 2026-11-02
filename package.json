@@ -1,6 +1,6 @@
 {
   "name": "cs-myfree",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "cs-myfree — 免费模型提供方：供给 / 降级链 / 渠道层 / 搜索 / 识图 / 费用闸门 / 模型工作台",
   "main": "src/index.js",
@@ -19,8 +19,11 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
-    "client": {
-      "platform": "web"
+    "compat": {
+      "tested": [
+        ">=0.2.1-rc.2"
+      ],
+      "note": "宿主 <0.2.1 时客户端界面自动不加载"
     }
   },
   "license": "MIT",
