@@ -24,5 +24,9 @@
       "platform": "web"
     }
   },
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "test:static": "bash test/ci-static.sh"
+  }
 }
