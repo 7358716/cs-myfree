@@ -160,4 +160,29 @@ export function buildSearchProvider(cfg = DEFAULTS, deps = {}) {
   }
 }
 
-export { createAdapter, providerRetryPolicy, evaluate, DECISION, shouldEgress, MODE, keylessSources, SOURCES, buildOrder, readJson, atomicWrite }
+// ── 对外导出（供宿主/命令行/UI 使用；彼此无隐式依赖）──
+export { createAdapter, providerRetryPolicy, evaluate, DECISION, shouldEgress, MODE,
+  keylessSources, SOURCES, buildOrder, readJson, atomicWrite }
+
+
+// ── 供给层 ──
+export * as keyless from './pools/keyless/index.js'
+export * as channels from './pools/channels/protocols.js'
+export { buildAuthHeaders, joinUrl, streamChat as channelStream } from './pools/channels/driver.js'
+export { createPool, STATE as ACCOUNT_STATE } from './pools/channels/pool.js'
+export { isDue as checkinDue, summarize as checkinSummary, nextRunAt } from './pools/channels/checkin.js'
+export { planRefresh, auditCredentials } from './pools/channels/refresh.js'
+export { rankCandidates, buildAggregatePanel, EXPIRY_CAPABLE } from './pools/aggregate.js'
+
+// ── 网关 ──
+export { createGateway, DEFAULT_PORT, MAX_BODY_BYTES } from './gateway/server.js'
+export { createAuthorizer, generateKey, safeEqual, validateListenHost } from './gateway/auth.js'
+export * as formats from './gateway/formats.js'
+
+// ── 省 Token / 运维 / 账本 ──
+export { compressToolOutput, createSavingsTracker } from './saver/rtk.js'
+export { verifySignature, planAtomicReplace, planRollback, rollbackResult } from './ops/updater.js'
+export { check as checkAction, ACTION, VERDICT, DEFAULT_POLICY } from './ops/trust.js'
+export { buildBackup, validateBackup, diffImport } from './ops/backup.js'
+export { createFeedStore, planReload, RELOAD_SCOPE } from './ops/feed.js'
+export { makeRecord, aggregate as aggregateLedger, spentToday, spentThisMonth, failureBreakdown, dateKeyCN } from './audit/ledger.js'
