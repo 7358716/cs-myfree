@@ -15,6 +15,8 @@ import { startDevice, pollDevice } from './device.js'
 import { startPaste } from './paste.js'
 import { startQr, pollQr } from './qr.js'
 import { startCodearts, pollCodearts } from './codearts.js'
+import { startBuddy, pollBuddy } from './buddy.js'
+import { startWorkbuddy, pollWorkbuddy } from './workbuddy.js'
 import { startLoomy, pollLoomy } from './loomy.js'
 
 export const FLOW_TYPE = Object.freeze({
@@ -41,8 +43,24 @@ export const FLOW_MAP = Object.freeze({
     loginNote: '华为 ticket 兑换：浏览器登录后自动完成（也支持 AK/SK 一步）',
   },
   // ── 浏览器回调 OAuth（端点待逐个取证）──
-  buddy: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: '腾讯 CodeBuddy：端点待取证' },
-  workbuddy: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'WorkBuddy 国际：端点待取证' },
+  // buddy / workbuddy：external-link-v2 **轮询式**（没有 redirect_uri/code 交换；
+  // authUrl 由 POST /v2/plugin/auth/state 现场下发，poll 用厂商 state 轮询 token）。
+  // 端点已真机对拍（auth/state 200、token 轮询 code=11217），完整 token 交换
+  // 需用户浏览器实际登录后验证 ⇒ loginVerified 暂保持 false。
+  buddy: {
+    type: FLOW_TYPE.BROWSER,
+    start: startBuddy,
+    poll: pollBuddy,
+    loginVerified: false,
+    loginNote: '腾讯 CodeBuddy：轮询式登录，端点已真机对拍；完整 token 交换待用户浏览器登录验证',
+  },
+  workbuddy: {
+    type: FLOW_TYPE.BROWSER,
+    start: startWorkbuddy,
+    poll: pollWorkbuddy,
+    loginVerified: false,
+    loginNote: 'WorkBuddy 国际：轮询式登录，端点已真机对拍；完整 token 交换待用户浏览器登录验证',
+  },
   trae: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'TRAE 字节：端点待取证' },
   accio: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'Accio 阿里：端点待取证' },
   gemini: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'Gemini Code Assist：本机网络不可达' },
