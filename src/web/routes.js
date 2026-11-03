@@ -25,6 +25,7 @@ import { queryCash, CASH_PATH } from './cash.js'
 import { judge, sendJson } from './guard.js'
 import { withDefaults, DEFAULTS } from '../config/store.js'
 import { planReload, RELOAD_SCOPE } from '../ops/feed.js'
+import { collectLedger } from '../audit/sources.js'
 
 export const PREFIX = '/cs-myfree'
 
@@ -266,10 +267,10 @@ export function registerRoutes(webServer, opts = {}) {
     }
   })
 
-  // ── 账本 ──
+  // ── 账本（**真实数据**：读 spend.jsonl + token-ledger.json）──
   route('/ledger', async () => {
     try {
-      const data = typeof ledger === 'function' ? await ledger() : (ledger ?? { records: [], summary: [] })
+      const data = await collectLedger({ dshHome: opts.dshHome })
       return { ok: true, at: now(), ...data }
     } catch (err) {
       return { ok: false, error: String(err?.message ?? err).slice(0, 200) }

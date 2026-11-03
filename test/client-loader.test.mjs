@@ -16,6 +16,11 @@ const fakeReact = {
   Fragment: 'Fragment',
   useState: (init) => [init, () => {}],
   useEffect: () => {},
+  // ErrorBoundary 需要继承 Component
+  Component: class {
+    constructor(props) { this.props = props || {}; this.state = {} }
+    setState(s) { this.state = Object.assign({}, this.state, typeof s === 'function' ? s(this.state) : s) }
+  },
 }
 
 /** 执行 client.js，返回被 ModuleLoader 收到的声明 */
@@ -243,4 +248,44 @@ test('余额卡片与 chip 都导出了', () => {
   assert.equal(typeof mod.CashCard, 'function')
   assert.equal(typeof mod.CashChip, 'function')
   assert.equal(typeof mod.MyfreeSection, 'function')
+})
+
+// ── 白屏防护（v1.1.0 实际故障）──
+test('🔴 所有 style 必须是对象，不能是字符串（否则 React 崩溃白屏）', () => {
+  const src = readFileSync('src/client.js', 'utf8')
+  // 抓 `style: S.xxx + ''` 这类写法
+  const bad = src.match(/style:\s*S\.\w+\s*\+\s*''/g)
+  assert.equal(bad, null, '存在 style 字符串写法：' + JSON.stringify(bad))
+})
+
+test('🔴 不允许把样式属性写在 props 顶层（marginTop 等）', () => {
+  const src = readFileSync('src/client.js', 'utf8')
+  const bad = src.match(/style:\s*S\.\w+\([^)]*\),\s*(marginTop|marginBottom|padding|width|height)/g)
+  assert.equal(bad, null, '存在顶层样式 prop：' + JSON.stringify(bad))
+})
+
+test('存在 ErrorBoundary 且主视图被包裹（防整页白屏）', () => {
+  const { decl } = loadClient('src/client.js')
+  const mod = decl.factory((id) => (id === 'react' ? fakeReact : null))
+  assert.equal(typeof mod.ErrorBoundary, 'function', '必须导出 ErrorBoundary')
+  assert.equal(typeof mod.Safe, 'function', '必须导出 Safe 包装器')
+})
+
+test('ErrorBoundary 渲染出错时显示错误信息而非抛穿', () => {
+  const { decl } = loadClient('src/client.js')
+  const mod = decl.factory((id) => (id === 'react' ? fakeReact : null))
+  const EB = mod.ErrorBoundary
+  // 伪造实例：直接调 getDerivedStateFromError + render
+  const state = EB.getDerivedStateFromError(new Error('boom'))
+  assert.equal(state.error.message, 'boom')
+  const inst = { state, props: { children: 'x' } }
+  const tree = EB.prototype.render.call(inst)
+  const json = JSON.stringify(tree, (k, v) => (typeof v === 'function' ? '[fn]' : v))
+  assert.ok(json.includes('渲染失败'), '必须显示友好错误')
+  assert.ok(json.includes('boom'), '必须显示原始错误信息')
+})
+
+test('主设置页必须把当前 Tab 包进 Safe', () => {
+  const src = readFileSync('src/client.js', 'utf8')
+  assert.match(src, /h\(Safe,\s*\{\s*View:\s*View\s*\}\)/, '视图必须被 Safe 包裹')
 })

@@ -158,6 +158,7 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
         state: stateStore,
         ctx,
         version: VERSION,
+        dshHome: cfg.dshHome,
         trustedHosts: cfg.trustedHosts ?? [],
         logger: log,
         getChain: () => (cfg.chainBase ?? DEFAULT_CANDIDATES),

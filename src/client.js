@@ -73,7 +73,19 @@ window.__ModuleLoader__.load({
         let alive = true
         setS((p) => ({ loading: true, data: p.data, error: null }))
         api(path)
-          .then((d) => { if (alive) setS({ loading: false, data: d, error: null }) })
+          .then((d) => {
+            if (!alive) return
+            // 防御：非对象/非预期形状 ⇒ 当错误处理，别让下游 undefined 崩溃
+            if (!d || typeof d !== 'object') {
+              setS({ loading: false, data: null, error: '响应格式异常：' + String(d).slice(0, 80) })
+              return
+            }
+            if (d.ok === false) {
+              setS({ loading: false, data: null, error: d.error || (d.errors || []).join('；') || '接口返回 ok=false' })
+              return
+            }
+            setS({ loading: false, data: d, error: null })
+          })
           .catch((e) => { if (alive) setS({ loading: false, data: null, error: String((e && e.message) || e) }) })
         return () => { alive = false }
       }, (deps || []).concat([tick]))
@@ -94,6 +106,45 @@ window.__ModuleLoader__.load({
       return h('div', { style: S.row },
         h('span', { style: { fontWeight: 500 } }, props.k),
         h('span', { style: Object.assign({ textAlign: 'right', marginLeft: '12px' }, props.dim ? S.dim : null) }, props.v))
+    }
+
+    // ── 错误边界（关键：一个区崩了不能拖垮整页 → 白屏）──
+    // React 的函数组件无法捕获自身渲染错误，必须用类组件做边界。
+    class ErrorBoundary extends react.Component {
+      constructor(props) {
+        super(props)
+        this.state = { error: null }
+      }
+      static getDerivedStateFromError(error) {
+        return { error: error }
+      }
+      componentDidCatch(error, info) {
+        try { console.error('[cs-myfree] 区域渲染失败：', (error && error.message) || error, info) } catch (_) {}
+      }
+      render() {
+        if (this.state.error) {
+          const err = this.state.error
+          return h('div', {
+            style: {
+              border: '1px solid rgba(200,80,80,0.5)', borderRadius: '8px',
+              padding: '12px 14px', background: 'rgba(200,80,80,0.06)',
+            },
+          },
+            h('div', { style: { fontWeight: 600, color: 'var(--dsw-alias-state-error-primary)' } },
+              '这个区域渲染失败了（其它区域不受影响）'),
+            h('div', { style: { marginTop: '6px', fontSize: '11px', fontFamily: 'ui-monospace, monospace', opacity: 0.8 } },
+              String((err && err.message) || err)),
+            h('div', { style: { marginTop: '8px', fontSize: '11px', opacity: 0.65 } },
+              '可以把这段错误发我，我会修。点上面其它标签页仍可使用。'),
+          )
+        }
+        return this.props.children
+      }
+    }
+
+    /** 把任意区域包进边界 */
+    function Safe(props) {
+      return h(ErrorBoundary, null, h(props.View))
     }
 
     // ── 余额卡片 ──
@@ -188,8 +239,8 @@ window.__ModuleLoader__.load({
       if (!s.data) return h(Loading, { on: s.loading })
       const d = s.data
       return h('div', null,
-        h('div', { style: S.dim + '' }, d.note || ''),
-        h('button', { style: S.btn(false), marginTop: 8, onClick: reload }, '刷新'),
+        h('div', { style: S.dim }, d.note || ''),
+        h('button', { style: Object.assign({}, S.btn(false), { marginTop: '8px' }), onClick: reload }, '刷新'),
         h('div', { style: { marginTop: '12px' } }, (d.sources || []).map((x) => h('div', { key: x.id, style: S.card },
           h('div', { style: { fontWeight: 600 } }, x.label),
           h(KV, { k: '默认模型', v: (d.defaultModels || {})[x.id] || '—', dim: true }),
@@ -299,37 +350,101 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ── W6 保护策略 ──
-    function PolicyZone() {
-      const [s] = useApi('/config')
-      if (s.error) return h(Err, { error: s.error })
-      if (!s.data) return h(Loading, { on: s.loading })
-      const c = s.data.config
-      return h('div', null, h('div', { style: S.card },
-        h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '当前策略'),
-        h(KV, { k: '识图档位', v: c.vision && c.vision.mode }),
-        h(KV, { k: '搜索源', v: (c.search && c.search.sources || []).join(', ') }),
-        h(KV, { k: '搜索预算', v: (c.search && c.search.budgetMs) + ' ms' }),
-        h('div', { style: Object.assign({ marginTop: '10px' }, S.dim) },
-          '编辑保护策略（并发/冷却/退避）需对应后端实现，当前版本先只读展示。')))
+    // ── 可编辑配置通用组件 ──
+    function ConfigEditor(props) {
+      const [cfg, setCfg] = react.useState(null)
+      const [msg, setMsg] = react.useState(null)
+      const [busy, setBusy] = react.useState(false)
+      const [tick, setTick] = react.useState(0)
+
+      react.useEffect(() => {
+        api('/config')
+          .then((d) => setCfg((d && d.config) || {}))
+          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+      }, [tick])
+
+      if (!cfg) return h('div', { style: S.dim }, msg ? msg.error : '加载配置…')
+
+      const setPath = (path, v) => setCfg((c) => {
+        const next = JSON.parse(JSON.stringify(c || {}))
+        let cur = next
+        for (let i = 0; i < path.length - 1; i++) { if (!cur[path[i]]) cur[path[i]] = {}; cur = cur[path[i]] }
+        cur[path[path.length - 1]] = v
+        return next
+      })
+      const val = (path) => path.reduce((o, k) => (o == null ? undefined : o[k]), cfg)
+
+      const save = () => {
+        setBusy(true); setMsg(null)
+        api('/config', { method: 'POST', body: JSON.stringify(cfg) })
+          .then((r) => setMsg(r.ok ? { ok: true } : { ok: false, error: r.error || (r.errors || []).join('；') }))
+          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => setBusy(false))
+      }
+
+      return h('div', null,
+        (props.fields || []).map((f) => h('div', { key: f.path.join('.'), style: { marginBottom: '10px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, f.label),
+          f.hint ? h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) }, f.hint) : null,
+          f.type === 'bool'
+            ? h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' } },
+                h('input', { type: 'checkbox', checked: val(f.path) === true, onChange: (e) => setPath(f.path, e.target.checked) }),
+                h('span', { style: S.dim }, val(f.path) === true ? '已开启' : '已关闭'))
+            : f.type === 'number'
+              ? h('input', {
+                  type: 'number', style: Object.assign({}, S.input, { width: '140px' }),
+                  value: val(f.path) == null ? 0 : val(f.path),
+                  onChange: (e) => setPath(f.path, Number(e.target.value)),
+                })
+              : f.type === 'list'
+                ? h('input', {
+                    style: S.input, value: (val(f.path) || []).join(', '),
+                    placeholder: f.placeholder || '逗号分隔',
+                    onChange: (e) => setPath(f.path, String(e.target.value).split(',').map((x) => x.trim()).filter(Boolean)),
+                  })
+                : h('input', {
+                    style: S.input, value: val(f.path) == null ? '' : String(val(f.path)),
+                    onChange: (e) => setPath(f.path, e.target.value),
+                  }))),
+        h('div', { style: { display: 'flex', gap: '8px', marginTop: '12px' } },
+          h('button', { style: S.btn(true), onClick: save, disabled: busy }, busy ? '保存中…' : '保存'),
+          h('button', { style: S.btn(false), onClick: () => { setCfg(null); setMsg(null); setTick((n) => n + 1) } }, '重新加载')),
+        msg ? h('div', { style: Object.assign({ marginTop: '10px' }, S.card, { borderColor: msg.ok ? 'rgba(64,160,96,0.5)' : 'rgba(200,80,80,0.5)' }) },
+          h('div', { style: { fontWeight: 600 } }, msg.ok ? '✅ 已保存' : '❌ 保存失败'),
+          msg.error ? h('div', { style: Object.assign({}, S.dim, S.warn) }, msg.error) : null) : null,
+      )
     }
 
-    // ── W7 预算付费 ──
+    // ── W6 保护策略（可编辑）──
+    function PolicyZone() {
+      return h('div', null,
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '8px' } }, '保护策略'),
+          h(ConfigEditor, { fields: [
+            { path: ['search', 'budgetMs'], label: '搜索总预算 (ms)', type: 'number', hint: '单次搜索最多等多久；超时按已返回的部分结果用' },
+            { path: ['search', 'sources'], label: '搜索源', type: 'list', hint: '逗号分隔。可选：bing-rss, bing-html, sogou, mwmbl' },
+            { path: ['vision', 'mode'], label: '识图档位', type: 'text', hint: 'off（默认不出网）| local | free-cloud | paid-cloud' },
+            { path: ['sources', 'disabled'], label: '禁用源', type: 'list', hint: '逗号分隔的源 id，如 kilo-free' },
+          ] })),
+      )
+    }
+
+    // ── W7 预算付费（可编辑）──
     function BudgetZone() {
-      const [s] = useApi('/config')
-      if (s.error) return h(Err, { error: s.error })
-      if (!s.data) return h(Loading, { on: s.loading })
-      const c = s.data.config
-      const b = c.budget || {}
-      return h('div', null, h('div', { style: S.card },
-        h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '五道闸门'),
-        h(KV, { k: '① 付费不得自动调用', v: c.paid && c.paid.allowAutoCall ? '未开启（会阻断）' : '已开启' }),
-        h(KV, { k: '② 逐次人工确认', v: c.paid && c.paid.confirmEachTurn ? '开启' : '关闭' }),
-        h(KV, { k: '③ 仅白名单预设', v: (c.paid && c.paid.presets || []).join(', ') || '未配置（=禁止付费）' }),
-        h(KV, { k: '④ 单次限额', v: '¥' + (b.perCallCNY ?? 0) }),
-        h(KV, { k: '⑤ 月度限额', v: '¥' + (b.monthlyCNY ?? 0) + '（日 ¥' + (b.dailyCNY ?? 0) + '）' }),
-        h('div', { style: Object.assign({ marginTop: '10px' }, S.dim) },
-          '原则：deny-by-default，价格未知即拒。所有限额为 0 时等同于**禁止付费**。')))
+      return h('div', null,
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '8px' } }, '五道闸门'),
+          h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
+            '原则：deny-by-default，价格未知即拒。限额为 0 等同于**禁止付费**。'),
+          h(ConfigEditor, { fields: [
+            { path: ['paid', 'enabled'], label: '① 启用付费源', type: 'bool', hint: '关 = 付费模型永远不会被调用' },
+            { path: ['paid', 'allowAutoCall'], label: '是否允许自动调用付费', type: 'bool', hint: '关 = 每次都要人工确认' },
+            { path: ['paid', 'confirmEachTurn'], label: '② 逐次人工确认', type: 'bool' },
+            { path: ['budget', 'perCallCNY'], label: '④ 单次限额 (¥)', type: 'number' },
+            { path: ['budget', 'dailyCNY'], label: '⑤ 日限额 (¥)', type: 'number' },
+            { path: ['budget', 'monthlyCNY'], label: '⑤ 月限额 (¥)', type: 'number' },
+          ] })),
+      )
     }
 
     // ── W8 省 Token ──
@@ -343,20 +458,47 @@ window.__ModuleLoader__.load({
         h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) }, '节省统计在「可观测」里看。'))
     }
 
-    // ── W9 可观测 ──
+    // ── W9 可观测（真实账本）──
     function ObserveZone() {
       const [s, reload] = useApi('/ledger')
+      if (s.error) return h('div', null, h(Err, { error: s.error }), h('button', { style: S.btn(false), onClick: reload }, '重试'))
+      if (!s.data) return h(Loading, { on: s.loading })
+      const d = s.data
+      const sum = d.summary || {}
+      const spendDays = (d.spend && d.spend.days) || []
+      const providers = (d.spend && d.spend.providers) || []
+      const tokenDays = (d.token && d.token.days) || []
+
       return h('div', null,
-        h(Err, { error: s.error }),
-        s.data ? h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '用量账本'),
-          h(KV, { k: '记录数', v: (s.data.records || []).length }),
-          h(KV, { k: '今日花费', v: '¥' + Number(s.data.todayCNY || 0).toFixed(4) }),
-          h(KV, { k: '本月花费', v: '¥' + Number(s.data.monthCNY || 0).toFixed(4) }),
-          h(KV, { k: '失明率（UNKNOWN 占比）', v: (s.data.blindRate ?? 0) + '% （目标 <5%）' }),
-          h('div', { style: Object.assign({ marginTop: '10px' }, S.dim) }, '账本由宿主消费侧写入；本页展示聚合视图。'))
-          : h(Loading, { on: s.loading }),
-        h('button', { style: S.btn(false), onClick: reload }, '刷新'))
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '花费汇总'),
+          h(KV, { k: '今日花费', v: '¥' + (sum.todayCNY ?? 0) }),
+          h(KV, { k: '本月花费', v: '¥' + (sum.monthCNY ?? 0) }),
+          h(KV, { k: '今日调用', v: String(sum.todayCalls ?? 0) }),
+          h(KV, { k: '累计调用', v: String(sum.totalCalls ?? 0) }),
+          h(KV, { k: '付费调用', v: String(sum.paidCalls ?? 0) + (sum.costUnknown ? '（' + sum.costUnknown + ' 条价格未知）' : '') }),
+          h(KV, { k: '数据源', v: d.spend && d.spend.ok ? d.spend.file : '未读到 spend.jsonl', dim: true })),
+
+        spendDays.length ? h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '最近调用（按天）'),
+          spendDays.slice(0, 7).map((x) => h('div', { key: x.date, style: S.row },
+            h('span', null, x.date),
+            h('span', { style: S.dim }, x.calls + ' 次  ¥' + x.costCNY + '  in ' + x.in + ' / out ' + x.out)))) : null,
+
+        providers.length ? h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '按渠道'),
+          providers.slice(0, 8).map((x) => h('div', { key: x.provider, style: S.row },
+            h('span', null, x.provider),
+            h('span', { style: S.dim }, x.calls + ' 次  ¥' + x.costCNY)))) : null,
+
+        tokenDays.length ? h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '渠道 Token 账本（最近 5 天）'),
+          tokenDays.slice(0, 5).map((x) => h('div', { key: x.date, style: S.row },
+            h('span', null, x.date),
+            h('span', { style: S.dim }, x.requests + ' 请求  in ' + x.inputTokens + ' / out ' + x.outputTokens + (x.errors ? '  错误 ' + x.errors : ''))))) : null,
+
+        h('button', { style: S.btn(false), onClick: reload }, '刷新'),
+      )
     }
 
     // ── W10 导入导出 ──
@@ -426,7 +568,7 @@ window.__ModuleLoader__.load({
         h('div', { style: S.tabs }, ZONES.map((z) => h('span', {
           key: z.id, style: S.tab(tab === z.key), onClick: () => setTab(z.key), title: z.id,
         }, z.label))),
-        h(View),
+        h(Safe, { View: View }),
       )
     }
 
@@ -492,6 +634,8 @@ window.__ModuleLoader__.load({
     exports.MyfreeSection = MyfreeSection
     exports.CashCard = CashCard
     exports.CashChip = CashChip
+    exports.ErrorBoundary = ErrorBoundary
+    exports.Safe = Safe
     return module.exports
   },
 })
