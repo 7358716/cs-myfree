@@ -21,6 +21,7 @@ import { startMinimax, pollMinimax } from './minimax.js'
 import { startOfficeAce, pollOfficeAce } from './officeace.js'
 import { startTrae, pollTrae } from './trae.js'
 import { startAccio, pollAccio } from './accio.js'
+import { startRaccoon, pollRaccoon } from './raccoon.js'
 import { startBuddy, pollBuddy } from './buddy.js'
 import { startWorkbuddy, pollWorkbuddy } from './workbuddy.js'
 import { startLoomy, pollLoomy } from './loomy.js'
@@ -120,7 +121,10 @@ export const FLOW_MAP = Object.freeze({
     loginVerified: false,
     loginNote: 'Loomy 讯飞：微信扫码；无续期端点，14 天后需重新扫码',
   },
-  raccoon: { type: FLOW_TYPE.QR, loginVerified: false, loginNote: 'Raccoon 商汤：扫码/短信，端点待取证' },
+  raccoon: {
+    type: FLOW_TYPE.QR, start: startRaccoon, poll: pollRaccoon,
+    loginVerified: false, loginNote: 'Raccoon 商汤：微信扫码（端点已对拍，无需验证码），待真机验证',
+  },
   // ── 粘贴 API Key ──
   qiniu: { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: 'Qiniu 七牛：粘贴 API Key' },
   opencode: { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: 'OpenCode：免费层已关闭' },
