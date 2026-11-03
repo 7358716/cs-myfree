@@ -33,7 +33,7 @@ import { streamChat as channelStream } from './pools/channels/driver.js'
 import { CHANNELS } from './pools/channels/protocols.js'
 
 const NAME = 'cs-myfree'
-const VERSION = '1.6.0'
+const VERSION = '1.6.1'
 
 export const name = NAME
 export const version = VERSION
@@ -231,7 +231,18 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
   // ── 已登录渠道的模型（登录后自动出现在模型选择器里）──
   const accountStore = createAccountStore(cfg.dshHome)
   let channelModelCache = {}
-  readCachedModels(cfg.dshHome).then((c) => { channelModelCache = c || {} }).catch(() => {})
+
+  /** 重新从磁盘读模型缓存（登录/刷新后调用，让选择器立刻看到新模型） */
+  const reloadChannelModels = async () => {
+    try {
+      channelModelCache = (await readCachedModels(cfg.dshHome)) || {}
+      const n = channelModelsAsList(channelModelCache).length
+      log.info(`渠道模型缓存已刷新：${n} 个`)
+      return n
+    } catch { return 0 }
+  }
+  // 启动时先同步读一次（异步，但很快）
+  reloadChannelModels().catch(() => {})
 
   const extraModels = () => channelModelsAsList(channelModelCache)
 
@@ -306,6 +317,8 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
         ctx,
         version: VERSION,
         dshHome: cfg.dshHome,
+        reloadChannelModels,   // 登录/刷新后让适配器立刻看到新模型
+        accountStore,
         trustedHosts: cfg.trustedHosts ?? [],
         logger: log,
         getChain: () => defaultChain,   // 🔴 必须与 adapter 实际使用的一致，否则页面显示与实际选路不符

@@ -312,8 +312,9 @@ export function registerRoutes(webServer, opts = {}) {
     if (r.ok) {
       // 🔑 保存成功后**立刻拉取该渠道模型**，让模型选择器马上能看到
       refreshAll(opts.dshHome, accounts, { fetchImpl })
-        .then((res) => {
+        .then(async (res) => {
           const cnt = (res[body.provider]?.models || []).length
+          if (opts.reloadChannelModels) await opts.reloadChannelModels()
           logger.info?.(`渠道 ${body.provider} 模型已刷新：${cnt} 个`)
         })
         .catch(() => {})
@@ -347,6 +348,7 @@ export function registerRoutes(webServer, opts = {}) {
     // POST ⇒ 重新拉取
     try {
       const r = await refreshAll(opts.dshHome, accounts, { fetchImpl })
+      if (opts.reloadChannelModels) await opts.reloadChannelModels()
       const list = channelModelsAsList(r)
       return { ok: true, refreshed: Object.keys(r).length, total: list.length, models: list }
     } catch (err) {
