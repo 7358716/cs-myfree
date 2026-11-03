@@ -693,7 +693,10 @@ export function registerRoutes(webServer, opts = {}) {
     //    账号根本没保存 ⇒ 一测连通就 AUTH。腾讯/讯飞都是这个表现。
     //    修法：credential 一律从 **session** 取（服务端内存，绝不进 HTTP 响应）。
     let masked = r.maskedAccount ?? null
-    const pendingCredential = session?.credential ?? null
+    // 兼容两种来源：状态机把 credential 挂在内部 session 上（主路径）；
+    // 自定义 loginEngine 也可能直接从 poll 返回值给（测试/嵌入场景）。
+    // 两者都只在服务端使用，绝不进 HTTP 响应。
+    const pendingCredential = session?.credential ?? r.credential ?? null
     if ((state === 'ok' || state === 'success') && pendingCredential && session && !session.persisted) {
       try {
         masked = (await persistCredential(session.provider, session, pendingCredential)) ?? masked
