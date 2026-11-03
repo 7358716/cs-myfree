@@ -151,6 +151,8 @@ export async function refreshAll(dshHome, accountStore, opts = {}) {
       at: Date.now(),
       ok: r.ok,
       error: r.error ?? null,
+      // 模型清单来源（remote / builtin / builtin-after-http-error …），UI 要如实展示
+      source: r.source ?? null,
       models: r.models,
       accounts: list.length,
     }
@@ -180,6 +182,8 @@ export function channelModelsAsList(cache = {}) {
         channelId,
         modelId: m.id,
         inputModalities: ['text'],
+        // 该模型来自远端还是内置兜底（UI 如实标注「内置清单」用）
+        source: info.source ?? null,
       })
     }
   }

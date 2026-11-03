@@ -86,8 +86,12 @@ export function captureCredential(raw) {
  *  · 长度 8~4096
  *  · 不含空白
  *  · 不含 URL 特征（:// 或 http 开头或含 .com/.cn 这类域名）
- *  · 字符集限定为 token 常见字符（字母数字 + - _ . ~ + / =）
+ *  · 字符集限定为 token 常见字符（字母数字 + - _ . ~ + / = :）
  *  · 不能是纯自然语言单词（要有数字或符号，或足够长且混合大小写）
+ *
+ * ⚠️ 字符集必须含 `:`：AK/SK 渠道（codearts 等 9 家）的永久授权就是
+ *    `AK:SK` 形态（下游 index.js/catalog.js 也按 `split(':')` 解析）。
+ *    缺了它 = 这些渠道的「AK/SK 一步登录」100% 被拒（P0 缺陷）。
  */
 export function looksLikeCredential(s) {
   const v = String(s ?? '').trim()
@@ -98,10 +102,10 @@ export function looksLikeCredential(s) {
   if (v.includes('://')) return false
   if (/^[a-z0-9.-]+\.(com|cn|net|org|io|sh|ai|dev|app)(\/|$)/i.test(v)) return false
   // 字符集
-  if (!/^[A-Za-z0-9._~+/=-]+$/.test(v)) return false
+  if (!/^[A-Za-z0-9._~+/=:-]+$/.test(v)) return false
   // 纯字母单词（如 password）拒掉；真实 token 通常含数字或符号
   const hasDigit = /[0-9]/.test(v)
-  const hasSymbol = /[._~+/=-]/.test(v)
+  const hasSymbol = /[._~+/=:-]/.test(v)
   const hasUpper = /[A-Z]/.test(v)
   const hasLower = /[a-z]/.test(v)
   if (!hasDigit && !hasSymbol) {
