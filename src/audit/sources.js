@@ -201,36 +201,15 @@ export async function collectLedger({ dshHome, fromMs = 0 } = {}) {
       costUnknown: spend.costUnknown ?? 0,
       lastAt: spend.lastAt ?? null,
     },
-    // 🔴 中断/失败统计（用户要求「页面能看到中断次数与报错」）
-    //    数据来自自有账本：每条 ok:false 的记录都带 code（失败分类）
-    failures: (() => {
-      try {
-        const recs = spend.records ?? []
-        const byCode = new Map()
-        const byProvider = new Map()
-        const recent = []
-        for (const r of recs) {
-          if (r.ok !== false) continue
-          const code = r.code ?? 'UNKNOWN'
-          byCode.set(code, (byCode.get(code) ?? 0) + 1)
-          const pv = r.provider ?? 'unknown'
-          byProvider.set(pv, (byProvider.get(pv) ?? 0) + 1)
-          if (recent.length < 20) recent.push({ at: r.at, provider: pv, model: r.model ?? null, code })
-        }
-        const total = recs.length || 1
-        const failTotal = [...byCode.values()].reduce((a, b) => a + b, 0)
-        return {
-          failTotal,
-          callsTotal: recs.length,
-          failRate: Number(((failTotal / total) * 100).toFixed(1)),
-          byCode: Object.fromEntries([...byCode.entries()].sort((a, b) => b[1] - a[1])),
-          byProvider: Object.fromEntries([...byProvider.entries()].sort((a, b) => b[1] - a[1])),
-          recent: recent.sort((a, b) => (b.at ?? 0) - (a.at ?? 0)),
-        }
-      } catch {
-        return { failTotal: 0, callsTotal: 0, failRate: 0, byCode: {}, byProvider: {}, recent: [] }
-      }
-    })(),
+    // 🔴 中断/失败统计：直接用 readSpend 已聚合的结果（不要在这里重算）
+    failures: spend.failures ?? {
+      failTotal: spend.failed ?? 0,
+      callsTotal: spend.total ?? 0,
+      failRate: 0,
+      byCode: {},
+      byProvider: {},
+      recent: [],
+    },
   }
 }
 

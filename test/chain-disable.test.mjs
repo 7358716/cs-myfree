@@ -110,3 +110,29 @@ test('chainSummary 反映禁用后的真实生效链（页面显示 == 实际选
   assert.equal(providers.includes('kilo'), false)
   assert.ok(providers.includes('ovh'))
 })
+
+// ── 失败统计不能恒 0（真实缺陷回归）──
+test('🔴 collectLedger 的 failures 必须反映真实账本（此前重复计算读不存在的字段 ⇒ 恒 0）', async () => {
+  const { collectLedger } = await import('../src/audit/sources.js')
+  const { mkdtemp, writeFile, mkdir } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const home = await mkdtemp(join(tmpdir(), 'cs-myfree-failstat-'))
+  await mkdir(join(home, 'cs-myfree'), { recursive: true })
+  const lines = [
+    { at: Date.now() - 3000, day: '2026-11-04', provider: 'buddy', model: 'm', in: 0, out: 0, cost: 0, paid: false, ok: true, code: null, ms: 100 },
+    { at: Date.now() - 2000, day: '2026-11-04', provider: 'buddy', model: 'm', in: 0, out: 0, cost: 0, paid: false, ok: false, code: 'AUTH', ms: null },
+    { at: Date.now() - 1000, day: '2026-11-04', provider: 'codearts', model: 'm', in: 5, out: 6, cost: 0, paid: false, ok: false, code: 'TIMEOUT', ms: null },
+  ].map((x) => JSON.stringify(x)).join('\n') + '\n'
+  await writeFile(join(home, 'cs-myfree', 'ledger.jsonl'), lines, { mode: 0o600 })
+  const d = await collectLedger({ dshHome: home })
+  assert.equal(d.failures.callsTotal, 3)
+  assert.equal(d.failures.failTotal, 2, '2 条 ok:false 必须被统计（此前恒 0）')
+  assert.equal(d.failures.byCode.AUTH, 1)
+  assert.equal(d.failures.byCode.TIMEOUT, 1)
+  assert.equal(d.failures.byProvider.buddy, 1)
+  assert.equal(d.failures.recent.length, 2)
+  assert.ok(d.failures.failRate > 0)
+  const { rm } = await import('node:fs/promises')
+  await rm(home, { recursive: true, force: true })
+})
