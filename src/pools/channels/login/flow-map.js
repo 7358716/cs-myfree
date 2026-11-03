@@ -15,6 +15,7 @@ import { startDevice, pollDevice } from './device.js'
 import { startPaste } from './paste.js'
 import { startQr, pollQr } from './qr.js'
 import { startCodearts, pollCodearts } from './codearts.js'
+import { startLoomy, pollLoomy } from './loomy.js'
 
 export const FLOW_TYPE = Object.freeze({
   AKSK: 'aksk',
@@ -55,7 +56,13 @@ export const FLOW_MAP = Object.freeze({
   minimaxintl: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'MiniMax 国际：端点待取证' },
   zcode: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'ZCode 智谱：设备码+验证码，端点待取证' },
   // ── QR 扫码 ──
-  loomy: { type: FLOW_TYPE.QR, loginVerified: false, loginNote: 'Loomy 讯飞：扫码/短信，14 天需人工重登' },
+  loomy: {
+    type: FLOW_TYPE.QR,
+    start: startLoomy,
+    poll: pollLoomy,
+    loginVerified: false,
+    loginNote: 'Loomy 讯飞：微信扫码；无续期端点，14 天后需重新扫码',
+  },
   raccoon: { type: FLOW_TYPE.QR, loginVerified: false, loginNote: 'Raccoon 商汤：扫码/短信，端点待取证' },
   // ── 粘贴 API Key ──
   qiniu: { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: 'Qiniu 七牛：粘贴 API Key' },
