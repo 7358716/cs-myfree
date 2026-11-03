@@ -49,6 +49,7 @@ export function createAdapter(opts = {}) {
     onEvent = () => {},
     onRecord = () => {},
     extraModels = () => [],        // 已登录渠道的模型（动态）
+    directModel = null,            // (modelId) => 候选 | null：用户请求的模型不在链里时的直连解析
     now = () => Date.now(),
     providerId = PROVIDER_ID,
     displayName = 'Myfree（免费模型）',
@@ -56,7 +57,9 @@ export function createAdapter(opts = {}) {
 
   if (typeof send !== 'function') throw new TypeError('createAdapter 需要 send 函数')
 
-  let chain = mergeChain(builtin, overrides)
+  let currentBuiltin = Array.isArray(builtin) ? builtin : []
+  let currentOverrides = Array.isArray(overrides) ? overrides : []
+  let chain = mergeChain(currentBuiltin, currentOverrides)
 
   /**
    * 全部可选模型 = 链里的模型 + 已登录渠道的模型（去重）。
@@ -85,11 +88,55 @@ export function createAdapter(opts = {}) {
     return [...seen.values()]
   }
 
+  /** 请求的模型对应的候选（链 → 渠道目录 → 直连解析）；找不到返回 null */
+  function resolveRequested(wantModel) {
+    if (typeof wantModel !== 'string' || wantModel === '') return null
+    const inChain = chain.find((e) => e.model === wantModel)
+    if (inChain) return inChain
+    const inCatalog = catalog().find((e) => e.model === wantModel)
+    if (inCatalog) return inCatalog
+    if (typeof directModel === 'function') {
+      try {
+        const d = directModel(wantModel)
+        if (d && typeof d.model === 'string' && d.model !== '') {
+          return { tier: 0, channelModel: true, ...d, model: wantModel }
+        }
+      } catch { /* 直连解析失败 ⇒ 按原链降级 */ }
+    }
+    return null
+  }
+
+  /**
+   * 候选顺序：**请求的模型优先直连**，失败后才按 tier 降级。
+   *
+   * 🔴 修的是「用户选了渠道模型，实际却调 kilo」：
+   *    渠道模型不在 `chain` 里（它是 extraModels 动态追加的），
+   *    旧实现只按 `chain` 排序 ⇒ 请求的 model 永远匹配不到 ⇒ 直接落到 tier 最小的免密源。
+   */
+  function candidatesFor(wantModel) {
+    const rest = orderCandidates(chain, null)
+    const hit = resolveRequested(wantModel)
+    if (!hit) return rest
+    const key = `${hit.provider}\u0000${hit.model}`
+    return [hit, ...rest.filter((e) => `${e.provider}\u0000${e.model}` !== key)]
+  }
+
   return {
     /** 更新链（配置变更后调用） */
     setChain(nextBuiltin, nextOverrides) {
-      chain = mergeChain(nextBuiltin ?? builtin, nextOverrides ?? overrides)
+      if (Array.isArray(nextBuiltin)) currentBuiltin = nextBuiltin
+      if (Array.isArray(nextOverrides)) currentOverrides = nextOverrides
+      chain = mergeChain(currentBuiltin, currentOverrides)
       return chain.length
+    },
+
+    /** 读取当前生效链的三件套（页面与选路共用同一份数据 —— 铁律2） */
+    getChain() {
+      return {
+        builtin: currentBuiltin.map((e) => ({ ...e })),
+        overrides: currentOverrides.map((e) => ({ ...e })),
+        effective: chain.map((e) => ({ ...e })),
+      }
     },
 
     /** 更新可用模型总数（含渠道模型），供 UI/诊断展示 */
@@ -129,7 +176,7 @@ export function createAdapter(opts = {}) {
     // ── 契约④：provider + id 都必须对 ──
     resolveModel(provider, model) {
       if (provider !== providerId) return undefined
-      const hit = catalog().find((e) => e.model === model)
+      const hit = resolveRequested(model)
       if (!hit) return undefined
       return makeModelInfo(provider, {
         id: model,
@@ -154,7 +201,7 @@ export function createAdapter(opts = {}) {
      */
     async *stream(options = {}) {
       const ladder = createLadder(budget).begin(now())
-      const ordered = orderCandidates(chain, options.model)
+      const ordered = candidatesFor(options.model)
       let lastErr = null
 
       for (const cand of ordered) {
@@ -179,14 +226,16 @@ export function createAdapter(opts = {}) {
           })
 
           // 提交点：先在**简化增量**层缓冲，提交后才转成宿主的块事件流
+          //
+          // 🔴 血泪教训（「说到一半停/总截断」的真因）：
+          //    createHeld().push 在**已提交后**返回 { committed:true, chunk, released:[] }。
+          //    上一版只搬 `released`（空数组）⇒ 提交点之后的每个增量都被丢弃，
+          //    用户只看到第一个 text-delta。必须两者都收。
           const buffered = []
           for await (const chunk of iter) {
             const r = held.push(chunk)
-            if (r.committed) {
-              for (const c of r.released) buffered.push(c)
-            } else if (r.chunk) {
-              buffered.push(r.chunk)
-            }
+            if (r.released?.length) buffered.push(...r.released)
+            if (r.chunk) buffered.push(r.chunk)
           }
 
           if (!held.isCommitted) {
@@ -215,15 +264,6 @@ export function createAdapter(opts = {}) {
               ms: now() - (ladder.snapshot().startedAt || now()),
             })
           } catch { /* ignore */ }
-          return
-
-          if (!held.isCommitted) {
-            lastErr = { kind: KIND.EMPTY_RESPONSE, message: 'no visible answer' }
-            onEvent({ type: 'empty-response', provider: cand.provider })
-            continue
-          }
-
-          onEvent({ type: 'success', provider: cand.provider, model: cand.model })
           return
         } catch (err) {
           lastErr = classify(err)
