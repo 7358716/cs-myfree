@@ -77,6 +77,42 @@ export function createState(dshHome) {
       return atomicWriteJson(join(dir, FILES.probe), obj)
     },
 
+    /**
+     * 规范化覆盖层：把历史错名（kilo-free 等别名）改回真实源 id，
+     * 并去掉因此产生的重复条目。
+     *
+     * 为什么需要：用户可能手填旧插件时代的名字（kilo-free），
+     * 而真实源 id 是 kilo ⇒ 会多出一个指向同一源的重复候选，
+     * 白白浪费一次失败重试。
+     *
+     * @param {(id:string)=>string} resolve 别名解析函数
+     * @returns {Promise<{changed:boolean, before:number, after:number}>}
+     */
+    async normalizeChain(resolve) {
+      try {
+        const cur = await this.readChain({ chain: [] })
+        const list = Array.isArray(cur?.chain) ? cur.chain : []
+        if (list.length === 0) return { changed: false, before: 0, after: 0 }
+
+        const seen = new Set()
+        const out = []
+        for (const e of list) {
+          const provider = resolve ? resolve(e.provider) : e.provider
+          const key = `${provider}\u0000${e.model}`
+          if (seen.has(key)) continue          // 去重
+          seen.add(key)
+          const next = { ...e, provider }
+          delete next._i
+          out.push(next)
+        }
+        const changed = JSON.stringify(out) !== JSON.stringify(list.map((e) => { const c = { ...e }; delete c._i; return c }))
+        if (changed) await this.writeChain({ chain: out, at: Date.now(), normalized: true })
+        return { changed, before: list.length, after: out.length }
+      } catch {
+        return { changed: false, before: 0, after: 0 }
+      }
+    },
+
     /** 目录概况（给诊断页用） */
     async overview() {
       try {

@@ -95,3 +95,43 @@ test('每种登录方式都有指引定义', () => {
     assert.ok(LOGIN_GUIDES[k], '缺少 ' + k + ' 的指引')
   }
 })
+
+// ── 覆盖层规范化（清理历史错名）──
+test('normalizeChain 把 kilo-free 改成 kilo 并去重', async () => {
+  const { createState } = await import('../src/web/state.js')
+  const { resolveSourceId } = await import('../src/pools/keyless/index.js')
+  const home = await tmpHome()
+  const st = createState(home)
+  await st.writeChain({
+    chain: [
+      { provider: 'kilo', model: 'kilo-auto/free', tier: 1 },
+      { provider: 'kilo-free', model: 'kilo-auto/free', tier: 1 },
+      { provider: 'ovh', model: 'Qwen3.5-9B', tier: 1 },
+    ],
+  })
+  const r = await st.normalizeChain(resolveSourceId)
+  assert.equal(r.before, 3)
+  assert.equal(r.after, 2, 'kilo 与 kilo-free 归一后应去重成 1 条')
+  assert.equal(r.changed, true)
+  const after = await st.readChain()
+  assert.equal(after.chain.every((e) => e.provider !== 'kilo-free'), true, '不应再有 kilo-free')
+})
+
+test('已经是规范名时不做改动', async () => {
+  const { createState } = await import('../src/web/state.js')
+  const { resolveSourceId } = await import('../src/pools/keyless/index.js')
+  const home = await tmpHome()
+  const st = createState(home)
+  await st.writeChain({ chain: [{ provider: 'kilo', model: 'x', tier: 1 }] })
+  const r = await st.normalizeChain(resolveSourceId)
+  assert.equal(r.changed, false)
+})
+
+test('空覆盖层不报错', async () => {
+  const { createState } = await import('../src/web/state.js')
+  const home = await tmpHome()
+  const st = createState(home)
+  const r = await st.normalizeChain((x) => x)
+  assert.equal(r.changed, false)
+  assert.equal(r.before, 0)
+})

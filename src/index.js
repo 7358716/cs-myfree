@@ -29,7 +29,7 @@ import { appendRecord } from './audit/sources.js'
 import { createState } from './web/state.js'
 
 const NAME = 'cs-myfree'
-const VERSION = '1.5.1'
+const VERSION = '1.5.2'
 
 export const name = NAME
 export const version = VERSION
@@ -232,6 +232,13 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
 
   // ── HTTP API（设置页的数据源；全部过 guard）──
   const stateStore = createState(cfg.dshHome)
+
+  // 启动时规范化一次覆盖层（清理历史错名，避免重复候选）
+  stateStore.normalizeChain((id) => resolveSourceId(id))
+    .then((r) => {
+      if (r.changed) log.info(`覆盖层已规范化：${r.before} → ${r.after} 条（清理了别名与重复）`)
+    })
+    .catch(() => {})
   const routesOk = safeInject(ctx, ['webServer'], (scoped) => {
     const ws = scoped?.webServer ?? (typeof scoped?.get === 'function' ? scoped.get('webServer', false) : null)
     if (!ws) { log.debug('无 webServer：HTTP API 未注册'); return }
