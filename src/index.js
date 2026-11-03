@@ -25,6 +25,7 @@ import { guardApply, makeLogger, safeInject, safeEffect, safeRegisterAdapter, sa
 import { registerCashRoute, CASH_PATH, queryCash } from './web/cash.js'
 import { judge, sendJson } from './web/guard.js'
 import { registerRoutes, PREFIX as API_PREFIX } from './web/routes.js'
+import { appendRecord } from './audit/sources.js'
 import { createState } from './web/state.js'
 
 const NAME = 'cs-myfree'
@@ -189,6 +190,7 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
       send: cfg.transportBaseUrl ? send : sendToKeyless,
       budget: cfg.budgetTurns ?? {},
       onEvent: (e) => log.debug(`${e.type}`, e),
+      onRecord: (r) => { appendRecord(r, { dshHome: cfg.dshHome }).catch(() => {}) },
     })
     const sc = adapter.selfCheck()
     if (!sc.ok) log.warn(`adapter 契约自检未通过：${sc.problems.join('；')}`)

@@ -47,6 +47,7 @@ export function createAdapter(opts = {}) {
     send,
     budget = {},
     onEvent = () => {},
+    onRecord = () => {},
     now = () => Date.now(),
     providerId = PROVIDER_ID,
     displayName = 'Myfree（免费模型）',
@@ -173,6 +174,22 @@ export function createAdapter(opts = {}) {
           async function* replay() { for (const c of buffered) yield c }
           yield* toHostChunks(replay())
           onEvent({ type: 'success', provider: cand.provider, model: cand.model })
+
+          // 记一笔（自有账本，失败不影响主流程）
+          try {
+            let inTok = 0, outTok = 0
+            for (const c of buffered) {
+              if (c.type === 'finish' && c.usage) {
+                inTok = Number(c.usage.inputTokens) || inTok
+                outTok = Number(c.usage.outputTokens) || outTok
+              }
+            }
+            onRecord({
+              at: now(), provider: cand.provider, model: cand.model,
+              in: inTok, out: outTok, cost: 0, paid: false, ok: true,
+              ms: now() - (ladder.snapshot().startedAt || now()),
+            })
+          } catch { /* ignore */ }
           return
 
           if (!held.isCommitted) {
@@ -186,6 +203,9 @@ export function createAdapter(opts = {}) {
         } catch (err) {
           lastErr = classify(err)
           onEvent({ type: 'failure', provider: cand.provider, model: cand.model, kind: lastErr.kind })
+          try {
+            onRecord({ at: now(), provider: cand.provider, model: cand.model, in: 0, out: 0, cost: 0, paid: false, ok: false, code: lastErr.kind })
+          } catch { /* ignore */ }
           const step = ladder.onFailure(lastErr, cand, now())
           onEvent({ type: 'ladder', layer: step.layer, action: step.action, reason: step.reason })
           if (step.action === 'report') break

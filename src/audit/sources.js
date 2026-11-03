@@ -1,26 +1,34 @@
 /**
- * cs-myfree — 真实数据源读取（账本）
+ * cs-myfree — 账本（**完全自有，不读任何外部插件**）
  *
- * 两个真实来源（本机实测存在）：
- *   ① `~/.dsh/my-free-model/spend.jsonl`     逐条调用（8809 条，含 cost/paid/in/out）
- *   ② `~/.dsh/jet-hub/token-ledger.json`     按天×渠道×账号×模型聚合
+ * 设计原则（主管明确要求「独立使用」）：
+ *   · 只读写 **自己的** `~/.dsh/cs-myfree/ledger.jsonl`
+ *   · **绝不**读 my-free-model / jet-hub / 任何其它插件的数据
+ *   · 没装其它插件的新机器上，一切功能照常
  *
- * 纪律：
- *  · 只读，绝不改写
- *  · 大文件按行流式处理，不整读进内存
- *  · 读不到就返回空 + 原因，不抛错
+ * 记录格式（每行一条 JSON）：
+ *   { at, day, provider, model, in, out, cost, paid, ok, code, ms }
  *
  * @module cs-myfree/audit/sources
  */
 
-import { createReadStream } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { readFile, mkdir, appendFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
 export function dshHomePath(dshHome) {
   return dshHome || process.env.DSH_HOME || join(homedir(), '.dsh')
+}
+
+/** 自己的账本目录 */
+export function ledgerDir(dshHome) {
+  return join(dshHomePath(dshHome), 'cs-myfree')
+}
+
+export function ledgerFile(dshHome) {
+  return join(ledgerDir(dshHome), 'ledger.jsonl')
 }
 
 /** UTC+8 日界 */
@@ -30,11 +38,40 @@ export function dateKeyCN(at) {
 }
 
 /**
- * 读 spend.jsonl（流式，只保留需要的聚合）。
+ * 记一条调用（追加写，失败不影响主流程）。
+ * @param {object} rec
+ */
+export async function appendRecord(rec, { dshHome } = {}) {
+  try {
+    const dir = ledgerDir(dshHome)
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    const at = Number(rec.at) || Date.now()
+    const line = JSON.stringify({
+      at,
+      day: rec.day || dateKeyCN(at),
+      provider: rec.provider ?? null,
+      model: rec.model ?? null,
+      in: Number(rec.in) || 0,
+      out: Number(rec.out) || 0,
+      cost: Number(rec.cost) || 0,
+      paid: rec.paid === true,
+      ok: rec.ok !== false,
+      code: rec.code ?? null,
+      ms: Number(rec.ms) || null,
+    }) + '\n'
+    await appendFile(ledgerFile(dshHome), line, { mode: 0o600 })
+    return true
+  } catch {
+    return false   // 记账失败绝不影响对话
+  }
+}
+
+/**
+ * 读自己的账本并聚合。
  * @param {{dshHome?:string, limit?:number, fromMs?:number}} opts
  */
 export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
-  const file = join(dshHomePath(dshHome), 'my-free-model', 'spend.jsonl')
+  const file = ledgerFile(dshHome)
   const byDay = new Map()
   const byProvider = new Map()
   let total = 0, failed = 0, paidCount = 0, costTotal = 0, costUnknown = 0
@@ -50,6 +87,7 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
       if (typeof o.at !== 'number' || o.at < fromMs) continue
       total++
       if (lastAt === null || o.at > lastAt) lastAt = o.at
+      if (o.ok === false) failed++
 
       const day = o.day || dateKeyCN(o.at)
       if (!byDay.has(day)) byDay.set(day, { date: day, calls: 0, costCNY: 0, costUnknown: 0, in: 0, out: 0, paid: 0, providers: new Set() })
@@ -63,21 +101,27 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
       if (o.provider) d.providers.add(o.provider)
 
       const p = o.provider || '(unknown)'
-      if (!byProvider.has(p)) byProvider.set(p, { provider: p, calls: 0, in: 0, out: 0, costCNY: 0 })
+      if (!byProvider.has(p)) byProvider.set(p, { provider: p, calls: 0, in: 0, out: 0, failed: 0, costCNY: 0 })
       const bp = byProvider.get(p)
       bp.calls++
       bp.in += Number(o.in) || 0
       bp.out += Number(o.out) || 0
+      if (o.ok === false) bp.failed++
       if (Number.isFinite(o.cost)) bp.costCNY += o.cost
 
       if (total >= limit) break
     }
   } catch (err) {
-    return { ok: false, reason: String(err?.message ?? err).slice(0, 120), file, days: [], providers: [], total: 0 }
+    // 文件不存在 = 新装机器 = 正常情况，不是错误
+    if (err?.code !== 'ENOENT') {
+      return { ok: false, reason: String(err?.message ?? err).slice(0, 120), file, days: [], providers: [], total: 0 }
+    }
+    return { ok: true, empty: true, file, days: [], providers: [], total: 0 }
   }
 
   return {
     ok: true,
+    empty: total === 0,
     file,
     total,
     failed,
@@ -96,71 +140,49 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
   }
 }
 
-/**
- * 读 token-ledger（渠道包的按天聚合）。
- * @param {{dshHome?:string}} opts
- */
-export async function readTokenLedger({ dshHome } = {}) {
-  const file = join(dshHomePath(dshHome), 'jet-hub', 'token-ledger.json')
+/** 账本文件概况 */
+export async function ledgerOverview({ dshHome } = {}) {
+  const file = ledgerFile(dshHome)
   try {
-    const o = JSON.parse(await readFile(file, 'utf8'))
-    const days = o.days ?? {}
-    const out = []
-    for (const [date, entries] of Object.entries(days)) {
-      let requests = 0, inputTokens = 0, outputTokens = 0, cacheRead = 0, errors = 0
-      const channels = new Set()
-      for (const [key, v] of Object.entries(entries ?? {})) {
-        // key 形如 "direct|codearts|account|model"
-        const parts = String(key).split('|')
-        if (parts[1]) channels.add(parts[1])
-        requests += Number(v?.requests) || 0
-        inputTokens += Number(v?.inputTokens) || 0
-        outputTokens += Number(v?.outputTokens) || 0
-        cacheRead += Number(v?.cacheReadTokens) || 0
-        errors += Number(v?.errors) || 0
-      }
-      out.push({ date, requests, inputTokens, outputTokens, cacheReadTokens: cacheRead, errors, channels: [...channels] })
-    }
-    return {
-      ok: true,
-      file,
-      schema: o.schema,
-      days: out.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 30),
-    }
-  } catch (err) {
-    return { ok: false, reason: String(err?.message ?? err).slice(0, 120), file, days: [] }
+    const st = (await import('node:fs/promises')).stat(file)
+    const s = await st
+    return { exists: true, file, bytes: s.size, at: s.mtimeMs }
+  } catch {
+    return { exists: false, file, bytes: 0, at: null }
   }
 }
 
-/** 合并两个来源，给 /ledger 用 */
+/** 合并给 /ledger 用（**只用自有数据**） */
 export async function collectLedger({ dshHome, fromMs = 0 } = {}) {
-  const [spend, token] = await Promise.all([
-    readSpend({ dshHome, fromMs }),
-    readTokenLedger({ dshHome }),
-  ])
-  // ⚠️ 两个来源都读不到是**正常情况**（例如没装 my-free-model 插件的新机器），
-  //    不能报错，否则界面显示「接口返回 ok=false」把用户吓一跳。
-  const neitherAvailable = !spend.ok && !token.ok
+  const spend = await readSpend({ dshHome, fromMs })
   const today = dateKeyCN(Date.now())
   const month = today.slice(0, 7)
   const dToday = spend.days?.find((d) => d.date === today)
   const dMonth = (spend.days ?? []).filter((d) => String(d.date).startsWith(month))
+
   return {
-    ok: true,                     // 读不到数据不等于出错
-    available: !neitherAvailable,
-    note: neitherAvailable
-      ? '本机没有找到用量记录（未安装 my-free-model 插件，或还没有调用记录）—— 这是正常的，不影响使用'
+    ok: true,
+    source: 'cs-myfree 自有账本（不依赖任何外部插件）',
+    file: spend.file,
+    available: spend.total > 0,
+    note: spend.total === 0
+      ? '还没有调用记录。用本插件跑一次对话后这里就会有数据。'
       : null,
     spend,
-    token,
+    token: { ok: true, days: [] },   // 不再读外部 token 账本
     summary: {
       todayCNY: Number((dToday?.costCNY ?? 0).toFixed(6)),
       monthCNY: Number(dMonth.reduce((s, d) => s + (d.costCNY || 0), 0).toFixed(6)),
       todayCalls: dToday?.calls ?? 0,
       totalCalls: spend.total ?? 0,
+      failedCalls: spend.failed ?? 0,
       paidCalls: spend.paidCount ?? 0,
       costUnknown: spend.costUnknown ?? 0,
       lastAt: spend.lastAt ?? null,
     },
   }
 }
+
+// 兼容旧导出名（避免别处 import 报错）
+export const readTokenLedger = async () => ({ ok: true, days: [], note: '已移除对 jet-hub 的依赖' })
+export { createWriteStream }

@@ -229,68 +229,127 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ── 渠道登录卡片 ──
+    // ── 渠道登录卡片（普通人视角：粘什么都能识别）──
     function ChannelLogin(props) {
       const ch = props.channel
       const [open, setOpen] = react.useState(false)
-      const [val, setVal] = react.useState('')
+      const [raw, setRaw] = react.useState('')
+      const [mode, setMode] = react.useState('auto')     // auto | aksk
+      const [ak, setAk] = react.useState('')
+      const [sk, setSk] = react.useState('')
       const [msg, setMsg] = react.useState(null)
       const [busy, setBusy] = react.useState(false)
 
+      // 本地即时识别（不联网）
+      const parsed = react.useMemo(() => {
+        if (mode === 'aksk') {
+          if (!ak.trim() || !sk.trim()) return { ok: false, error: '还差 AK 或 SK' }
+          return { ok: true, credential: ak.trim() + ':' + sk.trim(), kind: 'aksk', preview: 'AK/SK 已填齐' }
+        }
+        const s = String(raw || '').trim()
+        if (!s) return { ok: false, error: '还没粘贴内容' }
+        // 前端也做一遍同样的识别，给用户即时反馈
+        if (/^[[{]/.test(s)) {
+          try {
+            const o = JSON.parse(s)
+            const f = (obj, d = 0) => {
+              if (!obj || typeof obj !== 'object' || d > 4) return null
+              for (const k of ['access_token', 'accessToken', 'token', 'id_token', 'code', 'api_key', 'apiKey']) {
+                if (typeof obj[k] === 'string' && obj[k].length >= 6) return obj[k]
+              }
+              for (const v of Object.values(obj)) { if (v && typeof v === 'object') { const r = f(v, d + 1); if (r) return r } }
+              return null
+            }
+            const v = f(o)
+            return v ? { ok: true, credential: v, kind: 'json', preview: '识别到 ' + v.slice(0, 4) + '…' + v.slice(-4) } : { ok: false, error: 'JSON 里没找到 token' }
+          } catch { return { ok: false, error: 'JSON 格式不对' } }
+        }
+        try {
+          const qs = /^https?:\/\//i.test(s) ? new URL(s).searchParams : (s.includes('=') && !s.includes(' ') ? new URLSearchParams(s) : null)
+          if (qs) {
+            for (const k of ['code', 'access_token', 'token', 'auth_code', 'api_key']) {
+              const v = qs.get(k)
+              if (v && v.length >= 6) return { ok: true, credential: v, kind: 'url', preview: '从链接识别到 ' + v.slice(0, 4) + '…' + v.slice(-4) }
+            }
+            return { ok: false, error: '链接里没找到 code/token 参数' }
+          }
+        } catch { /* ignore */ }
+        if (s.length >= 8 && !/\s/.test(s)) return { ok: true, credential: s, kind: 'raw', preview: '直接当作 token（' + s.slice(0, 4) + '…' + s.slice(-4) + '）' }
+        return { ok: false, error: '识别不出来，试试粘贴完整链接' }
+      }, [raw, mode, ak, sk])
+
       const save = () => {
-        if (!val.trim()) { setMsg({ ok: false, error: '请先填入凭证' }); return }
+        if (!parsed.ok) { setMsg({ ok: false, error: parsed.error }); return }
         setBusy(true); setMsg(null)
-        api('/channels/save', { method: 'POST', body: JSON.stringify({ provider: ch.id, credential: val.trim() }) })
+        api('/channels/save', { method: 'POST', body: JSON.stringify({ provider: ch.id, credential: parsed.credential }) })
           .then((r) => {
-            setMsg(r.ok ? { ok: true, text: r.hint } : { ok: false, error: r.error })
-            if (r.ok) { setVal(''); props.onChanged && props.onChanged() }
+            setMsg(r.ok ? { ok: true, text: '✅ 已保存' } : { ok: false, error: r.error })
+            if (r.ok) { setRaw(''); setAk(''); setSk(''); props.onChanged && props.onChanged() }
           })
           .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
           .then(() => setBusy(false))
       }
       const del = (id) => {
         api('/channels/remove', { method: 'POST', body: JSON.stringify({ id }) })
-          .then(() => props.onChanged && props.onChanged())
-          .catch(() => {})
+          .then(() => props.onChanged && props.onChanged()).catch(() => {})
       }
 
       const accs = ch.accounts || []
 
       return h('div', { style: Object.assign({}, S.card, { marginBottom: '8px' }) },
-        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' } },
           h('div', null,
             h('span', { style: { fontWeight: 600 } }, ch.label),
-            ch.loggedIn ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.good) }, '已登录 ' + accs.length) : null,
+            ch.loggedIn ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.good) }, '✅ 已登录 ' + accs.length + ' 个') : null,
             ch.checkin ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) }, '· 可签到') : null,
             ch.proxyRequired ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.warn) }, '· 需代理') : null),
           h('div', { style: { display: 'flex', gap: '6px' } },
             ch.loginUrl ? h('a', {
               href: ch.loginUrl, target: '_blank', rel: 'noreferrer',
               style: Object.assign({}, S.btn(false), { textDecoration: 'none', color: 'inherit' }),
-            }, '打开登录页') : null,
+            }, '去官网登录') : null,
             h('span', { style: S.btn(ch.loggedIn ? false : true), onClick: () => setOpen(!open) },
-              open ? '收起' : (ch.loggedIn ? '再登一个' : '登录')))),
+              open ? '收起' : (ch.loggedIn ? '再加一个' : '添加账号')))),
 
         accs.map((a) => h('div', { key: a.id, style: Object.assign({}, S.row, { marginTop: '6px' }) },
           h('span', null, a.label + ' ' + (a.masked || '')),
           h('span', { style: Object.assign({ cursor: 'pointer' }, S.dim, S.bad), onClick: () => del(a.id) }, '删除'))),
 
         open ? h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' } },
-          h('div', { style: { fontWeight: 500, marginBottom: '4px' } }, ch.guideTitle),
-          h('ol', { style: Object.assign({ margin: '0 0 8px 18px', padding: 0 }, S.dim) },
-            (ch.guideSteps || []).map((s, i) => h('li', { key: i, style: { marginBottom: '2px' } }, s))),
-          ch.note ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim, S.warn) }, '注意：' + ch.note) : null,
-          h('input', {
-            style: S.input, value: val, placeholder: '粘贴' + (ch.field || '凭证') + '…',
-            onChange: (e) => setVal(e.target.value),
-          }),
-          h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
-            h('button', { style: S.btn(true), onClick: save, disabled: busy }, busy ? '保存中…' : '保存凭证'),
-            h('button', { style: S.btn(false), onClick: () => { setVal(''); setMsg(null); setOpen(false) } }, '取消')),
+          // 方式选择
+          h('div', { style: { display: 'flex', gap: '6px', marginBottom: '10px' } },
+            h('span', { style: S.btn(mode === 'auto'), onClick: () => setMode('auto') }, '① 粘贴链接/令牌（推荐）'),
+            h('span', { style: S.btn(mode === 'aksk'), onClick: () => setMode('aksk') }, '② AK / SK 永久授权')),
+
+          mode === 'auto'
+            ? h('div', null,
+                h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
+                  '把浏览器地址栏里那串**以 ?code= 开头的完整链接**整个复制过来，或者把接口返回的那段 JSON 整个粘过来 —— 插件会自动认出里面的令牌，你不用自己找。'),
+                h('textarea', {
+                  style: Object.assign({}, S.input, { height: '72px', fontFamily: 'ui-monospace, monospace' }),
+                  value: raw,
+                  placeholder: '粘贴完整链接（https://...?code=xxx），或整段 JSON，或直接粘 token',
+                  onChange: (e) => setRaw(e.target.value),
+                }))
+            : h('div', null,
+                h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
+                  'AK/SK 是**永久凭证**，配一次以后不用再登录。在厂商控制台的「访问密钥 / API 密钥」里创建，把两个值分别填进来。'),
+                h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), value: ak, placeholder: 'AK（Access Key / AccessKeyId）', onChange: (e) => setAk(e.target.value) }),
+                h('input', { style: S.input, value: sk, placeholder: 'SK（Secret Key / AccessKeySecret）', onChange: (e) => setSk(e.target.value) })),
+
+          // 实时识别反馈
+          h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, parsed.ok ? S.good : S.warn) },
+            (parsed.ok ? '✅ ' : '⏳ ') + (parsed.ok ? (parsed.preview || '已识别') : parsed.error)),
+
+          ch.loginWarn ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '⚠️ ' + ch.loginWarn) : null,
+
+          h('div', { style: { display: 'flex', gap: '8px', marginTop: '10px' } },
+            h('button', { style: S.btn(true), onClick: save, disabled: busy || !parsed.ok }, busy ? '保存中…' : '保存'),
+            h('button', { style: S.btn(false), onClick: () => { setRaw(''); setAk(''); setSk(''); setMsg(null); setOpen(false) } }, '取消')),
+
           h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
-            '🔒 凭证只存本机 ~/.dsh/cs-myfree/accounts.json（权限 0600），不上传任何服务器。'),
-          msg ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, msg.ok ? S.good : S.bad) },
-            (msg.ok ? '✅ ' : '❌ ') + (msg.text || msg.error)) : null) : null,
+            '🔒 凭证只存在你自己的电脑（~/.dsh/cs-myfree/accounts.json，仅本人可读），不上传任何服务器。'),
+          msg ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, msg.ok ? S.good : S.bad) }, msg.text || msg.error) : null) : null,
       )
     }
 
@@ -684,70 +743,141 @@ window.__ModuleLoader__.load({
           '导入：把 JSON 粘到「降级链」页逐条添加，或后续版本提供导入框。')))
     }
 
-    // ── W11 作用域 ──
+    // ── W11 作用域（普通人视角：卡片选择 + 表单编辑，不用写 JSON）──
     function ScopeZone() {
       const [s, reload] = useApi('/scope')
+      const [pick, setPick] = react.useState('global')   // 当前选中的作用域
       const [msg, setMsg] = react.useState(null)
       const [busy, setBusy] = react.useState(false)
-      const [scope, setScope] = react.useState('global')
-      const [id, setId] = react.useState('')
-      const [json, setJson] = react.useState('')
+      const [form, setForm] = react.useState(null)
 
       if (s.error) return h('div', null, h(Err, { error: s.error }), h('button', { style: S.btn(false), onClick: reload }, '重试'))
 
       const d = s.data || {}
+      const layers = (d.effective && d.effective.layers) || {}
+
+      const CARDS = [
+        { key: 'global', title: '全局', sub: '对所有对话生效', count: layers.global, tip: '最常用。改这里 = 全部生效' },
+        { key: 'preset', title: '预设', sub: '只对某个智能体预设生效', count: layers.preset, tip: '需要填预设名（如 dev-steward）' },
+        { key: 'session', title: '会话', sub: '只对某一次对话生效', count: layers.session, tip: '需要填会话 ID，日常基本用不到' },
+      ]
+
+      // 表单数据：选中作用域后加载
+      const loadForm = (scope) => {
+        setPick(scope); setMsg(null)
+        if (scope === 'global') {
+          api('/config').then((r) => setForm(r.config || {})).catch(() => setForm({}))
+        } else {
+          setForm({})   // 预设/会话先给空表单
+        }
+      }
+
+      // 简单的表单字段（覆盖最常改的几项，其余用折叠的「高级」）
+      const FIELDS = [
+        { path: ['budget', 'perCallCNY'], label: '单次最多花多少钱', unit: '元', type: 'number', help: '超过这个数就拒绝付费调用。填 0 = 完全禁止付费' },
+        { path: ['budget', 'dailyCNY'], label: '每天最多花多少钱', unit: '元', type: 'number', help: '一天累计超过就停' },
+        { path: ['budget', 'monthlyCNY'], label: '每月最多花多少钱', unit: '元', type: 'number', help: '一月累计超过就停' },
+        { path: ['paid', 'enabled'], label: '允许调用付费模型', type: 'bool', help: '关掉 = 永远只用免费模型，不会花一分钱' },
+        { path: ['paid', 'confirmEachTurn'], label: '每次付费都问我', type: 'bool', help: '开启后每次要花钱都会弹确认' },
+        { path: ['vision', 'mode'], label: '识图方式', type: 'select', options: [
+          { v: 'off', t: '关闭（最安全，图片不出本机）' },
+          { v: 'free-cloud', t: '用免费云模型看图（推荐）' },
+          { v: 'local', t: '只用本机模型（需自己装）' },
+          { v: 'paid-cloud', t: '用付费模型看图' },
+        ], help: '选「免费云模型」后，图片会发给免费的视觉模型识别成文字' },
+        { path: ['search', 'budgetMs'], label: '搜索最多等多久', unit: '毫秒', type: 'number', help: '10000 = 10 秒。超时就用已拿到的部分结果' },
+      ]
+
+      const getPath = (obj, path) => path.reduce((o, k) => (o == null ? undefined : o[k]), obj)
+      const setPath = (path, v) => setForm((f) => {
+        const next = JSON.parse(JSON.stringify(f || {}))
+        let cur = next
+        for (let i = 0; i < path.length - 1; i++) { if (!cur[path[i]]) cur[path[i]] = {}; cur = cur[path[i]] }
+        cur[path[path.length - 1]] = v
+        return next
+      })
 
       const save = () => {
-        let cfg
-        try { cfg = json.trim() ? JSON.parse(json) : {} } catch (e) { setMsg({ ok: false, error: 'JSON 格式错误：' + e.message }); return }
         setBusy(true); setMsg(null)
-        api('/scope', { method: 'POST', body: JSON.stringify({ scope, id: id || undefined, config: cfg }) })
-          .then((r) => { setMsg(r.ok ? { ok: true, text: r.hint } : { ok: false, error: r.error }); reload() })
-          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
-          .then(() => setBusy(false))
+        if (pick === 'global') {
+          api('/config', { method: 'POST', body: JSON.stringify(form || {}) })
+            .then((r) => setMsg(r.ok ? { ok: true, text: '✅ 已保存，全局生效' } : { ok: false, error: r.error }))
+            .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+            .then(() => { setBusy(false); reload() })
+        } else {
+          const id = window.prompt(pick === 'preset' ? '请输入预设名（例如 dev-steward）' : '请输入会话 ID')
+          if (!id) { setBusy(false); return }
+          api('/scope', { method: 'POST', body: JSON.stringify({ scope: pick, id, config: form || {}, presetId: pick === 'preset' ? id : undefined, sessionId: pick === 'session' ? id : undefined }) })
+            .then((r) => setMsg(r.ok ? { ok: true, text: '✅ 已保存到「' + pick + '」作用域' } : { ok: false, error: r.error }))
+            .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+            .then(() => { setBusy(false); reload() })
+        }
       }
 
       return h('div', null,
-        h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '生效配置来源'),
-          h(KV, { k: '全局层', v: (d.effective ? d.effective.layers.global : 0) + ' 项' }),
-          h(KV, { k: '预设层', v: (d.effective ? d.effective.layers.preset : 0) + ' 项' }),
-          h(KV, { k: '会话层', v: (d.effective ? d.effective.layers.session : 0) + ' 项' }),
-          h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) }, d.hint || '优先级：会话 > 预设 > 全局')),
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '这些设置要在哪个范围内生效？'),
+        h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) }, '点一张卡片选择。不知道选哪个就选「全局」。'),
 
-        h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600, marginBottom: '8px' } }, '写入某个作用域'),
-          h('div', { style: { display: 'flex', gap: '8px', marginBottom: '8px' } },
-            h('select', {
-              style: Object.assign({}, S.input, { width: '140px' }),
-              value: scope, onChange: (e) => setScope(e.target.value),
+        h('div', { style: { display: 'flex', gap: '8px', marginBottom: '14px' } },
+          CARDS.map((c) => h('div', {
+            key: c.key,
+            onClick: () => loadForm(c.key),
+            style: {
+              flex: 1, cursor: 'pointer', padding: '10px', borderRadius: '8px',
+              border: '2px solid ' + (pick === c.key ? 'var(--dsw-alias-brand-primary)' : 'rgba(128,128,128,0.25)'),
+              background: pick === c.key ? 'rgba(128,128,128,0.1)' : 'transparent',
             },
-              h('option', { value: 'global' }, '全局'),
-              h('option', { value: 'preset' }, '预设'),
-              h('option', { value: 'session' }, '会话')),
-            scope !== 'global'
-              ? h('input', {
-                  style: S.input, value: id, placeholder: scope === 'preset' ? 'presetId' : 'sessionId',
-                  onChange: (e) => setId(e.target.value),
-                })
-              : h('span', { style: Object.assign({}, S.dim, { alignSelf: 'center' }) }, '（全局对所有会话生效）')),
-          h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) }, '要写入的配置（JSON，会与该层现有值合并）：'),
-          h('textarea', {
-            style: Object.assign({}, S.input, { height: '100px', fontFamily: 'ui-monospace, monospace' }),
-            value: json, placeholder: '{"budget":{"perCallCNY":2}}',
-            onChange: (e) => setJson(e.target.value),
-          }),
-          h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
-            h('button', { style: S.btn(true), onClick: save, disabled: busy }, busy ? '保存中…' : '写入'),
-            h('button', { style: S.btn(false), onClick: reload }, '刷新')),
-          msg ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, msg.ok ? S.good : S.bad) },
-            (msg.ok ? '✅ ' : '❌ ') + (msg.text || msg.error)) : null),
+          },
+            h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, c.title),
+            h('div', { style: S.dim }, c.sub),
+            h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) }, '已设 ' + (c.count ?? 0) + ' 项'),
+            h('div', { style: Object.assign({ marginTop: '4px' }, S.dim, { fontStyle: 'italic' }) }, c.tip))) ),
 
-        (d.files || []).length ? h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '已存在的作用域文件'),
-          d.files.map((f) => h('div', { key: f.name, style: S.row },
-            h('span', { style: S.mono }, f.name),
-            h('span', { style: S.dim }, f.scope)))) : null,
+        form
+          ? h('div', { style: S.card },
+              h('div', { style: { fontWeight: 600, marginBottom: '10px' } }, '「' + CARDS.find((c) => c.key === pick).title + '」范围的设置'),
+              FIELDS.map((f) => {
+                const v = getPath(form, f.path)
+                return h('div', { key: f.path.join('.'), style: { marginBottom: '14px' } },
+                  h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, f.label + (f.unit ? '（' + f.unit + '）' : '')),
+                  f.help ? h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) }, f.help) : null,
+                  f.type === 'bool'
+                    ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+                        h('span', {
+                          onClick: () => setPath(f.path, !(v === true)),
+                          style: {
+                            cursor: 'pointer', userSelect: 'none', display: 'inline-flex', alignItems: 'center',
+                            width: '44px', height: '22px', borderRadius: '11px', flexShrink: 0,
+                            background: v === true ? 'var(--dsw-alias-state-success-primary)' : 'rgba(128,128,128,0.35)',
+                          },
+                        }, h('span', {
+                          style: {
+                            display: 'block', width: '18px', height: '18px', borderRadius: '50%',
+                            background: '#fff', margin: '2px',
+                            transform: v === true ? 'translateX(22px)' : 'translateX(0)',
+                          },
+                        })),
+                        h('span', { style: { fontWeight: 600, color: v === true ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-secondary)' } },
+                          v === true ? '已开启' : '已关闭'))
+                    : f.type === 'select'
+                      ? h('select', {
+                          style: Object.assign({}, S.input, { width: '320px' }),
+                          value: v ?? '', onChange: (e) => setPath(f.path, e.target.value),
+                        }, f.options.map((o) => h('option', { key: o.v, value: o.v }, o.t)))
+                      : h('input', {
+                          type: f.type === 'number' ? 'number' : 'text',
+                          style: Object.assign({}, S.input, { width: '200px' }),
+                          value: v == null ? '' : v,
+                          onChange: (e) => setPath(f.path, f.type === 'number' ? Number(e.target.value) : e.target.value),
+                        }))
+              }),
+              h('div', { style: { display: 'flex', gap: '8px' } },
+                h('button', { style: S.btn(true), onClick: save, disabled: busy }, busy ? '保存中…' : '保存'),
+                h('button', { style: S.btn(false), onClick: () => loadForm(pick) }, '撤销修改')),
+              msg ? h('div', { style: Object.assign({ marginTop: '10px' }, S.dim, msg.ok ? S.good : S.bad) }, msg.text || msg.error) : null,
+              h('div', { style: Object.assign({ marginTop: '12px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' }, S.dim) },
+                '生效顺序：会话 > 预设 > 全局。同一项在多处设置时，范围小的赢。'))
+          : h('div', { style: S.dim }, '↑ 先选一个范围'),
       )
     }
 
