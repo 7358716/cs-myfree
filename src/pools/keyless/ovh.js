@@ -41,13 +41,23 @@ export async function listModels({ fetchImpl = globalThis.fetch, timeoutMs = 15_
   } finally { clearTimeout(timer) }
 }
 
-export async function chat({ model, messages, signal, stream = false, fetchImpl, timeoutMs = 120_000 } = {}) {
+export async function chat({
+  model, messages, tools, toolChoice, maxTokens, temperature, stop,
+  signal, stream = false, fetchImpl, timeoutMs = 120_000,
+} = {}) {
   return chatRequest({
     baseUrl: `${OVH_BASE}/chat/completions`,
     model: model ?? 'Qwen3.5-397B-A17B',
     messages,
     signal, stream, fetchImpl, timeoutMs,
-    extra: { max_tokens: 8192 },
+    extra: {
+      max_tokens: Number.isFinite(maxTokens) && maxTokens > 0
+        ? Math.min(Math.floor(maxTokens), 32_768)
+        : 8192,
+      ...(Array.isArray(tools) && tools.length > 0 ? { tools, tool_choice: toolChoice ?? 'auto' } : {}),
+      ...(Number.isFinite(temperature) ? { temperature } : {}),
+      ...(Array.isArray(stop) && stop.length > 0 ? { stop } : {}),
+    },
   })
 }
 

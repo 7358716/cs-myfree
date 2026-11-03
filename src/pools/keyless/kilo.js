@@ -63,14 +63,25 @@ export function freeModels(models = []) {
 }
 
 /** 发起对话 */
-export async function chat({ model, messages, signal, stream = true, fetchImpl, timeoutMs = 120_000 } = {}) {
+export async function chat({
+  model, messages, tools, toolChoice, maxTokens, temperature, stop,
+  signal, stream = true, fetchImpl, timeoutMs = 120_000,
+} = {}) {
   return chatRequest({
     baseUrl: `${KILO_BASE}/chat/completions`,
     model: model ?? 'kilo-auto/free',
     messages,
     signal, stream, fetchImpl, timeoutMs,
-    // 🔑 必须显式设 max_tokens：不设时厂商默认值很小，会导致回答被截断
-    extra: { max_tokens: 8192 },
+    extra: {
+      // 🔑 必须显式设 max_tokens：不设时厂商默认值很小，会导致回答被截断
+      max_tokens: Number.isFinite(maxTokens) && maxTokens > 0
+        ? Math.min(Math.floor(maxTokens), 32_768)
+        : 8192,
+      // 宿主 tools → OpenAI tools（不传 = 模型无法调用工具）
+      ...(Array.isArray(tools) && tools.length > 0 ? { tools, tool_choice: toolChoice ?? 'auto' } : {}),
+      ...(Number.isFinite(temperature) ? { temperature } : {}),
+      ...(Array.isArray(stop) && stop.length > 0 ? { stop } : {}),
+    },
   })
 }
 

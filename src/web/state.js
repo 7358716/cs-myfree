@@ -12,6 +12,7 @@
  */
 
 import { readFile, writeFile, rename, mkdir, chmod, unlink, readdir, stat } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -59,12 +60,40 @@ export function createState(dshHome) {
     async readConfig(fallback = {}) {
       return readJsonSafe(join(dir, FILES.config), fallback)
     },
+    /**
+     * 同步读配置（启动时合并进内存 cfg 用）。
+     *
+     * 为什么必须同步：POST /config 会热更新内存 cfg，但**重启后**若不读盘，
+     * 内存又会回到 patch 默认值 ⇒ 用户看到「保存成功，重启就变回去」。
+     * 文件不存在返回 null。
+     */
+    readConfigSync() {
+      try {
+        return JSON.parse(readFileSync(join(dir, FILES.config), 'utf8'))
+      } catch {
+        return null
+      }
+    },
     async writeConfig(obj) {
       return atomicWriteJson(join(dir, FILES.config), obj)
     },
 
     async readChain(fallback = { chain: [] }) {
       return readJsonSafe(join(dir, FILES.chain), fallback)
+    },
+    /**
+     * 同步读覆盖层（**只为插件启动时建 adapter 用**）。
+     *
+     * 为什么必须同步：adapter 在 apply() 里同步创建，而它需要「与页面完全一致」
+     * 的生效链；异步读会让首轮请求跑在空覆盖层上（重启后第一次选路就错）。
+     * 文件很小（<几 KB），同步读代价可忽略。文件不存在返回 null（区别于空表）。
+     */
+    readChainSync() {
+      try {
+        return JSON.parse(readFileSync(join(dir, FILES.chain), 'utf8'))
+      } catch {
+        return null
+      }
     },
     async writeChain(obj) {
       return atomicWriteJson(join(dir, FILES.chain), obj)

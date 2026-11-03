@@ -27,8 +27,9 @@ export const DISABLED_REASON = '免费层限流：每 IP 每 45 秒仅 1 次（�
 /**
  * 正确用法：POST /openai（OpenAI 兼容，支持 messages 与 system 分离）。
  */
-export async function* stream({ messages = [], model = 'openai', signal, fetchImpl = globalThis.fetch, timeoutMs = 60_000 } = {}) {
+export async function* stream({ messages = [], model = 'openai', tools, toolChoice, signal, fetchImpl = globalThis.fetch, timeoutMs = 60_000 } = {}) {
   // 正确拆分 system 与 user —— 不再把系统提示当用户输入
+  // ⚠️ 已知限制：该端点只吃纯文本消息 ⇒ tool_calls/tool 消息会退化成文本后发送。
   const sys = messages.filter((m) => m?.role === 'system').map((m) => (typeof m.content === 'string' ? m.content : '')).filter(Boolean).join('\n')
   const rest = messages.filter((m) => m?.role !== 'system').map((m) => ({
     role: m?.role === 'assistant' ? 'assistant' : 'user',
@@ -39,6 +40,7 @@ export async function* stream({ messages = [], model = 'openai', signal, fetchIm
     model,
     messages: sys ? [{ role: 'system', content: sys }, ...rest] : rest,
     max_tokens: 4096,
+    ...(Array.isArray(tools) && tools.length > 0 ? { tools, tool_choice: toolChoice ?? 'auto' } : {}),
   }
 
   const ctrl = new AbortController()

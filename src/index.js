@@ -12,6 +12,7 @@
  */
 
 import { createAdapter, providerRetryPolicy, DEFAULT_CANDIDATES, PROVIDER_ID } from './adapter/index.js'
+import { mergeChain, normalizeChainAliases } from './adapter/chain-overrides.js'
 import { streamWithFallback, PRIORITY as KEYLESS_PRIORITY, DEFAULT_MODEL as KEYLESS_MODEL } from './pools/keyless/index.js'
 import { ADAPTERS as KEYLESS_ADAPTERS, resolveSourceId } from './pools/keyless/index.js'
 import { keylessSources, SOURCES, buildOrder } from './pools/registry.js'
@@ -93,30 +94,124 @@ export async function* parseSse(body, now = () => Date.now()) {
  * 所以这里所有宿主 API 都走 compat 层的安全调用。
  */
 /**
+ * 宿主 content 块数组 → 纯文本（system / tool 结果用）。
+ * 图片/文件等非文本块不进入 tool 结果正文（宿主已把它们投影成文字）。
+ */
+function contentToText(content) {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((b) => b && typeof b === 'object' && b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('')
+}
+
+/** 宿主 ToolSchema[] → OpenAI tools[]（不改字段语义，只换外壳） */
+export function convertTools(tools) {
+  if (!Array.isArray(tools) || tools.length === 0) return undefined
+  const out = []
+  for (const t of tools) {
+    if (!t || typeof t.name !== 'string' || t.name.trim() === '') continue
+    const parameters = (t.parameters && typeof t.parameters === 'object' && !Array.isArray(t.parameters))
+      ? t.parameters
+      : { type: 'object', properties: {} }
+    out.push({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: typeof t.description === 'string' ? t.description : '',
+        parameters,
+      },
+    })
+  }
+  return out.length > 0 ? out : undefined
+}
+
+/**
  * 宿主 messages → OpenAI 兼容格式。
- * 纯文本时压成字符串（很多免费端点对数组形式支持不好）。
+ *
+ * 🔴 这是「模型没法用」的核心根因：旧实现只处理 text/image，
+ *    **assistant 的 tool-call 块与 role:'tool' 的结果消息被整体丢弃** ⇒
+ *    模型看不到自己上一轮调过什么、工具返回了什么，自然无法继续多轮工具会话。
+ *
+ * 映射规则（宿主 `dsh-llm/lib/types` 实测）：
+ *   system    → { role:'system', content:<文本> }
+ *   developer → { role:'system', content:<文本> }（工具增删声明走 tools 全量下发，不进消息）
+ *   user      → { role:'user', content:<文本|多模态数组> }
+ *   assistant → { role:'assistant', content:<文本|null>, tool_calls:[...] }
+ *   tool      → { role:'tool', tool_call_id:<id>, content:<文本> }
+ *
+ * 纯文本仍压成字符串（很多免费端点对数组形式支持不好）。
  */
 export function convertMessages(messages, options = {}) {
   const out = []
-  const sys = options?.systemPrompt ?? options?.system
+  const sys = options?.system ?? options?.systemPrompt
   if (typeof sys === 'string' && sys) out.push({ role: 'system', content: sys })
+
   for (const m of Array.isArray(messages) ? messages : []) {
-    const role = m?.role === 'assistant' ? 'assistant' : m?.role === 'developer' ? 'system' : (m?.role || 'user')
-    const c = m?.content
-    if (typeof c === 'string') { out.push({ role, content: c }); continue }
+    if (!m || typeof m !== 'object') continue
+    const role = m.role
+
+    // ① 工具结果：必须回放成 role:'tool' + tool_call_id，否则模型不知道调用结果
+    if (role === 'tool') {
+      const id = m.toolCallId ?? m.source?.callId ?? m.tool_call_id
+      if (id === undefined || id === null || String(id) === '') continue
+      out.push({ role: 'tool', tool_call_id: String(id), content: contentToText(m.content) })
+      continue
+    }
+
+    // ② system / developer：只取文本；工具更新块由 options.tools 全量声明覆盖
+    if (role === 'system' || role === 'developer') {
+      const text = contentToText(m.content)
+      if (text) out.push({ role: 'system', content: text })
+      continue
+    }
+
+    const c = m.content
+    if (typeof c === 'string') {
+      out.push({ role: role === 'assistant' ? 'assistant' : 'user', content: c })
+      continue
+    }
     if (!Array.isArray(c)) continue
+
     const parts = []
+    const toolCalls = []
     for (const b of c) {
       if (!b || typeof b !== 'object') continue
       if (b.type === 'text' && b.text) parts.push({ type: 'text', text: String(b.text) })
       else if (b.type === 'image') {
         const url = b.url || (b.data ? `data:${b.mime || 'image/png'};base64,${b.data}` : null)
         if (url) parts.push({ type: 'image_url', image_url: { url } })
+      } else if (b.type === 'tool-call') {
+        if (!b.name) continue
+        toolCalls.push({
+          id: String(b.id ?? `call_${toolCalls.length}`),
+          type: 'function',
+          function: {
+            name: String(b.name),
+            arguments: typeof b.arguments === 'string' ? b.arguments : JSON.stringify(b.arguments ?? {}),
+          },
+        })
       }
+      // reasoning 块刻意不回传：多数 OpenAI 兼容端点收到会 400
     }
+
+    if (role === 'assistant') {
+      const hasParts = parts.length > 0
+      if (!hasParts && toolCalls.length === 0) continue
+      const plainText = hasParts && parts.every((x) => x.type === 'text')
+      const msg = {
+        role: 'assistant',
+        content: hasParts ? (plainText ? parts.map((x) => x.text).join('\n') : parts) : null,
+      }
+      if (toolCalls.length > 0) msg.tool_calls = toolCalls
+      out.push(msg)
+      continue
+    }
+
     if (parts.length === 0) continue
-    if (parts.every((x) => x.type === 'text')) out.push({ role, content: parts.map((x) => x.text).join('\n') })
-    else out.push({ role, content: parts })
+    if (parts.every((x) => x.type === 'text')) out.push({ role: 'user', content: parts.map((x) => x.text).join('\n') })
+    else out.push({ role: 'user', content: parts })
   }
   return out
 }
@@ -126,8 +221,16 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
   const hostVer = detectHostVersion(ctx)
   log.info(`v${VERSION} 启动（宿主 ${hostVer ?? '版本未知'}）`)
 
+  // ── 配置来源：磁盘 config.json（UI 写的）→ patch 配置覆盖（部署项优先）──
+  //
+  // 🔴 旧实现只信 rawConfig：UI 通过 POST /config 写盘后，重启就回到默认值
+  //    （GET /config 也读不到磁盘值）⇒ 用户看到「保存成功，刷新又变回去」。
+  const stateStore = createState(rawConfig?.dshHome)
+  let persistedConfig = null
+  try { persistedConfig = stateStore.readConfigSync() } catch { /* 坏文件不影响启动 */ }
+
   let cfg
-  try { cfg = withDefaults(rawConfig ?? {}) }
+  try { cfg = withDefaults({ ...(persistedConfig ?? {}), ...(rawConfig ?? {}) }) }
   catch { cfg = withDefaults({}); log.warn('配置解析失败，已用默认值') }
 
   // 传输层：没配就给出「不可用」的明确错误，而不是静默失败
@@ -141,12 +244,40 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     send = async () => { throw new Error('传输层不可用') }
   }
 
-  // ── 默认链：直接用 3 个免密源（装完即可用，无需任何账号）──
-  const defaultChain = cfg.chainBase ?? KEYLESS_PRIORITY.map((id, i) => ({
-    provider: id,
-    model: KEYLESS_MODEL[id],
-    tier: i < 2 ? 1 : 2,          // kilo/ovh 优先，pollinations 次之
-  }))
+  // ── 内置链（builtin）：cfg.chainBase 优先，否则免密源（装完即可用，无需账号）──
+  const defaultChain = Array.isArray(cfg.chainBase) && cfg.chainBase.length > 0
+    ? cfg.chainBase
+    : KEYLESS_PRIORITY.map((id, i) => ({
+      provider: id,
+      model: KEYLESS_MODEL[id],
+      tier: i < 2 ? 1 : 2,          // kilo/ovh 优先，pollinations 次之
+    }))
+
+  // ── 生效链的**唯一事实来源** = ~/.dsh/cs-myfree/chain-overrides.json ──
+  //
+  // 旧实现的两个断点（用户看到的「降级链是装饰品」）：
+  //   ① 只读 cfg.chainBase，profile 的 cordis.patch.yml 里 `chain:` 从未进入 adapter；
+  //   ② UI 的 POST /chain 写 chain-overrides.json，但只有 routes.js 读它显示，
+  //      adapter 用的是 cfg.chain.overrides ⇒ 页面显示 ≠ 实际选路。
+  //
+  // 现在：启动时**同步**读覆盖层（adapter 同步创建，异步读会让首轮请求跑在空链上），
+  //       文件不存在才用 profile/config 的 chain 播种并立即落盘（让 UI 与 adapter 同源）。
+  const configOverrides = Array.isArray(cfg.chain)
+    ? cfg.chain
+    : (Array.isArray(cfg.chain?.overrides) ? cfg.chain.overrides : [])
+
+  const persistedChain = stateStore.readChainSync()
+  const diskOverrides = Array.isArray(persistedChain?.chain) ? persistedChain.chain : []
+  const seeded = diskOverrides.length === 0 && configOverrides.length > 0
+  let chainOverrides = normalizeChainAliases(
+    diskOverrides.length > 0 ? diskOverrides : configOverrides,
+    (id) => resolveSourceId(id),
+  )
+  if (persistedChain === null || seeded) {
+    // 播种/首启：把内存里归一后的链写盘，保证「页面看到的 == adapter 用的」
+    stateStore.writeChain({ chain: chainOverrides, at: Date.now() })
+      .catch(() => {})
+  }
 
   /** 识图描述缓存（同一张图只转述一次） */
   const visionCache = createDescribeCache(200)
@@ -183,6 +314,7 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
       cred: { token: cred, ak: cred.split(':')[0], sig: cred.split(':')[1] },
       model: parsed.modelId,
       messages: convertMessages(prepared, options),
+      tools: convertTools(options?.tools),
       signal,
     })
   }
@@ -224,6 +356,12 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     return a.stream({
       model: model || KEYLESS_MODEL[srcId],
       messages: convertMessages(prepared, options),
+      // 🔴 宿主 GenerateOptions.tools → OpenAI tools；不传 = 模型永远无法调用工具
+      tools: convertTools(options?.tools),
+      toolChoice: options?.tools?.length ? 'auto' : undefined,
+      maxTokens: options?.maxTokens,
+      temperature: options?.temperature,
+      stop: options?.stop,
       signal,
     })
   }
@@ -251,7 +389,13 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     adapter = createAdapter({
       extraModels,
       builtin: defaultChain,
-      overrides: cfg.chain?.overrides ?? [],
+      // 覆盖层 = UI 写的那份（唯一事实来源）；profile 的 chain 只在首启时播种
+      overrides: chainOverrides,
+      // 请求的模型若不在链/目录里但形如 <渠道>/<模型> ⇒ 允许直连（失败再降级）
+      directModel: (id) => {
+        const p = parseModelId(id)
+        return p ? { provider: p.channelId, model: id, name: id, channelModel: true } : null
+      },
       send: cfg.transportBaseUrl ? send : sendDispatch,
       budget: cfg.budgetTurns ?? {},
       onEvent: (e) => log.debug(`${e.type}`, e),
@@ -259,7 +403,7 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     })
     const sc = adapter.selfCheck()
     if (!sc.ok) log.warn(`adapter 契约自检未通过：${sc.problems.join('；')}`)
-    else log.info(`adapter 契约自检通过（${sc.modelCount} 个模型）`)
+    else log.info(`adapter 契约自检通过（${sc.modelCount} 个模型，生效链 ${sc.modelCount > 0 ? adapter.describe().chain.length : 0} 条）`)
   } catch (err) {
     log.error(`adapter 创建失败（跳过注册）：${err?.message ?? err}`)
   }
@@ -289,8 +433,6 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
   if (!searchOk) log.debug('宿主无 inject：跳过搜索注册')
 
   // ── HTTP API（设置页的数据源；全部过 guard）──
-  const stateStore = createState(cfg.dshHome)
-
   // 启动时规范化一次覆盖层（清理历史错名，避免重复候选）
   stateStore.normalizeChain((id) => resolveSourceId(id))
     .then((r) => {
@@ -321,13 +463,26 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
         accountStore,
         trustedHosts: cfg.trustedHosts ?? [],
         logger: log,
-        getChain: () => defaultChain,   // 🔴 必须与 adapter 实际使用的一致，否则页面显示与实际选路不符
+        // 🔴 页面展示的链 = adapter 实际生效的链（同一份内存数据，不是另一份推算）
+        getChain: () => defaultChain,
+        getChainState: () => (adapter
+          ? adapter.getChain()
+          : { builtin: defaultChain, overrides: chainOverrides, effective: mergeChain(defaultChain, chainOverrides) }),
+        // POST /chain 写盘后立刻换链，做到「存了即生效，重启也一致」
+        applyChain: (entries) => {
+          chainOverrides = Array.isArray(entries) ? entries : []
+          if (adapter) adapter.setChain(defaultChain, chainOverrides)
+        },
         getConfig: () => cfg,
         setConfig: async (next) => {
           try {
             const file = `${stateStore.dir}/config.json`
             const r = await atomicWrite(file, next)
-            return r.ok === true
+            if (r.ok !== true) return false
+            // 🔴 写盘后**热更新内存 cfg**：否则 GET /config、/state 与发送路径
+            //    （vision/budget 等都从这里读）仍是旧值，页面显示「已保存」但没生效。
+            cfg = withDefaults(next ?? {})
+            return true
           } catch { return false }
         },
         ledger: async () => {

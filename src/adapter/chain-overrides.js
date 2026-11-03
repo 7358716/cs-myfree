@@ -42,6 +42,36 @@ export function normalizeEntry(e, index = 0) {
 }
 
 /**
+ * 归一化一张链（别名 → 真实源 id + 去重），**不改磁盘**（纯函数）。
+ *
+ * 🔴 为什么需要：用户可能在「降级链」页面手填 `kilo-free`（旧插件时代的名字），
+ *    或历史配置里有别名。若不做映射，adapter 会把同一源当成两个候选，
+ *    或发送时报「未知供应源」。UI 写回与 adapter 启动读取必须走**同一函数**。
+ *
+ * @param {Array} list 原始条目
+ * @param {(id:string)=>string} resolve 别名解析器（认不出原样返回）
+ * @returns {Array} 归一化后的条目（保持原顺序，同 provider+model 只留第一条）
+ */
+export function normalizeChainAliases(list = [], resolve = (x) => x) {
+  const out = []
+  const seen = new Set()
+  for (const e of Array.isArray(list) ? list : []) {
+    const n = normalizeEntry(e)
+    if (!n) continue
+    let provider = n.provider
+    try { provider = String(resolve(n.provider) ?? n.provider) } catch { /* 解析失败用原值 */ }
+    const key = `${provider}\u0000${n.model}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const next = { provider, model: n.model, tier: n.tier }
+    if (n.paid === true) next.paid = true
+    if (n.note) next.note = n.note
+    out.push(next)
+  }
+  return out
+}
+
+/**
  * 校验并归一化整张覆盖表（整表覆盖语义）。
  * @returns {{ok:boolean, entries?:Array, errors?:string[]}}
  */

@@ -68,7 +68,7 @@ export function joinUrl(base, path) {
  */
 export async function chat(o) {
   const {
-    ch, cred = {}, model, messages, stream = true,
+    ch, cred = {}, model, messages, tools, stream = true,
     signal, fetchImpl = globalThis.fetch, timeoutMs = 90_000,
   } = o
 
@@ -86,10 +86,17 @@ export async function chat(o) {
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
 
   try {
+    const body = { model, messages, stream }
+    // 宿主 tools → OpenAI tools（不传 = 模型无法调用工具）
+    if (Array.isArray(tools) && tools.length > 0) { body.tools = tools; body.tool_choice = o.toolChoice ?? 'auto' }
+    if (Number.isFinite(o.maxTokens) && o.maxTokens > 0) body.max_tokens = Math.floor(o.maxTokens)
+    if (Number.isFinite(o.temperature)) body.temperature = o.temperature
+    if (Array.isArray(o.stop) && o.stop.length > 0) body.stop = o.stop
+
     const res = await fetchImpl(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ model, messages, stream }),
+      body: JSON.stringify(body),
       signal: ctrl.signal,
     })
     if (!res.ok) {

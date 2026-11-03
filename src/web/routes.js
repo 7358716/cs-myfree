@@ -20,7 +20,7 @@
 import { validateOverrides, mergeChain, chainSummary } from '../adapter/chain-overrides.js'
 import { keylessSources, SOURCES, buildOrder, checkinSources } from '../pools/registry.js'
 import { CHANNELS, checkinChannels, manualRefreshChannels, proxyRequiredChannels } from '../pools/channels/protocols.js'
-import { probeAll, PRIORITY, DEFAULT_MODEL } from '../pools/keyless/index.js'
+import { probeAll, PRIORITY, DEFAULT_MODEL, resolveSourceId } from '../pools/keyless/index.js'
 import { queryCash, CASH_PATH } from './cash.js'
 import { judge, sendJson } from './guard.js'
 import { withDefaults, DEFAULTS } from '../config/store.js'
@@ -63,6 +63,8 @@ export function registerRoutes(webServer, opts = {}) {
   const {
     state,
     getChain = () => [],
+    getChainState = null,          // () => { builtin, overrides, effective }：adapter 实际生效链
+    applyChain = null,             // async (entries) => void：写盘后立刻让 adapter 生效
     getConfig = () => ({}),
     setConfig = async () => false,
     ledger = null,
@@ -71,6 +73,24 @@ export function registerRoutes(webServer, opts = {}) {
     fetchImpl = globalThis.fetch,
     now = () => Date.now(),
   } = opts
+
+  /**
+   * 链视图：页面展示与实际选路**必须是同一份数据**（铁律2）。
+   * 有 getChainState（插件运行时）就用 adapter 的；否则退回读覆盖层文件
+   * （纯路由测试/独立使用时的兼容路径）。
+   */
+  const chainView = async () => {
+    if (typeof getChainState === 'function') {
+      const v = getChainState() || {}
+      const builtin = Array.isArray(v.builtin) ? v.builtin : []
+      const overrides = Array.isArray(v.overrides) ? v.overrides : []
+      const effective = Array.isArray(v.effective) ? v.effective : mergeChain(builtin, overrides)
+      return { builtin, overrides, effective }
+    }
+    const builtin = getChain()
+    const overrides = (await state?.readChain?.({ chain: [] }))?.chain ?? []
+    return { builtin, overrides, effective: mergeChain(builtin, overrides) }
+  }
 
   let registered = 0
 
@@ -115,9 +135,10 @@ export function registerRoutes(webServer, opts = {}) {
   // ── 综合状态 ──
   route('/state', async () => {
     const cfg = withDefaults(getConfig())
-    const builtin = getChain()
-    const overrides = (await state?.readChain?.({ chain: [] }))?.chain ?? []
-    const merged = mergeChain(builtin, overrides)
+    const view = await chainView()
+    const builtin = view.builtin
+    const overrides = view.overrides
+    const merged = view.effective
 
     const probe = await state?.readProbe?.(null)
     return {
@@ -166,21 +187,40 @@ export function registerRoutes(webServer, opts = {}) {
   // ── 链 ──
   route('/chain', async ({ body }) => {
     if (body === undefined) {
-      const builtin = getChain()
-      const overrides = (await state?.readChain?.({ chain: [] }))?.chain ?? []
+      const view = await chainView()
       return {
         ok: true,
-        builtin,
-        overrides,
-        effective: mergeChain(builtin, overrides),
-        tiers: chainSummary(mergeChain(builtin, overrides)),
+        builtin: view.builtin,
+        overrides: view.overrides,
+        effective: view.effective,
+        tiers: chainSummary(view.effective),
+        applied: true,   // 页面上的「生效链」= adapter 此刻真正会用的链
       }
     }
     // 写覆盖层（整表覆盖）
-    const v = validateOverrides(body)
+    // 先把 provider 别名归一（kilo-free → kilo），否则「别名 + 真名」会被当成两条
+    // ⇒ UI 显示重复候选、adapter 多花一次失败重试。
+    const rawList = Array.isArray(body?.chain) ? body.chain : body?.chain
+    const normalizedBody = Array.isArray(rawList)
+      ? { ...body, chain: rawList.map((e) => (e && typeof e === 'object' ? { ...e, provider: resolveSourceId(e.provider) } : e)) }
+      : body
+    const v = validateOverrides(normalizedBody)
     if (!v.ok) return { ok: false, errors: v.errors, entries: v.entries }
     const saved = await state?.writeChain?.({ chain: v.entries, at: now() })
-    return { ok: saved !== false, errors: v.errors, count: v.entries.length, savedAt: now() }
+    // 🔴 写盘成功必须**立刻**让 adapter 换链，否则「存了不生效，要重启」
+    let applied = false
+    if (saved !== false && typeof applyChain === 'function') {
+      try {
+        await applyChain(v.entries)
+        applied = true
+      } catch (err) {
+        logger.warn?.(`覆盖层已保存但生效失败：${err?.message ?? err}`)
+        return { ok: false, errno: 'CHAIN_APPLY_FAILED', count: v.entries.length, applied: false, error: String(err?.message ?? err).slice(0, 200) }
+      }
+    } else {
+      applied = saved !== false
+    }
+    return { ok: saved !== false, errors: v.errors, count: v.entries.length, savedAt: now(), applied, effective: (await chainView()).effective }
   })
 
   // ── 探测（真实推理）──
@@ -208,7 +248,15 @@ export function registerRoutes(webServer, opts = {}) {
       ok: true,
       at: now(),
       defaultModels: DEFAULT_MODEL,
-      sources: keylessSources().map((s) => ({ id: s.id, label: s.label, note: s.note, probed: probe?.results?.find((r) => r.id === s.id) ?? null })),
+      sources: keylessSources().map((s) => ({
+        id: s.id,
+        label: s.label,
+        note: s.note,
+        // 🔑 探测结果的 id 是真实源 id（kilo/ovh/…），源注册表里是展示 id
+        //    （kilo-free/ovh-vision/…）⇒ 必须归一后再匹配，否则 probed 永远 null。
+        probeId: resolveSourceId(s.id),
+        probed: probe?.results?.find((r) => r.id === resolveSourceId(s.id)) ?? null,
+      })),
       note: '完整模型清单需渠道层登录后由宿主暴露；本页展示免密源可用的默认模型',
     }
   })
@@ -243,9 +291,10 @@ export function registerRoutes(webServer, opts = {}) {
     add('状态目录', ov?.exists === true, ov?.exists ? ov.dir : `不存在（首次使用会自动创建）：${ov?.dir ?? '?'}`)
 
     // 3) 链
-    const builtin = getChain()
-    const overrides = (await state?.readChain?.({ chain: [] }))?.chain ?? []
-    const merged = mergeChain(builtin, overrides)
+    const view = await chainView()
+    const builtin = view.builtin
+    const overrides = view.overrides
+    const merged = view.effective
     add('降级链', merged.length > 0, merged.length > 0 ? `生效 ${merged.length} 条（内置 ${builtin.length} + 覆盖 ${overrides.length}）` : '为空 ⇒ 所有请求必失败')
 
     // 4) 免密源（看缓存，不打网络）
@@ -342,7 +391,14 @@ export function registerRoutes(webServer, opts = {}) {
         at: now(),
         total: list.length,
         models: list,
-        byChannel: Object.fromEntries(Object.entries(cache).map(([k, v]) => [k, { ok: v.ok, count: (v.models || []).length, error: v.error, at: v.at }])),
+        byChannel: Object.fromEntries(Object.entries(cache).map(([k, v]) => [k, {
+          ok: v.ok,
+          count: (v.models || []).length,
+          error: v.error,
+          at: v.at,
+          // 🔴 来源必须暴露：remote（远端拉取）/ builtin（内置兜底）/ builtin-after-http-error…
+          source: v.source ?? null,
+        }])),
       }
     }
     // POST ⇒ 重新拉取
