@@ -14,7 +14,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mergeChain } from '../src/adapter/chain-overrides.js'
+import { mergeChain } from '../../src/adapter/chain-overrides.js'
 
 const BASE = process.env.CS_MYFREE_BASE || 'http://127.0.0.1:3080'
 const TIMEOUT = Number(process.env.CS_MYFREE_TIMEOUT_MS || 8000)
@@ -238,7 +238,10 @@ liveTest('POST /channels/parse：普通网址必须拒绝，带 code 回调链�
 
   const good = (await req('/cs-myfree/channels/parse', { method: 'POST', body: { text: 'https://x.com/cb?code=abc123def456ghi789' } })).json
   assert.equal(good.ok, true)
-  assert.equal(good.credential, 'abc123def456ghi789')
   assert.equal(good.kind, 'url')
   assert.equal(good.field, 'code')
+  // 🔴 安全红线（v1.8.0）：解析接口**绝不回凭据原文**，只回掩码预览
+  assert.equal('credential' in good, false, '不得把凭据原文回给前端')
+  assert.equal(typeof good.preview, 'string')
+  assert.ok(good.preview.includes('…'), '必须掩码：' + good.preview)
 })
