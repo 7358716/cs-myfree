@@ -10,6 +10,10 @@ const chain = [
 ]
 
 async function collect(iter) { const out = []; for await (const c of iter) out.push(c); return out }
+/** 从块事件流里提取可见文本 */
+function textOf(chunks) {
+  return chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('')
+}
 
 test('describe 返回与选路共用的链', () => {
   const a = createAdapter({ builtin: chain, send: async () => [] })
@@ -66,8 +70,9 @@ test('第一个候选成功则不再尝试后面的', async () => {
     },
   })
   const out = await collect(a.stream({ model: 'm1', messages: [] }))
-  assert.equal(out.length, 1)
-  assert.equal(tried.length, 1)
+  assert.equal(tried.length, 1, '只应尝试第一个候选')
+  assert.equal(textOf(out), 'ok')
+  assert.equal(out.at(-1).type, 'finish', '必须以 finish 结束')
 })
 
 test('首个候选抛错则切下一个（提交点未触发 ⇒ 用户零感知）', async () => {
@@ -87,9 +92,10 @@ test('首个候选抛错则切下一个（提交点未触发 ⇒ 用户零感知
   })
   const out = await collect(a.stream({ model: 'm1', messages: [] }))
   assert.equal(tried.length, 2, '应切到第二个候选')
-  assert.equal(out.length, 1)
-  assert.equal(out[0].text, '答案')
-  assert.equal(out[0].text.includes('想了一下'), false, 'reasoning 不应泄漏给用户')
+  assert.equal(textOf(out), '答案', '只应有第二个候选的答案')
+  // 第一个候选的 reasoning 已被丢弃（提交点之前失败 ⇒ 零泄漏）
+  const all = JSON.stringify(out)
+  assert.equal(all.includes('想了一下'), false, 'reasoning 不应泄漏给用户')
 })
 
 test('已提交后的失败不切换候选（内容收不回来）', async () => {
@@ -104,7 +110,7 @@ test('已提交后的失败不切换候选（内容收不回来）', async () =>
       })()
     },
   })
-  // 已提交 ⇒ 无法安全换源，如实把错误抛给调用方（不静默拼接畸形回答）
+  // 已提交 ⇒ 无法安全换源，如实把错误抛给调用方
   await assert.rejects(() => collect(a.stream({ model: 'm1', messages: [] })))
   assert.equal(calls, 1, '不得切换到其他候选')
 })

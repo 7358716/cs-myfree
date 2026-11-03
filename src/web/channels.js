@@ -66,8 +66,14 @@ export const LOGIN_GUIDES = Object.freeze({
   [LOGIN.OAUTH_PKCE]: {
     kind: 'oauth',
     title: 'OAuth 登录',
-    steps: ['点「打开登录页」', '完成 OAuth 授权', '把回调里的 code 或 token 粘贴回来', '点保存'],
-    field: 'code / token',
+    steps: [
+      '点「打开官网」→ 在页面里找到「登录」或「API Key / 访问密钥」入口',
+      '完成登录后，进入「我的凭证 / 访问密钥」页面',
+      '创建一个密钥，复制 AK/SK 或 access token',
+      '粘贴到下方输入框并点保存',
+    ],
+    field: 'AK/SK 或 access token',
+    warn: '这类渠道的登录入口在官网深处，插件无法代你跳转；请按上面步骤自己找',
   },
   [LOGIN.NONE]: {
     kind: 'none',
@@ -77,12 +83,19 @@ export const LOGIN_GUIDES = Object.freeze({
   },
 })
 
-/** 取某渠道的登录页 URL（只用官方域名） */
+/**
+ * 取某渠道的**登录入口页**。
+ *
+ * 🔴 教训：之前用「API 域名 + 根路径」当登录页，大部分打不开（404）。
+ *    现在用协议表里手工确认的 `loginPage`，并且 UI 明确标注
+ *    「在官网里自己找登录/API Key 入口」—— 不误导用户。
+ */
 export function loginUrlOf(id) {
   const ch = CHANNELS[id]
   if (!ch) return null
+  if (ch.loginPage) return ch.loginPage
+  // 兜底：没有登记 loginPage 的只给站点首页
   const base = ch.accountBase || ch.baseUrl
-  if (!base) return null
   try {
     const u = new URL(base)
     return `${u.protocol}//${u.host}`
@@ -115,6 +128,7 @@ export async function listChannels(store) {
       guideSteps: guide.steps,
       field: guide.field,
       loginUrl: loginUrlOf(id),
+      loginWarn: guide.warn ?? null,
       checkin: ch.checkin?.supported === true,
       refresh: ch.refresh,
       note: ch.note ?? null,

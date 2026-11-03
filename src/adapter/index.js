@@ -19,6 +19,7 @@ import { createLadder, createHeld, DEFAULT_BUDGET } from './ladder.js'
 import { providerRetryPolicy } from './policy.js'
 import { mergeChain } from './chain-overrides.js'
 import { makeProviderInfo, makeModelInfo, checkProviderInfo, checkModelInfo } from './contract.js'
+import { toHostChunks } from './chunks.js'
 
 export { providerRetryPolicy }
 
@@ -151,14 +152,28 @@ export function createAdapter(opts = {}) {
             options,
           })
 
+          // 提交点：先在**简化增量**层缓冲，提交后才转成宿主的块事件流
+          const buffered = []
           for await (const chunk of iter) {
             const r = held.push(chunk)
             if (r.committed) {
-              for (const c of r.released) yield c
+              for (const c of r.released) buffered.push(c)
             } else if (r.chunk) {
-              yield r.chunk
+              buffered.push(r.chunk)
             }
           }
+
+          if (!held.isCommitted) {
+            lastErr = { kind: KIND.EMPTY_RESPONSE, message: 'no visible answer' }
+            onEvent({ type: 'empty-response', provider: cand.provider })
+            continue
+          }
+
+          // 把缓冲的简化增量翻译成符合宿主契约的 block 事件流
+          async function* replay() { for (const c of buffered) yield c }
+          yield* toHostChunks(replay())
+          onEvent({ type: 'success', provider: cand.provider, model: cand.model })
+          return
 
           if (!held.isCommitted) {
             lastErr = { kind: KIND.EMPTY_RESPONSE, message: 'no visible answer' }

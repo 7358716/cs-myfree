@@ -497,9 +497,31 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, f.label),
           f.hint ? h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) }, f.hint) : null,
           f.type === 'bool'
-            ? h('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' } },
-                h('input', { type: 'checkbox', checked: val(f.path) === true, onChange: (e) => setPath(f.path, e.target.checked) }),
-                h('span', { style: S.dim }, val(f.path) === true ? '已开启' : '已关闭'))
+            ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+                h('span', {
+                  onClick: () => setPath(f.path, !(val(f.path) === true)),
+                  style: {
+                    cursor: 'pointer', userSelect: 'none',
+                    display: 'inline-flex', alignItems: 'center',
+                    width: '44px', height: '22px', borderRadius: '11px',
+                    background: val(f.path) === true ? 'var(--dsw-alias-state-success-primary)' : 'rgba(128,128,128,0.35)',
+                    transition: 'background 0.15s', flexShrink: 0,
+                  },
+                },
+                  h('span', {
+                    style: {
+                      display: 'block', width: '18px', height: '18px', borderRadius: '50%',
+                      background: '#fff', margin: '2px',
+                      transform: val(f.path) === true ? 'translateX(22px)' : 'translateX(0)',
+                      transition: 'transform 0.15s',
+                    },
+                  })),
+                h('span', {
+                  style: {
+                    fontWeight: 600,
+                    color: val(f.path) === true ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-secondary)',
+                  },
+                }, val(f.path) === true ? '已开启' : '已关闭'))
             : f.type === 'number'
               ? h('input', {
                   type: 'number', style: Object.assign({}, S.input, { width: '140px' }),
@@ -528,6 +550,12 @@ window.__ModuleLoader__.load({
     // ── W6 保护策略（可编辑）──
     function PolicyZone() {
       return h('div', null,
+        h(ConfigSummary, { items: [
+          { path: ['vision', 'mode'], label: '识图档位' },
+          { path: ['search', 'budgetMs'], label: '搜索预算', fmt: (v) => v + ' ms' },
+          { path: ['search', 'sources'], label: '搜索源' },
+          { path: ['sources', 'disabled'], label: '禁用源' },
+        ] }),
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '8px' } }, '保护策略'),
           h(ConfigEditor, { fields: [
@@ -539,9 +567,37 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 配置状态一览（一眼看到所有值，而不只是按钮） */
+    function ConfigSummary(props) {
+      const [s] = useApi('/config')
+      if (!s.data) return h('div', { style: S.dim }, '加载中…')
+      const c = s.data.config || {}
+      const items = props.items || []
+      const get = (path) => path.reduce((o, k) => (o == null ? undefined : o[k]), c)
+      return h('div', { style: Object.assign({}, S.card, { marginBottom: '8px' }) },
+        h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '当前生效值'),
+        items.map((it) => {
+          const v = get(it.path)
+          const shown = it.fmt ? it.fmt(v) : (typeof v === 'boolean' ? (v ? '✅ 已开启' : '⛔ 已关闭') : (Array.isArray(v) ? (v.join(', ') || '（空）') : (v == null ? '—' : String(v))))
+          const bad = it.bad ? it.bad(v) : false
+          return h('div', { key: it.path.join('.'), style: S.row },
+            h('span', null, it.label),
+            h('span', { style: Object.assign({ textAlign: 'right', marginLeft: '12px', fontWeight: 500 }, bad ? S.warn : S.dim) }, shown))
+        }),
+      )
+    }
+
     // ── W7 预算付费（可编辑）──
     function BudgetZone() {
       return h('div', null,
+        h(ConfigSummary, { items: [
+          { path: ['paid', 'enabled'], label: '① 付费源' },
+          { path: ['paid', 'allowAutoCall'], label: '付费是否可自动调用' },
+          { path: ['paid', 'confirmEachTurn'], label: '② 逐次人工确认' },
+          { path: ['budget', 'perCallCNY'], label: '④ 单次限额', fmt: (v) => '¥' + v, bad: (v) => !(v > 0) },
+          { path: ['budget', 'dailyCNY'], label: '⑤ 日限额', fmt: (v) => '¥' + v, bad: (v) => !(v > 0) },
+          { path: ['budget', 'monthlyCNY'], label: '⑤ 月限额', fmt: (v) => '¥' + v, bad: (v) => !(v > 0) },
+        ] }),
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '8px' } }, '五道闸门'),
           h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },

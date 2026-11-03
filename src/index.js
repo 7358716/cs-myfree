@@ -17,6 +17,7 @@ import { ADAPTERS as KEYLESS_ADAPTERS } from './pools/keyless/index.js'
 import { keylessSources, SOURCES, buildOrder } from './pools/registry.js'
 import { evaluate, DECISION } from './policy/paid-gate.js'
 import { shouldEgress, MODE } from './vision/bridge.js'
+import { preprocessImages, createDescribeCache } from './vision/pipeline.js'
 import { fuseResults, toHostSources } from './search/fuse.js'
 import { PARSERS } from './search/sources.js'
 import { readJson, atomicWrite, withDefaults, DEFAULTS } from './config/store.js'
@@ -142,14 +143,40 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     tier: i < 2 ? 1 : 2,          // kilo/ovh 优先，pollinations 次之
   }))
 
-  /** 真实发送：按 provider 分发到对应免密源适配器 */
+  /** 识图描述缓存（同一张图只转述一次） */
+  const visionCache = createDescribeCache(200)
+
+  /**
+   * 真实发送：先识图预处理，再分发到对应免密源适配器。
+   *
+   * 识图采用**专用视觉模型转述**（社区主流做法）：
+   *   图片 → OVH Qwen2.5-VL → 文字描述 → 注入主模型
+   * 这样主模型不需要是多模态，也不会有「静默丢图」问题。
+   */
   const sendToKeyless = async ({ provider, model, messages, signal, options }) => {
     const a = KEYLESS_ADAPTERS[provider]
     if (!a) throw Object.assign(new Error(`未知供应源：${provider}`), { code: 'MODEL_NOT_FOUND' })
-    // 透传 reasoning 等选项（宿主给的 options 含 temperature 等）
+
+    // ① 识图预处理（档位为 off 时只留占位符，不出网）
+    let prepared = messages
+    try {
+      const r = await preprocessImages(messages, {
+        mode: cfg.vision?.mode ?? MODE.OFF,
+        consented: cfg.vision?.consented === true,
+        cache: visionCache,
+        onAudit: (e) => log.debug(`vision ${e.ok ? 'ok' : 'fail'} ${e.ms}ms`),
+      })
+      prepared = r.messages
+      if (r.stats.images > 0) {
+        log.info(`识图：${r.stats.images} 张（转述 ${r.stats.described}，缓存 ${r.stats.cached}，跳过 ${r.stats.skipped}，失败 ${r.stats.failed}）`)
+      }
+    } catch (err) {
+      log.warn(`识图预处理失败（降级为原样发送）：${err?.message ?? err}`)
+    }
+
     return a.stream({
       model: model || KEYLESS_MODEL[provider],
-      messages: convertMessages(messages, options),
+      messages: convertMessages(prepared, options),
       signal,
     })
   }

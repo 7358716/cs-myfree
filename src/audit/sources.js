@@ -138,12 +138,19 @@ export async function collectLedger({ dshHome, fromMs = 0 } = {}) {
     readSpend({ dshHome, fromMs }),
     readTokenLedger({ dshHome }),
   ])
+  // ⚠️ 两个来源都读不到是**正常情况**（例如没装 my-free-model 插件的新机器），
+  //    不能报错，否则界面显示「接口返回 ok=false」把用户吓一跳。
+  const neitherAvailable = !spend.ok && !token.ok
   const today = dateKeyCN(Date.now())
   const month = today.slice(0, 7)
   const dToday = spend.days?.find((d) => d.date === today)
   const dMonth = (spend.days ?? []).filter((d) => String(d.date).startsWith(month))
   return {
-    ok: spend.ok || token.ok,
+    ok: true,                     // 读不到数据不等于出错
+    available: !neitherAvailable,
+    note: neitherAvailable
+      ? '本机没有找到用量记录（未安装 my-free-model 插件，或还没有调用记录）—— 这是正常的，不影响使用'
+      : null,
     spend,
     token,
     summary: {

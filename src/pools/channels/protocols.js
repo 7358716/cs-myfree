@@ -52,6 +52,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: true, gain: '+1000/日' },
     credRef: 'CODEARTS_TOKEN',
+    loginPage: 'https://devcloud.cn-north-4.huaweicloud.com/codearts/home',
   },
   buddy: {
     label: 'CodeBuddy（腾讯）',
@@ -62,6 +63,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: true, gain: '+100/日' },
     credRef: 'BUDDY_TOKEN',
+    loginPage: 'https://copilot.tencent.com',
   },
   workbuddy: {
     label: 'WorkBuddy（国际）',
@@ -72,6 +74,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: false },
     credRef: 'WORKBUDDY_TOKEN',
+    loginPage: 'https://www.workbuddy.ai',
   },
   lobsterai: {
     label: 'LobsterAI（有道）',
@@ -82,6 +85,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: true },
     credRef: 'LOBSTERAI_TOKEN',
+    loginPage: 'https://lobsterai.youdao.com',
   },
   qoder: {
     label: 'Qoder',
@@ -92,6 +96,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: true, note: '每日 10:00 (UTC+8) 刷新' },
     credRef: 'QODER_TOKEN',
+    loginPage: 'https://qoder.sh',
   },
   qodercn: {
     label: 'Qoder 中国版',
@@ -102,6 +107,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: true, note: '每日 10:00 (UTC+8) 刷新' },
     credRef: 'QODERCN_TOKEN',
+    loginPage: 'https://qoder.sh',
   },
   trae: {
     label: 'TRAE（字节）',
@@ -112,6 +118,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: true },
     credRef: 'TRAE_TOKEN',
+    loginPage: 'https://www.trae.ai',
     note: '单次输出上限默认 64000',
   },
   cline: {
@@ -123,6 +130,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: false, note: '源码明确无签到接口' },
     credRef: 'CLINE_TOKEN',
+    loginPage: 'https://app.cline.bot',
   },
   loomy: {
     label: 'Loomy（讯飞）',
@@ -136,6 +144,7 @@ export const CHANNELS = Object.freeze({
     sessionTtlSeconds: 1_209_600,
     checkin: { supported: true, endpoint: 'POST /points/first-login', note: '每日池不结转、不回补' },
     credRef: 'LOOMY_ACCESS_TOKEN',
+    loginPage: 'https://loomy.xunfei.cn',
     accountBase: 'https://account.xfinfr.com',
   },
   raccoon: {
@@ -148,6 +157,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: false },
     credRef: 'RACCOON_TOKEN',
+    loginPage: 'https://www.sensetime.com',
   },
   minimax: {
     label: 'MiniMax Code',
@@ -158,6 +168,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: true },
     credRef: 'MINIMAX_TOKEN',
+    loginPage: 'https://agent.minimax.cn',
     accountBase: 'https://account.minimax.cn',
   },
   minimaxintl: {
@@ -169,6 +180,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: true },
     credRef: 'MINIMAXINTL_TOKEN',
+    loginPage: 'https://agent.minimax.io',
     accountBase: 'https://account.minimax.io',
   },
   zcode: {
@@ -180,6 +192,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: true, note: '含营销活动投放；领取需一次性验证参数' },
     credRef: 'ZCODE_TOKEN',
+    loginPage: 'https://z.ai',
     versionGate: { minAppVersion: '3.16.3' },
   },
   opencode: {
@@ -191,6 +204,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.NONE,
     checkin: { supported: false },
     credRef: 'OPENCODE_API_KEY',
+    loginPage: 'https://opencode.ai',
     note: '本机实测 403 FreeTierError（免费层被上游关闭）',
   },
   gemini: {
@@ -202,6 +216,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: false },
     credRef: 'GEMINI_ACCESS_TOKEN',
+    loginPage: 'https://aistudio.google.com/apikey',
     note: '本机实测链路层封锁（TCP 不通）；需代理',
     proxyRequired: true,
   },
@@ -214,6 +229,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: true, note: '无手动签到入口，自动领取' },
     credRef: 'OFFICEACE_TOKEN',
+    loginPage: 'https://auth.huaweicloud.com/authui/login',
     accountBase: 'https://auth.huaweicloud.com/authui',
   },
   accio: {
@@ -225,6 +241,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.AUTO,
     checkin: { supported: false },
     credRef: 'ACCIO_TOKEN',
+    loginPage: 'https://accio.alibaba.com',
     note: '图片通路原生收图；multimodal:false 模型会静默忽略图片',
   },
   qiniu: {
@@ -236,6 +253,7 @@ export const CHANNELS = Object.freeze({
     refresh: REFRESH.NONE,
     checkin: { supported: false },
     credRef: 'QINIU_API_KEY',
+    loginPage: 'https://portal.qiniu.com/developer/user/key',
   },
 })
 

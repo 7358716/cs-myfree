@@ -67,8 +67,16 @@ export function commitsAnswer(chunk) {
     case 'text-delta': return String(chunk.text ?? '').length > 0
     case 'tool-call':
     case 'tool-call-delta': return true
+    case 'block-end': {
+      // 只有**有内容的**块才算提交；空的 reasoning 块不算
+      const b = chunk.block
+      if (!b) return false
+      if (b.type === 'text') return String(b.text ?? '').length > 0
+      if (b.type === 'tool-call') return true
+      return false     // reasoning 块结束不算
+    }
     case 'finish': return chunk.reason?.kind === 'stop' || chunk.reason?.kind === 'tool-calls'
-    // reasoning-delta / block-start / block-end / usage 一律不算提交
+    // reasoning-delta / block-start / usage 一律不算提交
     default: return false
   }
 }

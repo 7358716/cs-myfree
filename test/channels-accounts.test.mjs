@@ -61,12 +61,16 @@ test('18 个渠道都有登录指引', async () => {
   }
 })
 
-test('登录 URL 只用官方域名（不带路径/参数）', () => {
+test('登录 URL 必须是 https 且非空（可用真实入口路径）', () => {
   for (const id of Object.keys(CHANNELS)) {
     const u = loginUrlOf(id)
-    if (!u) continue
-    assert.match(u, /^https:\/\/[^/]+$/, id + ' 的 URL 应为纯域名：' + u)
+    assert.ok(u, id + ' 缺登录 URL')
+    assert.match(u, /^https:\/\//, id + ' 必须 https：' + u)
   }
+})
+test('18 个渠道都有 loginPage（真实入口）', () => {
+  const withPage = Object.values(CHANNELS).filter((c) => c.loginPage).length
+  assert.equal(withPage, 18)
 })
 
 test('未登录时 loggedIn=false', async () => {
