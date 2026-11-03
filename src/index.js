@@ -13,7 +13,7 @@
 
 import { createAdapter, providerRetryPolicy, DEFAULT_CANDIDATES, PROVIDER_ID } from './adapter/index.js'
 import { streamWithFallback, PRIORITY as KEYLESS_PRIORITY, DEFAULT_MODEL as KEYLESS_MODEL } from './pools/keyless/index.js'
-import { ADAPTERS as KEYLESS_ADAPTERS } from './pools/keyless/index.js'
+import { ADAPTERS as KEYLESS_ADAPTERS, resolveSourceId } from './pools/keyless/index.js'
 import { keylessSources, SOURCES, buildOrder } from './pools/registry.js'
 import { evaluate, DECISION } from './policy/paid-gate.js'
 import { shouldEgress, MODE } from './vision/bridge.js'
@@ -29,7 +29,7 @@ import { appendRecord } from './audit/sources.js'
 import { createState } from './web/state.js'
 
 const NAME = 'cs-myfree'
-const VERSION = '0.2.0'
+const VERSION = '1.5.0'
 
 export const name = NAME
 export const version = VERSION
@@ -155,8 +155,15 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
    * 这样主模型不需要是多模态，也不会有「静默丢图」问题。
    */
   const sendToKeyless = async ({ provider, model, messages, signal, options }) => {
-    const a = KEYLESS_ADAPTERS[provider]
-    if (!a) throw Object.assign(new Error(`未知供应源：${provider}`), { code: 'MODEL_NOT_FOUND' })
+    // 🔑 归一别名（kilo-free → kilo），否则用户手填旧名字会报「未知供应源」
+    const srcId = resolveSourceId(provider)
+    const a = KEYLESS_ADAPTERS[srcId]
+    if (!a) {
+      throw Object.assign(
+        new Error(`未知供应源：${provider}（已知：${Object.keys(KEYLESS_ADAPTERS).join('/')}）`),
+        { code: 'MODEL_NOT_FOUND' },
+      )
+    }
 
     // ① 识图预处理（档位为 off 时只留占位符，不出网）
     let prepared = messages
@@ -176,7 +183,7 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     }
 
     return a.stream({
-      model: model || KEYLESS_MODEL[provider],
+      model: model || KEYLESS_MODEL[srcId],
       messages: convertMessages(prepared, options),
       signal,
     })
@@ -247,7 +254,7 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
         dshHome: cfg.dshHome,
         trustedHosts: cfg.trustedHosts ?? [],
         logger: log,
-        getChain: () => (cfg.chainBase ?? DEFAULT_CANDIDATES),
+        getChain: () => defaultChain,   // 🔴 必须与 adapter 实际使用的一致，否则页面显示与实际选路不符
         getConfig: () => cfg,
         setConfig: async (next) => {
           try {

@@ -31,6 +31,28 @@ export const DEFAULT_MODEL = Object.freeze({
 export const PRIORITY = Object.freeze(['kilo', 'ovh', 'pollinations'])
 
 /**
+ * provider 别名 → 真实源 id。
+ *
+ * 🔴 为什么需要：用户可能在「降级链」页面手填 `kilo-free`（旧插件时代的名字），
+ *    或历史配置里有别名。若不做映射，发送时会报「未知供应源」。
+ */
+export const PROVIDER_ALIASES = Object.freeze({
+  'kilo-free': 'kilo',
+  'kilo-free-pool': 'kilo',
+  'ovh-vision': 'ovh',
+  'ovh-cloud': 'ovh',
+  'pollinations-free': 'pollinations',
+  'polli': 'pollinations',
+})
+
+/** 把各种写法归一成真实源 id（认不出就原样返回） */
+export function resolveSourceId(provider) {
+  const p = String(provider ?? '').trim().toLowerCase()
+  if (ADAPTERS[p]) return p
+  return PROVIDER_ALIASES[p] ?? p
+}
+
+/**
  * 探测单个源是否可用（真实请求，不是 TCP 探测）。
  * ⚠️ 用真实推理而不是 TCP：本机实测过「TCP 通但推理 401」的情况。
  */
@@ -67,10 +89,13 @@ export async function probeAll(opts = {}) {
 }
 
 /** 取第一个可用源的流（自动 fallback） */
-export async function* streamWithFallback({ model, messages, signal, fetchImpl, timeoutMs } = {}) {
+export async function* streamWithFallback({ provider, model, messages, signal, fetchImpl, timeoutMs } = {}) {
   let lastErr = null
-  for (const id of PRIORITY) {
+  // 给了 provider 就只走它（归一别名），否则按优先级全部试
+  const order = provider ? [resolveSourceId(provider)] : PRIORITY
+  for (const id of order) {
     const a = ADAPTERS[id]
+    if (!a) { lastErr = new Error('未知供应源：' + provider); continue }
     try {
       const useModel = model && model.startsWith(id) ? model.split(':')[1] : DEFAULT_MODEL[id]
       yield* a.stream({ model: useModel, messages, signal, fetchImpl, timeoutMs })
