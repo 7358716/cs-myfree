@@ -2,7 +2,7 @@
   "name": "cs-myfree",
   "version": "1.9.6",
   "type": "module",
-  "description": "cs-myfree — 免费模型提供方：供给 / 降级链 / 渠道层 / 搜索 / 识图 / 费用闸门 / 模型工作台",
+  "description": "Myfree — 提供 18 个 AI 渠道接入。",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",

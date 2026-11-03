@@ -9,6 +9,7 @@
  * @module cs-myfree/pools/channels/driver
  */
 
+import { randomUUID } from 'node:crypto'
 import { AUTH } from './protocols.js'
 import { signHuaweiRequest } from './sign.js'
 import { toUsage } from '../keyless/base.js'
@@ -85,7 +86,18 @@ export function buildRequestHeaders(ch, cred = {}, o = {}) {
     'content-type': 'application/json',
     ...(accept ? { accept } : {}),
     'user-agent': 'Mozilla/5.0 (compatible; cs-myfree)',
+    // 🔴 渠道声明式**准入头**（腾讯 CodeBuddy / WorkBuddy 必需；缺则 401 not_authorized）
+    //    放在 auth 之前，允许 auth 覆盖（例如签名型渠道会自己设 authorization）
+    ...(ch.staticHeaders && typeof ch.staticHeaders === 'object' ? ch.staticHeaders : {}),
     ...buildAuthHeaders(ch, cred),
+  }
+  // 每次请求生成三枚非空会话头（腾讯系「特定账号」要求三枚齐全，缺失会 400/11128；
+  // 对多数账号无害 —— 参考包实测结论：按账号生效，故一律发送）
+  if (ch.dynamicHeaders === 'conversation') {
+    const conv = randomUUID().replace(/-/g, '')
+    h['X-Conversation-ID'] = conv
+    h['X-Conversation-Request-ID'] = conv
+    h['X-Conversation-Message-ID'] = conv
   }
   if (ch.auth === AUTH.SIGNED_HUAWEI) {
     const signed = signHuaweiRequest({

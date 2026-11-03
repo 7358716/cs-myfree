@@ -64,14 +64,29 @@ export const CHANNELS = Object.freeze({
   buddy: {
     label: 'CodeBuddy（腾讯）',
     family: 'openai',
-    baseUrl: 'https://api.lkeap.cloud.tencent.com/v1',
-    chatPath: '/chat/completions',          // baseUrl 已含 /v1，再拼默认值会变 /v1/v1（实测 404）
+    // 🔴 真实端点：copilot.tencent.com/v2/chat/completions（不是 api.lkeap 那套产品）
+    //    实测：用 lkeap + Bearer 会 401 not_authorized（用户真实报错）
+    baseUrl: 'https://copilot.tencent.com',
+    chatPath: '/v2/chat/completions',
     auth: AUTH.BEARER,
+    // 准入必需头（缺则 401 not_authorized / 400 request illegal）
+    staticHeaders: {
+      'X-Domain': 'copilot.tencent.com',
+      'X-Product-Code': 'codebuddy',
+      'X-Product': 'SaaS',
+      'X-Agent-Purpose': 'conversation',
+      'X-IDE-Name': 'SaaS',
+      'X-IDE-Type': 'SaaS',
+      'X-IDE-Version': '1.106.1',
+      'User-Agent': 'CodeBuddyIDE/1.106.1',
+    },
+    dynamicHeaders: 'conversation',
     login: LOGIN.BROWSER_CALLBACK,
     refresh: REFRESH.AUTO,
     checkin: { supported: true, gain: '+100/日' },
     credRef: 'BUDDY_TOKEN',
-    loginPage: 'https://copilot.tencent.com',
+    loginPage: 'https://www.codebuddy.cn',
+    maxOutputTokens: 32_000,
   },
   workbuddy: {
     label: 'WorkBuddy（国际）',
@@ -80,11 +95,24 @@ export const CHANNELS = Object.freeze({
     baseUrl: 'https://www.workbuddy.ai',
     chatPath: '/v2/chat/completions',
     auth: AUTH.BEARER,
+    // 准入必需头（与 buddy 同族，产品码/版本不同）
+    staticHeaders: {
+      'X-Domain': 'www.workbuddy.ai',
+      'X-Product-Code': 'workbuddy-ai',
+      'X-Product': 'SaaS',
+      'X-Agent-Purpose': 'conversation',
+      'X-IDE-Name': 'SaaS',
+      'X-IDE-Type': 'SaaS',
+      'X-IDE-Version': '5.5.2',
+      'User-Agent': 'CodeBuddyIDE/5.5.2',
+    },
+    dynamicHeaders: 'conversation',
     login: LOGIN.BROWSER_CALLBACK,
     refresh: REFRESH.AUTO,
     checkin: { supported: false },
     credRef: 'WORKBUDDY_TOKEN',
     loginPage: 'https://www.workbuddy.ai',
+    maxOutputTokens: 32_000,
   },
   lobsterai: {
     label: 'LobsterAI（有道）',
