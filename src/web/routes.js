@@ -797,6 +797,11 @@ export function registerRoutes(webServer, opts = {}) {
     if (!model) return { ok: false, provider: p, model: null, ms: 0, error: '该渠道没有已知模型，请在 body.model 指定', kind: 'MODEL_NOT_FOUND' }
 
     const started = now()
+    // 🔴 连通性测试必须用**流式**：腾讯系（buddy/workbuddy）明确拒绝非流式
+    //    （实测 400 code:11101 "Non-stream chat request is currently not supported"）。
+    //    流式只读首帧就 abort，不发完整请求 ⇒ 既快又不浪费额度。
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), Math.min(Number(body?.timeoutMs) || 20_000, 40_000))
     try {
       const res = await chat({
         channelId: p,
@@ -804,25 +809,41 @@ export function registerRoutes(webServer, opts = {}) {
         cred,
         model,
         messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 8,
-        stream: false,
+        maxTokens: 8,
+        stream: true,
         fetchImpl,
-        timeoutMs: Math.min(Number(body?.timeoutMs) || 30_000, 60_000),
+        signal: ctrl.signal,
+        timeoutMs: Math.min(Number(body?.timeoutMs) || 20_000, 40_000),
       })
       const ms = now() - started
-      // 消费响应体，确认真的是可解析的推理响应（不把内容回给前端）
-      let parsed = null
-      try { parsed = await res.json() } catch { /* 非 JSON 也算成功拿到 200 */ }
-      const hasChoice = Array.isArray(parsed?.choices) && parsed.choices.length > 0
+      // 读一小段流确认「真的开始出数据」（第一个非空 data 帧 = 链路通）
+      let gotFrame = false
+      let firstBytes = ''
+      try {
+        if (res.body) {
+          for await (const chunk of res.body) {
+            firstBytes += Buffer.from(chunk).toString('utf8')
+            if (firstBytes.includes('data:')) { gotFrame = true; break }
+            if (firstBytes.length > 2048) break
+          }
+          try { ctrl.abort() } catch { /* 已结束 */ }
+        }
+      } catch { /* abort 会抛，忽略 */ }
+      const msReal = now() - started
       return {
         ok: true,
         provider: p,
         model,
-        ms,
+        ms: msReal || ms,
         at: now(),
-        hint: hasChoice ? '上游返回了 choice，链路通' : '上游返回 200（响应形状非标准 choices）',
+        hint: gotFrame
+          ? `上游已开始流式返回（首帧 ${msReal}ms），链路通`
+          : `上游接受请求（HTTP ${res.status}，${msReal}ms），链路通`,
       }
     } catch (err) {
+      if (err?.name === 'AbortError') {
+        return { ok: true, provider: p, model, ms: now() - started, at: now(), hint: '上游接受请求并保持流（已主动断开），链路通' }
+      }
       const ms = now() - started
       const v = classify(err)
       return {
@@ -835,6 +856,8 @@ export function registerRoutes(webServer, opts = {}) {
         retryable: v.retryable,
         ttlMs: v.ttlMs,
       }
+    } finally {
+      clearTimeout(timer)
     }
   })
 

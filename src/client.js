@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const react = require('react')
     const h = react.createElement
 
-    const VERSION = '1.9.7'
+    const VERSION = '1.9.8'
     const API = '/cs-myfree'
     const CASH_PATH = '/cs-myfree/cash'
 
@@ -1537,6 +1537,12 @@ window.__ModuleLoader__.load({
             onChange: (ev) => set(i, 'tier', Number(ev.target.value) || 1),
             title: '优先级：tier 越小越先尝试',
           }, [1, 2, 3, 4, 5].map((t) => h('option', { key: t, value: String(t) }, 'T' + t))),
+          h('span', {
+            style: S.btn(false), title: '设为首选：本条 tier=1，其余全部 +1',
+            onClick: () => setDraft((arr) => arr.map((x, j) => (j === i
+              ? Object.assign({}, x, { tier: 1 })
+              : Object.assign({}, x, { tier: Math.max(1, (Number(x.tier) || 1) + (Number(x.tier || 1) === 1 ? 1 : 0)) })))),
+          }, '设为首选'),
           h('span', { style: S.btn(false), onClick: () => move(i, -1), title: '上移' }, '↑'),
           h('span', { style: S.btn(false), onClick: () => move(i, 1), title: '下移' }, '↓'),
           h('span', { style: S.btn(false), onClick: () => del(i), title: '删除' }, '✕'))
