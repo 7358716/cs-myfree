@@ -538,6 +538,10 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
         accountStore,
         trustedHosts: cfg.trustedHosts ?? [],
         getConnection,
+        // 🔴 OAuth 回调必须落在宿主**公网地址**（用户浏览器在另一台机器）
+        publicBase: cfg.publicBase ?? (Array.isArray(cfg.trustedHosts) && cfg.trustedHosts.length
+          ? `http://${String(cfg.trustedHosts.find((h) => !/^(localhost|127\.|0\.0\.0\.0)/.test(String(h))) ?? cfg.trustedHosts[0]).replace(/:80$/, '')}`
+          : null),
         logger: log,
         // 🔴 页面展示的链 = adapter 实际生效的链（同一份内存数据，不是另一份推算）
         getChain: () => defaultChain,

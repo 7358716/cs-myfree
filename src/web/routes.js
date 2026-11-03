@@ -22,7 +22,7 @@ import { keylessSources, SOURCES, buildOrder, checkinSources } from '../pools/re
 import { CHANNELS, checkinChannels, manualRefreshChannels, proxyRequiredChannels } from '../pools/channels/protocols.js'
 import { probeAll, PRIORITY, DEFAULT_MODEL, resolveSourceId } from '../pools/keyless/index.js'
 import { queryCash, CASH_PATH } from './cash.js'
-import { judge, sendJson } from './guard.js'
+import { judge, sendJson, safeErrorText } from './guard.js'
 import { withDefaults, DEFAULTS, findSensitiveKey, stripSensitive } from '../config/store.js'
 import { planReload, RELOAD_SCOPE } from '../ops/feed.js'
 import { collectLedger } from '../audit/sources.js'
@@ -31,6 +31,13 @@ import { listChannels, LOGIN_GUIDES } from './channels.js'
 import { captureCredential, previewCapture, looksLikeCredential } from '../pools/channels/capture.js'
 import { readCachedModels, refreshAll, channelModelsAsList } from '../pools/channels/catalog.js'
 import { SCOPE, readScope, writeScope, effectiveConfig, listScopes } from '../config/scope.js'
+import { startLogin, getSession, pollLogin, cancelLogin, handleCallback } from '../pools/channels/login/index.js'
+import { FLOW_MAP } from '../pools/channels/login/flow-map.js'
+import { refreshLogin, NO_REFRESH_ERROR } from '../pools/channels/login/refresh.js'
+import { classify } from '../adapter/failure-map.js'
+import { maskCredential } from '../pools/channels/accounts.js'
+import { builtinModelsOf } from '../pools/channels/builtin-models.js'
+import { chat } from '../pools/channels/driver.js'
 
 export const PREFIX = '/cs-myfree'
 
@@ -337,12 +344,334 @@ export function registerRoutes(webServer, opts = {}) {
   // ── 渠道账号（登录）──
   const accounts = createAccountStore(opts.dshHome)
 
+  /** 登录状态机注入点（测试用 mock flow；默认 = 真实状态机） */
+  const loginEngine = opts.loginEngine ?? {
+    start: startLogin,
+    poll: pollLogin,
+    cancel: cancelLogin,
+    get: getSession,
+    callback: handleCallback,
+  }
+
+  /** 渠道 id → flow-map 契约条目（loginVerified / loginNote / flow type） */
+  const flowInfoOf = (id) => {
+    const e = FLOW_MAP[id]
+    return {
+      flow: e?.type ?? null,
+      loginVerified: e?.loginVerified ?? false,
+      loginNote: e?.loginNote ?? '',
+    }
+  }
+
+  /**
+   * 把 flow 返回的 credential 归一成 accounts.save 需要的形状。
+   * 🔴 只在本函数内部短暂持有原文，绝不写日志、绝不进响应。
+   */
+  const normalizeCredential = (cred) => {
+    if (cred == null) return null
+    if (typeof cred === 'string') {
+      const s = cred.trim()
+      if (!s) return null
+      if (s.includes(':')) {
+        const [ak, sk] = s.split(':')
+        if (ak && sk) return { ak, sk, credential: '', masked: `${maskCredential(ak)} / ${maskCredential(sk)}` }
+      }
+      return { credential: s, masked: maskCredential(s) }
+    }
+    if (typeof cred !== 'object') return null
+    const ak = typeof cred.ak === 'string' ? cred.ak.trim() : ''
+    const sk = typeof cred.sk === 'string' ? cred.sk.trim() : ''
+    const token = String(
+      cred.credential ?? cred.token ?? cred.access_token ?? cred.accessToken
+      ?? cred.apiKey ?? cred.api_key ?? '',
+    ).trim()
+    const securityToken = typeof cred.securityToken === 'string' ? cred.securityToken : undefined
+    const expiresAt = Number.isFinite(cred.expiresAt)
+      ? cred.expiresAt
+      : (Number.isFinite(cred.expiresIn) ? Date.now() + cred.expiresIn * 1000 : null)
+    if (ak && sk) return { ak, sk, securityToken, credential: token, expiresAt, masked: `${maskCredential(ak)} / ${maskCredential(sk)}` }
+    if (token) return { credential: token, expiresAt, masked: maskCredential(token) }
+    return null
+  }
+
+  /**
+   * poll 拿到 credential ⇒ 落盘 accounts.json（复用 accounts.save，0600）。
+   * @returns {Promise<string|null>} 掩码（无凭据则 null）
+   */
+  const persistCredential = async (provider, session, cred) => {
+    const norm = normalizeCredential(cred)
+    if (!norm) return null
+    const r = await accounts.save({
+      id: session?.accountId,
+      provider,
+      label: CHANNELS[provider]?.label || provider,
+      credential: norm.credential,
+      ak: norm.ak,
+      sk: norm.sk,
+      securityToken: norm.securityToken,
+      expiresAt: norm.expiresAt ?? null,
+    })
+    if (r.ok && session) session.accountId = r.id
+    if (r.ok) {
+      // 登录成功后立刻拉该渠道模型（与 /channels/save 同口径）
+      refreshAll(opts.dshHome, accounts, { fetchImpl })
+        .then(async () => { if (opts.reloadChannelModels) await opts.reloadChannelModels() })
+        .catch(() => {})
+    }
+    return norm.masked
+  }
+
+  const channelList = async () => {
+    const list = await listChannels(accounts)
+    // 🔴 每个渠道项带上 flow-map 契约（UI 的「已实现/未验证」徽标依据）
+    return list.map((c) => ({ ...c, ...flowInfoOf(c.id) }))
+  }
+
+  /**
+   * 把 {provider} 或 {id} 归一成渠道 id + 账号记录。
+   * @returns {Promise<{ok:true, id:string, account:object|null}|{ok:false, error:string}>}
+   */
+  const resolveProvider = async (body) => {
+    const id = String(body?.id ?? '').trim()
+    let provider = String(body?.provider ?? '').trim()
+    let account = null
+    if (id) {
+      account = await accounts.get(id)
+      if (!account) return { ok: false, error: '账号不存在：' + id }
+      provider = provider || account.provider
+    }
+    if (!provider) return { ok: false, error: '缺少 provider 或 id' }
+    if (!CHANNELS[provider]) return { ok: false, error: '未知渠道：' + provider }
+    if (!account) {
+      // 按 provider 找第一条账号（多账号池场景取第一个）
+      const list = await accounts.list()
+      const one = list.find((a) => a.provider === provider)
+      if (one) account = await accounts.get(one.id)
+    }
+    return { ok: true, id: provider, account }
+  }
+
+  /** 取结构化凭据（内部用；绝不回给 UI） */
+  const secretOfProvider = async (provider, account) => {
+    if (account) {
+      if (account.ak && account.sk) return { ak: account.ak, sk: account.sk, securityToken: account.securityToken }
+      if (typeof account.credential === 'string' && account.credential.includes(':')) {
+        const [ak, sk] = account.credential.split(':')
+        if (ak && sk) return { ak, sk, securityToken: account.securityToken }
+      }
+      if (account.credential) return { token: account.credential }
+    }
+    if (typeof accounts.secretOf === 'function') {
+      const s = await accounts.secretOf(provider)
+      if (s) return s
+    }
+    const legacy = await accounts.credentialOf(provider)
+    return legacy ? { token: legacy } : null
+  }
+
   route('/channels', async () => ({
     ok: true,
     at: now(),
-    channels: await listChannels(accounts),
+    channels: await channelList(),
     total: Object.keys(CHANNELS).length,
   }))
+
+  // ── 登录状态（每渠道 loginVerified / flow / note；UI 徽标用）──
+  route('/login/status', async () => {
+    const channels = Object.keys(CHANNELS).map((id) => {
+      const info = flowInfoOf(id)
+      return {
+        id,
+        provider: id,
+        label: CHANNELS[id]?.label ?? id,
+        flow: info.flow,
+        loginVerified: info.loginVerified,
+        note: info.loginNote,
+        refreshable: CHANNELS[id]?.refresh === 'auto',
+      }
+    })
+    return {
+      ok: true,
+      at: now(),
+      total: channels.length,
+      verified: channels.filter((c) => c.loginVerified).map((c) => c.id),
+      unverified: channels.filter((c) => !c.loginVerified).map((c) => c.id),
+      channels,
+      note: 'loginVerified=false 表示登录器端点未真机验证，UI 必须显示「未验证」徽标',
+    }
+  })
+
+  // ── 登录 start ──
+  route('/login/start', async ({ body }) => {
+    const provider = String(body?.provider ?? '').trim()
+    if (!provider) return { ok: false, error: '缺少 provider' }
+    if (!CHANNELS[provider]) return { ok: false, error: '未知渠道：' + provider }
+    try {
+      const s = await loginEngine.start(provider, CHANNELS[provider], {
+        publicBase: opts.publicBase ?? null,
+        callbackPath: `${PREFIX}/login/callback`,
+      })
+      const info = flowInfoOf(provider)
+      return {
+        ok: true,
+        sessionId: s.sessionId,
+        flow: s.flow ?? info.flow,
+        url: s.url ?? null,
+        qr: s.qr ?? null,
+        shortLink: s.shortLink ?? null,
+        userCode: s.userCode ?? null,
+        verificationUri: s.verificationUri ?? null,
+        interval: s.interval ?? 5,
+        instructions: s.instructions ?? [],
+        expiresAt: s.expiresAt ?? null,
+        callbackUrl: s.callbackUrl ?? null,
+        loginVerified: info.loginVerified,
+        loginNote: info.loginNote,
+      }
+    } catch (err) {
+      logger.warn?.(`login/start ${provider} 失败：${err?.message ?? err}`)
+      return { ok: false, error: safeErrorText(err) }
+    }
+  })
+
+  // ── 登录 poll ──
+  route('/login/poll', async ({ query }) => {
+    const sessionId = String(query.get('sessionId') ?? '').trim()
+    if (!sessionId) return { ok: false, state: 'error', error: '缺少 sessionId', hint: '', maskedAccount: null }
+    let r
+    try {
+      r = await loginEngine.poll(sessionId)
+    } catch (err) {
+      logger.warn?.(`login/poll 失败：${err?.message ?? err}`)
+      return { ok: false, state: 'error', error: safeErrorText(err), hint: '', maskedAccount: null }
+    }
+    if (!r) return { ok: false, state: 'error', error: '会话不存在或已过期', hint: '', maskedAccount: null }
+
+    const session = typeof loginEngine.get === 'function' ? loginEngine.get(sessionId) : null
+    const state = r.state ?? 'error'
+
+    // 🔴 拿到 credential ⇒ 落盘（只回掩码，原文绝不进响应）
+    let masked = r.maskedAccount ?? null
+    if ((state === 'ok' || state === 'success') && r.credential && session && !session.persisted) {
+      try {
+        masked = (await persistCredential(session.provider, session, r.credential)) ?? masked
+        session.persisted = true
+      } catch (err) {
+        logger.warn?.(`login/poll 落盘失败：${err?.message ?? err}`)
+        return { ok: false, state: 'error', hint: '', maskedAccount: null, error: '登录成功但保存失败：' + safeErrorText(err) }
+      }
+    }
+
+    // 会话不存在 / 已过期 / 已取消 ⇒ ok:false，但 state 如实回报
+    if (state === 'error' && r.hint === '会话不存在或已过期') {
+      return { ok: false, state: 'error', hint: r.hint, maskedAccount: null, error: '会话不存在或已过期（可能已取消或超时）' }
+    }
+    return {
+      ok: state === 'ok',
+      state,
+      hint: r.hint ?? '',
+      maskedAccount: masked,
+      error: r.error ? safeErrorText(r.error) : null,
+    }
+  })
+
+  // ── 登录 cancel ──
+  route('/login/cancel', async ({ body }) => {
+    const sessionId = String(body?.sessionId ?? '').trim()
+    if (!sessionId) return { ok: false, error: '缺少 sessionId' }
+    const cancelled = loginEngine.cancel(sessionId)
+    return { ok: cancelled === true, cancelled: cancelled === true, sessionId, hint: cancelled ? '已取消（会话即销毁）' : '会话不存在或已结束' }
+  })
+
+  // ── 连通性测试（真发一条最小推理）──
+  route('/login/test', async ({ body }) => {
+    const provider = await resolveProvider(body)
+    if (!provider.ok) return provider
+    const { id: p, account } = provider
+    const ch = CHANNELS[p]
+    const cred = await secretOfProvider(p, account)
+    if (!cred) return { ok: false, provider: p, model: null, ms: 0, error: '该渠道未登录（无可用凭据）', kind: 'AUTH' }
+
+    const model = String(body?.model ?? builtinModelsOf(p)?.[0]?.id ?? '').trim()
+    if (!model) return { ok: false, provider: p, model: null, ms: 0, error: '该渠道没有已知模型，请在 body.model 指定', kind: 'MODEL_NOT_FOUND' }
+
+    const started = now()
+    try {
+      const res = await chat({
+        channelId: p,
+        ch,
+        cred,
+        model,
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 8,
+        stream: false,
+        fetchImpl,
+        timeoutMs: Math.min(Number(body?.timeoutMs) || 30_000, 60_000),
+      })
+      const ms = now() - started
+      // 消费响应体，确认真的是可解析的推理响应（不把内容回给前端）
+      let parsed = null
+      try { parsed = await res.json() } catch { /* 非 JSON 也算成功拿到 200 */ }
+      const hasChoice = Array.isArray(parsed?.choices) && parsed.choices.length > 0
+      return {
+        ok: true,
+        provider: p,
+        model,
+        ms,
+        at: now(),
+        hint: hasChoice ? '上游返回了 choice，链路通' : '上游返回 200（响应形状非标准 choices）',
+      }
+    } catch (err) {
+      const ms = now() - started
+      const v = classify(err)
+      return {
+        ok: false,
+        provider: p,
+        model,
+        ms,
+        error: safeErrorText(err),
+        kind: v.kind,
+        retryable: v.retryable,
+        ttlMs: v.ttlMs,
+      }
+    }
+  })
+
+  // ── 续期（refresh）──
+  route('/login/refresh', async ({ body }) => {
+    const provider = await resolveProvider(body)
+    if (!provider.ok) return provider
+    const { id: p, account } = provider
+    const raw = account ?? null
+    const r = await refreshLogin(p, raw)
+    if (!r.ok) {
+      return {
+        ok: false,
+        provider: p,
+        error: r.error ?? NO_REFRESH_ERROR,
+        note: r.note ?? null,
+        reloginRequired: r.reloginRequired === true,
+      }
+    }
+    // 续期成功：把新凭证写回同一条账号（0600），只回掩码
+    const norm = normalizeCredential(r.credential)
+    let masked = null
+    if (norm) {
+      const saved = await accounts.save({
+        id: account?.id,
+        provider: p,
+        label: account?.label || CHANNELS[p]?.label || p,
+        credential: norm.credential,
+        ak: norm.ak,
+        sk: norm.sk,
+        securityToken: norm.securityToken,
+        expiresAt: norm.expiresAt ?? r.expiresAt ?? null,
+      })
+      if (!saved.ok) return { ok: false, provider: p, error: '续期凭证写盘失败' }
+      masked = norm.masked
+    }
+    return { ok: true, provider: p, note: r.note ?? '已续期', maskedAccount: masked, expiresAt: r.expiresAt ?? norm?.expiresAt ?? null }
+  })
 
   route('/channels/save', async ({ body }) => {
     if (!body || !body.provider) return { ok: false, error: '缺少 provider' }
@@ -477,6 +806,52 @@ export function registerRoutes(webServer, opts = {}) {
       return { ok: false, error: String(err?.message ?? err).slice(0, 200) }
     }
   })
+
+  // ── 一键删除账号（URL 语义更直白；/channels/remove 保留兼容）──
+  route('/accounts/remove', async ({ body }) => {
+    const id = String(body?.id ?? '').trim()
+    if (!id) return { ok: false, error: '缺少 id' }
+    const r = await accounts.remove(id)
+    const list = await accounts.list()
+    return { ok: r?.ok !== false, id, remaining: list.length }
+  })
+
+  // ══════════════════════════════════════════════════════════════════
+  // OAuth 公网回调（浏览器从厂商站点跳回来）
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // 🔴 云服务器部署的硬约束：插件跑在服务器上，用户浏览器在另一台机器。
+  //    若 redirect_uri 用 http://127.0.0.1:<port>/callback，浏览器会跳到
+  //    **用户自己的机器**，服务器上的插件永远收不到 ⇒「点去官网拿不到授权」。
+  //    因此回调必须落在宿主公网地址：<publicBase>/cs-myfree/login/callback
+  //    该路径不用 cookie（浏览器跨站跳转带不上），改用一次性 state 鉴权。
+  const CALLBACK_PATH = `${PREFIX}/login/callback`
+  try {
+    webServer.register({
+      kind: 'exact',
+      path: CALLBACK_PATH,
+      handler: async (req, res) => {
+        let url
+        try { url = new URL(req.url ?? '/', 'http://localhost') } catch { url = null }
+        const state = String(url?.searchParams.get('state') ?? '')
+        const code = String(url?.searchParams.get('code') ?? url?.searchParams.get('authorization_code') ?? '')
+        const html = (title, detail) => {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(`<!doctype html><meta charset="utf-8"><title>${title}</title>
+<body style="font-family:system-ui,-apple-system,sans-serif;padding:48px;text-align:center;line-height:1.7">
+<h2>${title}</h2><p style="opacity:.7">${detail}</p>
+<p style="margin-top:28px"><a href="${PREFIX}">返回设置页</a></p></body>`)
+        }
+        let r = null
+        try { r = typeof loginEngine.callback === 'function' ? await loginEngine.callback({ state, code }) : null } catch { r = null }
+        if (r && r.ok === false) return html('⚠️ 授权失败', String(r.error ?? '回调参数无效或会话已过期，请回设置页重试'))
+        return html(code ? '✅ 授权已收到' : '⚠️ 未拿到授权码', '可以关闭本页，回到 DSH 设置页查看登录结果。')
+      },
+    })
+    registered++
+  } catch (err) {
+    logger.warn?.(`注册 ${CALLBACK_PATH} 失败：${err?.message ?? err}`)
+  }
 
   return registered
 }
