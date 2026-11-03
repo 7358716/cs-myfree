@@ -440,6 +440,10 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
   accountStore.normalizeAkSk(akSkProviders)
     .then((r) => { if (r.changed) log.info(`AK/SK 账号已配对归一：${r.before} → ${r.after} 条`) })
     .catch(() => {})
+  // 清理历史重复账号（同一渠道同一凭据被重复保存，页面上会出现同一账号多条）
+  accountStore.dedupe?.()
+    .then((r) => { if (r && r.changed) log.info(`重复账号已清理：${r.before} → ${r.after} 条`) })
+    .catch(() => {})
   let channelModelCache = {}
 
   /** 重新从磁盘读模型缓存（登录/刷新后调用，让选择器立刻看到新模型） */

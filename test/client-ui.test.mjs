@@ -727,7 +727,7 @@ async function waitFor(c, pred, { timeout = 9000, label = '' } = {}) {
 
 const PANELS = [
   { tab: '总览', must: ['一眼看懂当前状态', '2 条候选', '1/18 家已登录', '免密源 3 个（Kilo 免费池 / OVH 免费视觉 / Pollinations）', '默认降级链 2 条：kilo → ovh', '默认全关（不会自动花钱）'] },
-  { tab: '供给源', must: ['探测免密源', '全部测试', '全部续期', '免密源（无需登录）', '账号渠道（18 家 · 已登录 1 家', '登录可用', '暂不可用', '已验证', '未验证', '需代理', '去官网', '一键登录'] },
+  { tab: '供给源', must: ['探测免密源', '全部测试', '全部续期', '免密源（无需登录）', '账号渠道（18 家 · 已登录 1 家', '暂不可用', '已验证', '未验证', '需代理', '厂商官网', '一键登录'] },
   { tab: '模型目录', must: ['免密源默认模型', 'kilo-auto/free', 'Qwen3.5-397B-A17B', '✅ 860ms', '❌ timeout', '已登录渠道的模型（4 个）', 'codearts · 4 个', 'codearts/deepseek-v4.1-flash', '来源：内置清单', 'text 输入模态'] },
   { tab: '降级链 ★', must: ['内置链2 条', '覆盖层1 条', '生效链2 条', '生效链来源', '内置 2 + 覆盖 1 ⇒ 合并 2 条', '+ 加一条', '保存覆盖层', '清空草稿', '页面这份链 = 运行时实际选路'] },
   { tab: '钉选', must: ['生效链里 tier 最小的就是当前首选', '★ kilo / kilo-auto/free', 'ovh / Qwen3.5-397B-A17B'] },
@@ -1150,9 +1150,10 @@ test('供给源：渠道能力按 implemented 显示「登录可用 / 暂不可�
     assert.equal(c.cardOf('codearts').props['data-implemented'], '1')
     assert.equal(c.cardOf('qiniu').props['data-implemented'], '1')
     assert.equal(c.cardOf('buddy').props['data-implemented'], '0')
-    assert.ok(c.text().includes('⚠️ 暂不可用：需 OAuth token，未实现'), '必须展示后端的 reason：' + c.text().slice(-800))
-    assert.ok(c.text().includes('⚠️ 暂不可用：本机网络不可达'), 'gemini 的不可达原因必须展示')
-    assert.ok(c.text().includes('登录可用'), 'implemented=true 的渠道要标「登录可用」')
+    assert.ok(c.text().includes('· 需 OAuth token，未实现'), '必须展示后端的 reason：' + c.text().slice(-800))
+    assert.ok(c.text().includes('· 本机网络不可达'), 'gemini 的不可达原因必须展示')
+    assert.ok(c.text().includes('厂商官网'), '次要链接应叫「厂商官网」')
+    assert.equal(c.text().includes('去官网'), false, '旧的误导性「去官网」必须移除')
   } finally { c.unmount() }
 })
 

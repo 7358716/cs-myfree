@@ -15,6 +15,7 @@ import { startDevice, pollDevice } from './device.js'
 import { startPaste } from './paste.js'
 import { startQr, pollQr } from './qr.js'
 import { startCodearts, pollCodearts } from './codearts.js'
+import { startQoder, pollQoder } from './qoder.js'
 import { startBuddy, pollBuddy } from './buddy.js'
 import { startWorkbuddy, pollWorkbuddy } from './workbuddy.js'
 import { startLoomy, pollLoomy } from './loomy.js'
@@ -67,8 +68,20 @@ export const FLOW_MAP = Object.freeze({
   officeace: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'OfficeAce 华为 MaaS：OAuth PKCE，端点待取证' },
   lobsterai: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'LobsterAI 有道：端点待取证' },
   // ── 设备码 ──
-  qoder: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'Qoder：设备码轮询，端点待取证' },
-  qodercn: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'Qoder 中国版：公开端点已失效' },
+  qoder: {
+    type: FLOW_TYPE.DEVICE,
+    start: startQoder,
+    poll: pollQoder,
+    loginVerified: false,
+    loginNote: 'Qoder：设备码+PKCE 轮询（端点已对拍），待真机验证',
+  },
+  qodercn: {
+    type: FLOW_TYPE.DEVICE,
+    start: startQoder,
+    poll: pollQoder,
+    loginVerified: false,
+    loginNote: 'Qoder 中国版：设备码+PKCE 轮询（端点已对拍），公开端点可能已失效',
+  },
   cline: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'Cline：WorkOS 设备码，端点待取证' },
   minimax: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'MiniMax：OAuth PKCE，端点待取证' },
   minimaxintl: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'MiniMax 国际：端点待取证' },

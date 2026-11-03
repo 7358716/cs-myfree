@@ -209,10 +209,11 @@ async function mount({ backend, clipboard, pollMs = 20 } = {}) {
   }
 
   let decl = null
+  let windowOpenImpl = () => null       // 默认：模拟「弹窗被拦截」
   const win = {
     __ModuleLoader__: { load: (d) => { decl = d } },
     clipboardData: null,
-    open: (...args) => { opened.push(args) ; return null },
+    open: (...args) => { opened.push(args); return windowOpenImpl(...args) },
     __CS_MYFREE_POLL_MS: pollMs,
   }
   const sandbox = {
@@ -320,6 +321,7 @@ async function mount({ backend, clipboard, pollMs = 20 } = {}) {
       throw new Error('等待超时' + (label ? '：' + label : '') + '\n实际：' + ctrl.text().slice(-1000))
     },
     setClipboard(c) { sandbox.navigator.clipboard = c },
+    setWindowOpen(fn) { windowOpenImpl = fn },
     unmount() {
       for (const inst of rt.hooks.values()) for (const s of inst.hooks) if (s.cleanup) { try { s.cleanup() } catch (_) {} }
     },
@@ -520,9 +522,10 @@ test('供给源：18 家渠道 + 已登录/未登录/已验证/未验证徽标 +
     assert.ok(has(c, '账号渠道（18 家 · 已登录 2 家'), c.text().slice(-500))
     assert.ok(has(c, '已验证'), 'codearts 应显示已验证')
     assert.ok(has(c, '未验证'), '未验证渠道（如 qiniu）必须有黄色徽标')
-    assert.ok(has(c, '登录可用'), 'implemented=true 的渠道要标「登录可用」')
     assert.ok(has(c, '暂不可用'), '未实现登录换取的渠道必须标「暂不可用」')
-    assert.ok(has(c, '⚠️ 暂不可用：登录换取未实现（端点待取证）'), '必须展示后端的 reason：' + c.text().slice(-900))
+    assert.ok(has(c, '· 登录换取未实现（端点待取证）'), '必须展示后端的 reason：' + c.text().slice(-900))
+    assert.ok(has(c, '厂商官网'), '次要链接应是「厂商官网」（不是主按钮）')
+    assert.equal(has(c, '去官网'), false, '旧的误导性「去官网」文案必须移除')
     // 每种 flow 的卡片都带 data-flow
     const flows = new Set(c.nodes().filter((n) => n.props && n.props['data-flow']).map((n) => n.props['data-flow']))
     for (const f of ['browser', 'device', 'qr', 'paste']) assert.ok(flows.has(f), '缺少 flow=' + f)
@@ -532,20 +535,26 @@ test('供给源：18 家渠道 + 已登录/未登录/已验证/未验证徽标 +
   } finally { c.unmount() }
 })
 
-test('browser 流（buddy）：点一键登录→打开登录页+纯轮询；不是 paste 输入框', async () => {
+test('browser 流（buddy）：同步开窗（about:blank）→ 响应后改 location；不是 paste 输入框', async () => {
   const be = makeBackend()
   be.db.pollStates.buddy = ['waiting', 'ok']
   be.db.startExtra.buddy = { url: 'https://copilot.tencent.com/oauth?client_id=buddy&state=abc' }
   const c = await mount({ backend: be.backend })
   try {
+    // 模拟浏览器允许弹窗：window.open 返回一个可导航的窗口对象
+    const fakeWin = { location: { href: '' }, close: () => { fakeWin.closed = true } }
+    c.setWindowOpen(() => fakeWin)
     await c.start()
     await c.openTab('供给源')
     await c.clickIn(c.cardOf('buddy'), '一键登录')
-    // 调了 /login/start，且 window.open 打开后端给的授权 URL
     assert.ok(c.requests.some((r) => r.url === '/cs-myfree/login/start' && r.body?.provider === 'buddy'), '应调用 /login/start')
-    assert.ok(c.opened.some(([u]) => String(u).includes('copilot.tencent.com/oauth')), 'browser 流应自动打开授权页：' + JSON.stringify(c.opened))
+    // 🔴 必须在点击同步阶段开 about:blank（否则 Promise 回调里会被浏览器拦截）
+    assert.ok(c.opened.some(([u]) => u === 'about:blank'), '点击时应同步打开 about:blank：' + JSON.stringify(c.opened))
+    assert.equal(fakeWin.location.href, 'https://copilot.tencent.com/oauth?client_id=buddy&state=abc',
+      '拿到 /login/start 返回的 url 后应改预开窗口的 location（不是厂商主页）')
+    assert.equal(has(c, '浏览器拦截了新窗口'), false, '允许弹窗时不应提示被拦截')
     await c.waitFor(() => has(c, '等待你在浏览器'), { label: 'browser 等待授权文案' })
-    assert.ok(has(c, '打开登录页'), '必须有可点的「打开登录页」按钮（弹窗被拦也能用）')
+    assert.ok(has(c, '打开登录页'), '必须有可点的「① 打开登录页」按钮')
     await c.waitFor(() => has(c, '✅ 登录成功'), { label: '轮询到 ok' })
     assert.ok(has(c, 'HPUA'), '成功后显示掩码账号')
     assert.ok(has(c, '立即测试连通'), '成功后出现立即测试连通')
@@ -611,9 +620,12 @@ test('qr 流（loomy）：渲染真正可扫的 SVG 二维码（与参考实现�
     await c2.openTab('供给源')
     await c2.clickIn(c2.cardOf('loomy'), '再加一个')
     await c2.waitFor(() => c2.nodes().some((n) => n.type === 'svg'), { label: 'svg 二维码' })
-    assert.ok(has(c2, '用手机扫码完成登录'))
+    const qrSvg = c2.nodes().find((n) => n.type === 'svg')
+    assert.ok(Number(qrSvg.props.width) >= 180, '二维码必须是大图（≥180px）：' + qrSvg.props.width)
+    assert.ok(has(c2, '用手机微信扫码'), 'qr 流必须写明「用手机微信扫码」')
     assert.ok(has(c2, 'https://example.com/s/abc'), '应显示短链')
-    assert.ok(has(c2, 'loomy://qr/abc123') || has(c2, '内容：'), '应显示二维码内容文本')
+    assert.ok(has(c2, '复制二维码内容'), '应有复制二维码内容兜底')
+    assert.ok(has(c2, '厂商官网') || has(c2, '厂商页面'), '应给次要入口（不是把主页当主按钮）')
     // 剪贴板可用 ⇒ 复制成功提示
     c2.setClipboard({ writeText: () => Promise.resolve() })
     await c2.clickIn(c2.cardOf('loomy'), '复制二维码内容')
@@ -848,3 +860,81 @@ test('加载态有骨架、错误态有可读文案（不是一直「加载中�
     assert.ok(has(c, '重试'), '错误态必须有重试')
   } finally { c.unmount() }
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑦ 弹窗拦截修复（生产实测 P0）与「主按钮只用授权 URL」
+// ─────────────────────────────────────────────────────────────────────────────
+test('弹窗被拦截：明确提示「浏览器拦截了新窗口」+「打开登录页」按钮可补救', async () => {
+  const be = makeBackend()
+  be.db.pollStates.buddy = ['waiting']
+  be.db.startExtra.buddy = { url: 'https://copilot.tencent.com/oauth?client_id=buddy&state=abc' }
+  const c = await mount({ backend: be.backend })     // 默认 window.open 返回 null（模拟被拦截）
+  try {
+    await c.start()
+    await c.openTab('供给源')
+    const loginUrl = c.cardOf('buddy').props['data-channel'] && 'https://example.com/buddy'
+    await c.clickIn(c.cardOf('buddy'), '一键登录')
+    await c.waitFor(() => has(c, '浏览器拦截了新窗口'), { label: '拦截提示' })
+    assert.ok(has(c, '请点上面的「打开登录页」') || has(c, '请点下面的「打开登录页」') || has(c, '打开登录页'),
+      '必须告诉用户点哪里继续')
+    // 点击主按钮阶段绝不能直接开厂商主页
+    assert.equal(c.opened.some(([u]) => String(u) === loginUrl), false, '一键登录不允许打开厂商主页')
+    assert.ok(c.opened.some(([u]) => u === 'about:blank'), '点击时应同步尝试开 about:blank')
+
+    // 补救：允许弹窗后点「打开登录页」→ 同步打开真实授权 URL
+    const fakeWin = { location: { href: '' }, close: () => {} }
+    c.setWindowOpen(() => fakeWin)
+    await c.clickIn(c.cardOf('buddy'), '打开登录页')
+    assert.ok(c.opened.some(([u]) => String(u).includes('copilot.tencent.com/oauth')), '点按钮必须打开 /login/start 返回的授权 URL：' + JSON.stringify(c.opened))
+  } finally { c.unmount() }
+})
+
+test('「一键登录」主按钮 = /login/start 的授权 URL，绝不是 ch.loginUrl 厂商主页', async () => {
+  const be = makeBackend()
+  be.db.pollStates.buddy = ['waiting']
+  be.db.startExtra.buddy = { url: 'https://auth.example.com/oauth/authorize?client_id=buddy' }
+  const c = await mount({ backend: be.backend })
+  try {
+    const fakeWin = { location: { href: '' }, close: () => {} }
+    c.setWindowOpen(() => fakeWin)
+    await c.start()
+    await c.openTab('供给源')
+    const card = c.cardOf('buddy')
+    // 主按钮文案是「一键登录」；「厂商官网」只是小号次要链接
+    assert.ok(flattenText(card).includes('一键登录'))
+    assert.ok(flattenText(card).includes('厂商官网'))
+    await c.clickIn(card, '一键登录')
+    assert.equal(fakeWin.location.href, 'https://auth.example.com/oauth/authorize?client_id=buddy')
+    assert.equal(c.opened.some(([u]) => String(u) === 'https://example.com/buddy'), false, '不允许打开厂商主页')
+    await c.waitFor(() => has(c, '等待你在浏览器'), { label: '等待授权' })
+  } finally { c.unmount() }
+})
+
+test('qr 流不依赖厂商主页：没有 url 时只显示二维码 + 扫码文案 + 次要厂商链接', async () => {
+  const be = makeBackend()
+  be.db.pollStates.loomy = ['waiting']
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start()
+    await c.openTab('供给源')
+    await c.clickIn(c.cardOf('loomy'), '再加一个')
+    await c.waitFor(() => c.nodes().some((n) => n.type === 'svg'), { label: '二维码 svg' })
+    const svg = c.nodes().find((n) => n.type === 'svg')
+    assert.ok(Number(svg.props.width) >= 180, '二维码尺寸必须 ≥180px')
+    assert.ok(has(c, '用手机微信扫码'))
+    assert.ok(has(c, '厂商页面'), 'qr 流次要入口「或在浏览器打开厂商页面」')
+    // qr 流不应尝试打开空白新窗口/厂商主页作为主操作
+    assert.equal(c.opened.some(([u]) => String(u) === 'https://example.com/loomy'), false)
+  } finally { c.unmount() }
+})
+
+function flattenText(node) {
+  const out = []
+  const walk = (n) => {
+    if (!n) return
+    if (n.type === '#text') out.push(n.text)
+    for (const c of n.children || []) walk(c)
+  }
+  walk(node)
+  return out.join('')
+}

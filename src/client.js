@@ -376,6 +376,19 @@ window.__ModuleLoader__.load({
         background: 'rgba(64,160,96,0.10)', border: '1px dashed rgba(128,128,128,0.4)', display: 'inline-block', maxWidth: '100%', boxSizing: 'border-box',
       },
       skeleton: { height: '16px', borderRadius: '4px', background: 'rgba(128,128,128,0.15)', margin: '8px 0' },
+      primaryBtn: {
+        cursor: 'pointer', fontSize: '13px', padding: '6px 16px', borderRadius: '8px',
+        border: '1px solid rgba(64,160,96,0.55)', background: 'rgba(64,160,96,0.20)',
+        color: 'inherit', fontWeight: 600, whiteSpace: 'nowrap',
+      },
+      secondaryLink: {
+        color: 'inherit', opacity: 0.65, fontSize: '11px', cursor: 'pointer',
+        textDecoration: 'underline', whiteSpace: 'nowrap',
+      },
+      wizard: {
+        marginTop: '12px', paddingTop: '12px', borderTop: '1px solid rgba(128,128,128,0.18)',
+        display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-start',
+      },
       link: { color: 'var(--dsw-alias-brand-primary)', cursor: 'pointer', textDecoration: 'underline', wordBreak: 'break-all', fontSize: '12px' },
       dim: { opacity: 0.65, fontSize: '11px' },
       good: { color: 'var(--dsw-alias-state-success-primary)' },
@@ -719,10 +732,32 @@ window.__ModuleLoader__.load({
       const aliveRef = react.useRef(true)
       react.useEffect(() => () => { aliveRef.current = false }, [])
 
+      /**
+       * 🔴 弹窗拦截根因：window.open 必须在**用户点击的同一个 task** 里调用。
+       * 在 Promise 回调里调会被浏览器判定「非用户手势」而拦截（用户看到「点了没反应」）。
+       * ⇒ 点击时先同步开 about:blank，拿到 URL 后再改 location。
+       */
+      const preOpenWindow = () => {
+        try {
+          if (typeof window === 'undefined' || typeof window.open !== 'function') return null
+          return window.open('about:blank', '_blank') || null
+        } catch (_) { return null }
+      }
+      /** 直接打开 URL（只在用户手势里调用）；返回是否成功开出窗口 */
       const openUrl = (url) => {
         try {
-          if (typeof window !== 'undefined' && typeof window.open === 'function') window.open(String(url), '_blank', 'noopener')
-        } catch (_) { /* 弹窗被拦截时，页面里仍有可点的链接/按钮 */ }
+          if (typeof window !== 'undefined' && typeof window.open === 'function') {
+            return !!window.open(String(url), '_blank', 'noopener')
+          }
+        } catch (_) { /* 被拦截 */ }
+        return false
+      }
+      /** 给已开的空白窗口导航；失败（被拦/已关闭）返回 false */
+      const navigateWindow = (w, url) => {
+        if (!w) return false
+        try { w.location.href = String(url); return true } catch (_) {}
+        try { w.location.replace(String(url)); return true } catch (_) {}
+        return false
       }
 
       // ── 轮询：只在 waiting 时跑，1.5s 一次；到 ok/error/expired/cancelled 自动停 ──
@@ -760,11 +795,18 @@ window.__ModuleLoader__.load({
         return () => { alive = false; clearTimeout(timer) }
       }, [sessStatus, sessId, sessPolls])
 
-      const startLogin = () => {
+      /**
+       * @param {Window|null|undefined} preOpened 点击时同步开出的空白窗口；
+       *   undefined ⇒ 函数自己按 flow 同步开窗（必须仍在用户手势内）
+       */
+      const startLogin = (preOpened) => {
+        // 同步开窗（在用户手势内）；flow 未知时也先开，paste/aksk 回来再关掉
+        const win = preOpened === undefined ? ((flow === 'browser' || flow === 'device' || flow === 'qr') ? preOpenWindow() : null) : preOpened
         setBusy(true); setMsg(null); setSess(null); setFallback(false)
         api('/login/start', { method: 'POST', body: JSON.stringify({ provider: ch.id }) })
           .then((r) => {
             if (!r.ok) {
+              try { if (win && win.close) win.close() } catch (_) {}
               setMsg({ ok: false, error: r.error || '发起登录失败，可点「重试」或改用「粘贴凭据」' })
               setFallback(true)
               return
@@ -784,17 +826,35 @@ window.__ModuleLoader__.load({
               loginVerified: r.loginVerified,
               loginNote: r.loginNote,
               pollingOnly: r.pollingOnly === true,
+              popup: 'pending',           // pending | opened | blocked | not-needed
               status: manual ? 'manual' : 'waiting',
               hint: '',
               maskedAccount: null,
               error: null,
               polls: 0,
             }
+            // 响应回来：给预开窗口导航（这才是真正的用户手势窗口，不会被拦）
+            if (!manual && next.url && next.flow === 'browser') {
+              if (navigateWindow(win, next.url)) next.popup = 'opened'
+              else {
+                // 没预开成功（浏览器拦截）⇒ 页面里必须有可点的「打开登录页」按钮 + 明确提示
+                next.popup = 'blocked'
+                setMsg({ ok: false, error: '浏览器拦截了新窗口，请点下面的「打开登录页」继续。' })
+              }
+            } else if (!manual && next.flow === 'device' && next.verificationUri) {
+              if (navigateWindow(win, next.verificationUri)) next.popup = 'opened'
+              else next.popup = 'blocked'
+            } else {
+              // qr/无 url：不需要新窗口，关掉空白页
+              try { if (win && win.close) win.close() } catch (_) {}
+              next.popup = 'not-needed'
+            }
             setSess(next)
-            // 浏览器流：尝试自动打开登录页（被弹窗拦截时用户可点按钮）
-            if (!manual && next.url && next.flow === 'browser') openUrl(next.url)
           })
-          .catch((e) => { setMsg({ ok: false, error: String((e && e.message) || e) }); setFallback(true) })
+          .catch((e) => {
+            try { if (win && win.close) win.close() } catch (_) {}
+            setMsg({ ok: false, error: String((e && e.message) || e) }); setFallback(true)
+          })
           .then(() => setBusy(false))
       }
 
@@ -927,86 +987,79 @@ window.__ModuleLoader__.load({
           h('button', { style: S.btn(false), onClick: () => { setAk(''); setSk(''); setMsg(null) } }, '清空')))
 
       // 会话向导（browser / device / qr 三种）
+      // 信息层级：① 主操作大按钮 → ② 状态行 → ③ 次要操作（取消/重试/厂商官网）
       const renderSession = () => {
         const stt = sess.status
-        const line = (text, kind) => text ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, kind === 'good' ? S.good : kind === 'warn' ? S.warn : kind === 'bad' ? S.bad : null) }, text) : null
-        const flowView = sess.flow === 'browser'
-          ? h('div', null,
-              h('div', { style: S.dim }, sess.pollingOnly
-                ? '① 点「打开登录页」完成授权　② 回到本页等待自动检测（本渠道无回调，纯轮询）'
-                : '① 点「打开登录页」完成授权　② 回到本页等自动完成（不用再手工复制授权码）'),
-              sess.url
-                ? h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap', alignItems: 'center' } },
-                    h('button', { style: S.btn(true), onClick: () => openUrl(sess.url) }, '打开登录页'),
-                    h('span', { style: Object.assign({}, S.dim, { wordBreak: 'break-all', minWidth: 0 }) }, sess.url))
-                : line('后端没有返回授权地址（该渠道登录端点可能未取证）⇒ 请用下方「粘贴凭据」备用方式', 'warn'))
-          : sess.flow === 'device'
-            ? h('div', null,
-                sess.userCode
-                  ? h('div', { style: Object.assign({}, S.bigCode, { margin: '8px 0' }) }, sess.userCode)
-                  : line('后端没有返回设备码（该渠道登录端点可能未取证）', 'warn'),
-                sess.verificationUri
-                  ? h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
-                      h('button', { style: S.btn(false), onClick: () => openUrl(sess.verificationUri) }, '打开验证页'),
-                      h('span', { style: Object.assign({}, S.dim, { wordBreak: 'break-all' }) }, sess.verificationUri))
-                  : null,
-                line('打开验证页输入上面的设备码；本页自动轮询（约 ' + (sess.interval || 5) + ' 秒/次）'))
-            : sess.flow === 'qr'
-              ? h('div', null,
-                  sess.qr
-                    ? h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'flex-start', marginTop: '8px' } },
-                        h(QrCode, { text: String(sess.qr), size: 168 }),
-                        h('div', { style: { minWidth: 0, flex: '1 1 200px' } },
-                          h('div', { style: S.dim }, '用手机扫码完成登录（二维码可扫，不是文本）'),
-                          sess.shortLink
-                            ? h('div', { style: Object.assign({}, S.link, { marginTop: '6px' }) }, sess.shortLink)
-                            : null,
-                          h('div', { style: Object.assign({ marginTop: '6px', wordBreak: 'break-all' }, S.dim) },
-                            '内容：' + String(sess.qr)),
-                          h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
-                            sess.shortLink
-                              ? h('button', { style: S.btn(false), onClick: () => openUrl(sess.shortLink) }, '打开短链')
-                              : null,
-                            h('button', {
-                              style: S.btn(false),
-                              onClick: () => {
-                                copyPlainText(String(sess.qr)).then((r) => setMsg({ ok: r.ok, text: r.text }))
-                              },
-                            }, '复制二维码内容'))))
-                    : line('后端没有返回二维码内容（该渠道登录端点可能未取证）⇒ 可用下方「粘贴凭据」备用方式', 'warn'),
-                  line('扫码后在手机上确认；本页会自动轮询登录结果'))
-              : null
-
-        return h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' } },
-          (sess.instructions || []).length
-            ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, (sess.instructions || []).map((x, i) => h('div', { key: i }, (i + 1) + '. ' + x)))
-            : null,
-          flowView,
-          line(
-            stt === 'waiting'
-              ? (sess.pollingOnly
-                  ? '已打开登录页，正在等待授权…（本渠道无回调，纯轮询；已查 ' + (sess.polls || 0) + ' 次）'
-                  : '⏳ 等待你在浏览器 / 手机端完成授权…（已轮询 ' + (sess.polls || 0) + ' 次）')
-              : stt === 'ok' ? '✅ 登录成功' + (sess.maskedAccount ? '：' + sess.maskedAccount : '')
-                : stt === 'error' ? '❌ ' + (sess.error || '登录失败')
-                  : stt === 'manual' ? '' : '',
-            stt === 'ok' ? 'good' : stt === 'error' ? 'bad' : null),
-          stt === 'ok'
-            ? h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
-                h('button', { style: S.btn(true), onClick: () => runTest({ provider: ch.id }, 'provider'), disabled: accBusy === 'test:provider' }, accBusy === 'test:provider' ? '测试中…' : '立即测试连通'),
-                h('button', { style: S.btn(false), onClick: () => setSess(null) }, '完成'))
-            : null,
+        const blocked = sess.popup === 'blocked'
+        const statusText =
           stt === 'waiting'
-            ? h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
-                h('button', { style: S.btn(false), onClick: cancelLogin }, '取消登录'))
+            ? (sess.flow === 'qr'
+                ? '等待扫码确认…（已查 ' + (sess.polls || 0) + ' 次）'
+                : sess.pollingOnly
+                  ? '已打开登录页，正在等待授权…（纯轮询，已查 ' + (sess.polls || 0) + ' 次）'
+                  : '等待你在浏览器完成授权…（已轮询 ' + (sess.polls || 0) + ' 次）')
+            : stt === 'ok' ? '✅ 登录成功' + (sess.maskedAccount ? '：' + sess.maskedAccount : '')
+              : stt === 'error' ? '❌ ' + (sess.error || '登录失败') : ''
+        const statusStyle = Object.assign({}, S.dim,
+          stt === 'ok' ? S.good : stt === 'error' ? S.bad : null,
+          stt === 'waiting' && sess.flow === 'qr' ? { textAlign: 'center' } : null)
+
+        const openSessionUrl = () => {
+          const url = sess.flow === 'device' ? sess.verificationUri : sess.url
+          if (!url) return
+          if (!openUrl(url)) setMsg({ ok: false, error: '浏览器拦截了新窗口。请允许本页弹窗后重试，或手动复制链接打开。' })
+        }
+
+        const bigBtn = (sess.flow === 'browser' && sess.url)
+          ? h('button', { style: S.primaryBtn, onClick: openSessionUrl }, '① 打开登录页')
+          : (sess.flow === 'device' && sess.verificationUri)
+            ? h('button', { style: S.primaryBtn, onClick: openSessionUrl }, '① 打开验证页')
+            : null
+
+        const qrView = sess.flow === 'qr'
+          ? (sess.qr
+              ? h('div', { style: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', width: '100%' } },
+                  h(QrCode, { text: String(sess.qr), size: 200 }),
+                  h('div', { style: { fontWeight: 600, fontSize: '13px' } }, '用手机微信扫码'),
+                  sess.shortLink ? h('div', { style: S.secondaryLink, onClick: () => openUrl(sess.shortLink) }, sess.shortLink) : null,
+                  h('span', {
+                    style: S.secondaryLink,
+                    onClick: () => { copyPlainText(String(sess.qr)).then((r) => setMsg({ ok: r.ok, text: r.text })) },
+                  }, '复制二维码内容'))
+              : h('div', { style: Object.assign({}, S.dim, S.warn) },
+                  '后端没有返回二维码内容（该渠道登录端点可能未取证）⇒ 可用下方「粘贴凭据」备用方式'))
+          : null
+
+        return h('div', { style: S.wizard },
+          // ① 主操作
+          bigBtn,
+          // 设备码（大字）
+          sess.flow === 'device' && sess.userCode ? h('div', { style: S.bigCode }, sess.userCode) : null,
+          // 二维码（大图居中）
+          qrView,
+          // ② 状态行
+          statusText ? h('div', { style: statusStyle }, statusText) : null,
+          blocked
+            ? h('div', { style: Object.assign({}, S.dim, S.warn) },
+                '⚠️ 浏览器拦截了新窗口，请点上面的「打开登录页」；或允许本页弹窗后点「重试」。')
             : null,
-          stt === 'error'
-            ? h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
-                h('button', { style: S.btn(false), onClick: startLogin }, '重试'),
-                h('button', { style: S.btn(false), onClick: () => setSess(null) }, '关闭'))
+          // ③ 次要操作
+          stt === 'ok' ? h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' } },
+            h('button', { style: S.primaryBtn, onClick: () => runTest({ provider: ch.id }, 'provider'), disabled: accBusy === 'test:provider' }, accBusy === 'test:provider' ? '测试中…' : '立即测试连通'),
+            h('span', { style: S.secondaryLink, onClick: () => setSess(null) }, '完成')) : null,
+          stt === 'waiting' ? h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'center' } },
+            h('span', { style: S.secondaryLink, onClick: cancelLogin }, '取消登录'),
+            ch.loginUrl ? h('span', { style: S.secondaryLink, onClick: () => openUrl(ch.loginUrl) }, '或在浏览器打开厂商页面') : null) : null,
+          stt === 'error' ? h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'center' } },
+            h('button', { style: S.primaryBtn, onClick: () => startLogin(flow === 'browser' ? preOpenWindow() : null) }, '重试'),
+            h('span', { style: S.secondaryLink, onClick: () => setSess(null) }, '关闭')) : null,
+          // 登录指引（最后，不抢注意力）
+          (sess.instructions || []).length
+            ? h('div', { style: Object.assign({ marginTop: '2px' }, S.dim) },
+                (sess.instructions || []).map((x, i2) => h('div', { key: i2 }, (i2 + 1) + '. ' + x)))
             : null,
           accMsg && accMsg.key === 'provider'
-            ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, accMsg.ok ? S.good : S.warn) }, accMsg.text)
+            ? h('div', { style: Object.assign({}, S.dim, accMsg.ok ? S.good : S.warn) }, accMsg.text)
             : null)
       }
 
@@ -1038,9 +1091,15 @@ window.__ModuleLoader__.load({
             ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
                 (ch.guideSteps || []).map((x, i) => h('div', { key: i }, (i + 1) + '. ' + x)))
             : null,
-          h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
-            h('button', { style: S.btn(true), onClick: startLogin, disabled: busy }, busy ? '发起中…' : '开始一键登录'),
-            h('button', { style: S.btn(false), onClick: () => setFallback(!fallback) }, fallback ? '收起粘贴框' : '拿不到授权？直接粘贴')),
+          h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' } },
+            h('button', {
+              style: S.primaryBtn,
+              // 🔴 同步开窗：必须在点击的同一个 task 里（否则 Promise 回调里会被弹窗拦截）
+              onClick: () => startLogin(flow === 'browser' ? preOpenWindow() : null),
+              disabled: busy,
+            }, busy ? '发起中…' : '一键登录'),
+            h('span', { style: S.secondaryLink, onClick: () => setFallback(!fallback) }, fallback ? '收起粘贴框' : '拿不到授权？直接粘贴'),
+            ch.loginUrl ? h('span', { style: S.secondaryLink, onClick: () => openUrl(ch.loginUrl) }, '厂商官网') : null),
           fallback
             ? h('div', { style: { marginTop: '10px' } },
                 h('div', { style: Object.assign({ fontWeight: 600, marginBottom: '6px' }, S.dim) }, '备用：直接粘贴凭据'),
@@ -1059,29 +1118,29 @@ window.__ModuleLoader__.load({
         'data-implemented': implemented ? '1' : '0',
         style: Object.assign({}, S.card, { marginBottom: '8px', maxWidth: '100%', boxSizing: 'border-box' }),
       },
-        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' } },
-          h('div', { style: { minWidth: 0, flex: '1 1 240px' } },
-            h('span', { style: { fontWeight: 600 } }, ch.label || ch.id),
-            ch.loggedIn
-              ? h(Badge, { kind: 'good' }, '已登录 ' + accs.length)
-              : h(Badge, { kind: 'dim' }, '未登录'),
-            implemented
-              ? h(Badge, { kind: 'good', title: ch.authKind ? ('认证类型：' + ch.authKind) : '' }, '登录可用')
-              : h(Badge, { kind: 'warn', title: capabilityReason }, '暂不可用'),
-            implemented
-              ? (verified
-                  ? h(Badge, { kind: 'good', title: loginNote }, '已验证')
-                  : h(Badge, { kind: 'warn', title: loginNote || '该渠道登录端点尚未真机验证' }, '未验证'))
-              : null,
-            h(Badge, { kind: 'dim', title: flowMeta(flow).tip }, flowMeta(flow).label),
-            ch.checkin ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) }, '· 可签到') : null,
-            ch.proxyRequired ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.warn) }, '· 需代理') : null),
-          h('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
-            ch.loginUrl
-              ? h('a', { href: ch.loginUrl, target: '_blank', rel: 'noreferrer', style: Object.assign({}, S.btn(false), { textDecoration: 'none', color: 'inherit' }) }, '去官网')
-              : null,
+        // 卡片头：左=渠道名+状态徽标（最多 2 个）；右=主按钮「一键登录」+ 小号「厂商官网」次链接
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' } },
+          h('div', { style: { minWidth: 0, flex: '1 1 220px' } },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
+              h('span', { style: { fontWeight: 600, fontSize: '13px' } }, ch.label || ch.id),
+              ch.loggedIn
+                ? h(Badge, { kind: 'good' }, '已登录 ' + accs.length)
+                : h(Badge, { kind: 'dim' }, '未登录'),
+              implemented
+                ? (verified
+                    ? h(Badge, { kind: 'good', title: loginNote }, '已验证')
+                    : h(Badge, { kind: 'warn', title: loginNote || '该渠道登录端点尚未真机验证' }, '未验证'))
+                : h(Badge, { kind: 'warn', title: capabilityReason }, '暂不可用')),
+            h('div', { style: Object.assign({ marginTop: '4px', wordBreak: 'break-all' }, S.dim) },
+              flowMeta(flow).label
+              + (ch.checkin ? ' · 可签到' : '')
+              + (ch.proxyRequired ? ' · 需代理' : '')
+              + (implemented
+                  ? (loginNote ? ' · ' + loginNote : '')
+                  : ' · ' + (capabilityReason || '登录换取尚未实现')))),
+          h('div', { style: { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' } },
             h('span', {
-              style: S.btn(!ch.loggedIn),
+              style: open ? S.btn(false) : S.primaryBtn,
               title: implemented ? '' : ('暂不可用：' + capabilityReason + '（仍可尝试，失败会如实提示）'),
               onClick: () => {
                 const nextOpen = !open
@@ -1090,17 +1149,15 @@ window.__ModuleLoader__.load({
                   api('/login/cancel', { method: 'POST', body: JSON.stringify({ sessionId: sess.sessionId }) }).catch(() => {})
                 }
                 setOpen(nextOpen); setMsg(null); setAccMsg(null); setSess(null); setFallback(false)
-                // 非粘贴类 flow：点「一键登录」直接发起（省一次点击）；粘贴类展开表单
-                if (nextOpen && flow !== 'paste' && flow !== 'aksk') startLogin()
+                if (!nextOpen) return
+                // 🔴 browser 流：在点击的同一个 task 里同步开空白窗口（否则 Promise 回调里会被拦截）
+                if (flow === 'browser') startLogin(preOpenWindow())
+                else if (flow !== 'paste' && flow !== 'aksk') startLogin(null)   // device/qr 不需要新窗口
               },
-            }, open ? '收起' : (ch.loggedIn ? '再加一个' : '一键登录')))),
-        !implemented
-          ? h('div', { style: Object.assign({ marginTop: '4px', wordBreak: 'break-all' }, S.dim, S.warn) },
-              '⚠️ 暂不可用：' + (capabilityReason || loginNote || '该渠道登录换取尚未实现'))
-          : loginNote
-            ? h('div', { style: Object.assign({ marginTop: '4px', wordBreak: 'break-all' }, S.dim, verified ? null : S.warn) },
-                (verified ? '' : '⚠️ 未验证：') + loginNote)
-            : null,
+            }, open ? '收起' : (ch.loggedIn ? '再加一个' : '一键登录')),
+            ch.loginUrl
+              ? h('a', { href: ch.loginUrl, target: '_blank', rel: 'noreferrer', style: S.secondaryLink }, '厂商官网')
+              : null)),
 
         accs.map((a) => {
           const key = a.id

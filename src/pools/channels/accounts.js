@@ -132,9 +132,32 @@ export function createAccountStore(dshHome) {
       }
     },
 
+    /**
+     * 同一渠道 + 同一份凭据 ⇒ 复用已有账号 id，不新建。
+     *
+     * 🔴 真实缺陷（2026-11-03 线上发现）：重复点「一键登录」/重复粘贴同一份 AK/SK
+     *    会不断追加 `provider-<ts>` 账号，页面上出现同一账号 3 条（其中 2 条完全重复）。
+     *    身份判据：AK/SK 型按 `ak+sk`，令牌型按 `token` 原文比较（只在内存比较，不落日志）。
+     */
+    _findSame(d, provider, credAk, credSk, credential, refreshToken) {
+      const accts = d?.accounts && typeof d.accounts === 'object' ? d.accounts : {}
+      for (const [id, a] of Object.entries(accts)) {
+        if (!a || a.provider !== provider) continue
+        const aAk = a.ak ?? (typeof a.credential === 'string' && a.credential.includes(':') ? a.credential.split(':')[0] : '')
+        const aSk = a.sk ?? (typeof a.credential === 'string' && a.credential.includes(':') ? a.credential.split(':')[1] : '')
+        if (credAk && credSk) {
+          if (aAk === credAk && aSk === credSk) return id
+          continue
+        }
+        if (credential && a.credential === credential) return id
+        if (refreshToken && a.refreshToken === refreshToken) return id
+      }
+      return null
+    },
+
     async save({ id, provider, label, credential, ak, sk, securityToken, expiresAt, refreshToken, refreshSource }) {
       const d = await readAll(dshHome)
-      const key = id || `${provider}-${Date.now()}`
+      let key = id || `${provider}-${Date.now()}`
       let credAk = typeof ak === 'string' && ak.trim() ? ak.trim() : ''
       let credSk = typeof sk === 'string' && sk.trim() ? sk.trim() : ''
       // 兼容 UI 的 `AK:SK` 单字符串提交
@@ -157,9 +180,48 @@ export function createAccountStore(dshHome) {
       // 🔑 续期材料：OAuth 渠道的 refresh_token 必须落盘，否则「续期」无从谈起
       if (typeof refreshToken === 'string' && refreshToken.trim()) entry.refreshToken = refreshToken.trim()
       if (typeof refreshSource === 'string' && refreshSource.trim()) entry.refreshSource = refreshSource.trim()
+      // 去重：同渠道同凭据复用已有账号（保留原 addedAt 语义：不加新条目）
+      if (!id) {
+        const same = this._findSame(d, provider, credAk, credSk, String(credential || ''), entry.refreshToken)
+        if (same) {
+          key = same
+          entry.addedAt = d.accounts[same]?.addedAt ?? entry.addedAt
+        }
+      }
       d.accounts[key] = entry
       const ok = await writeAll(dshHome, d)
-      return { ok, id: key, kind: credAk && credSk ? 'aksk' : 'token' }
+      return { ok, id: key, kind: credAk && credSk ? 'aksk' : 'token', deduped: Boolean(this._findSame && !id) }
+    },
+
+    /**
+     * 一次性清理历史重复账号（写盘）。判据与 save 相同。
+     * @returns {Promise<{changed:boolean, before:number, after:number}>}
+     */
+    async dedupe() {
+      try {
+        const d = await readAll(dshHome)
+        const before = Object.keys(d.accounts || {}).length
+        const seen = new Map()   // identity -> 保留的 id
+        const out = {}
+        for (const [id, a] of Object.entries(d.accounts || {})) {
+          if (!a || typeof a !== 'object') { out[id] = a; continue }
+          const ak = a.ak ?? (typeof a.credential === 'string' && a.credential.includes(':') ? a.credential.split(':')[0] : '')
+          const sk = a.sk ?? (typeof a.credential === 'string' && a.credential.includes(':') ? a.credential.split(':')[1] : '')
+          const identity = ak && sk ? `${a.provider}|aksk|${ak}|${sk}`
+            : a.credential ? `${a.provider}|token|${a.credential}`
+            : a.refreshToken ? `${a.provider}|refresh|${a.refreshToken}`
+            : `${a.provider}|${id}`
+          if (seen.has(identity)) continue        // 丢弃后出现的重复项
+          seen.set(identity, id)
+          out[id] = a
+        }
+        const after = Object.keys(out).length
+        if (after === before) return { changed: false, before, after }
+        const ok = await writeAll(dshHome, { accounts: out })
+        return { changed: ok, before, after }
+      } catch {
+        return { changed: false, before: 0, after: 0 }
+      }
     },
 
     async remove(id) {
