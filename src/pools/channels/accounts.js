@@ -103,13 +103,13 @@ export function createAccountStore(dshHome) {
       for (const a of Object.values(merged)) {
         if (a.provider !== provider) continue
         if (a.ak && a.sk) {
-          return { ak: a.ak, sk: a.sk, securityToken: a.securityToken, token: a.credential && !String(a.credential).includes(':') ? a.credential : undefined }
+          return { ak: a.ak, sk: a.sk, securityToken: a.securityToken, refreshToken: a.refreshToken, token: a.credential && !String(a.credential).includes(':') ? a.credential : undefined }
         }
         if (typeof a.credential === 'string' && a.credential.includes(':')) {
           const [ak, sk] = a.credential.split(':')
           if (ak && sk) return { ak, sk, securityToken: a.securityToken }
         }
-        if (a.credential) return { token: a.credential }
+        if (a.credential) return { token: a.credential, refreshToken: a.refreshToken }
       }
       return null
     },
@@ -132,7 +132,7 @@ export function createAccountStore(dshHome) {
       }
     },
 
-    async save({ id, provider, label, credential, ak, sk, securityToken, expiresAt }) {
+    async save({ id, provider, label, credential, ak, sk, securityToken, expiresAt, refreshToken, refreshSource }) {
       const d = await readAll(dshHome)
       const key = id || `${provider}-${Date.now()}`
       let credAk = typeof ak === 'string' && ak.trim() ? ak.trim() : ''
@@ -154,6 +154,9 @@ export function createAccountStore(dshHome) {
         entry.sk = credSk
         if (typeof securityToken === 'string' && securityToken.trim()) entry.securityToken = securityToken.trim()
       }
+      // 🔑 续期材料：OAuth 渠道的 refresh_token 必须落盘，否则「续期」无从谈起
+      if (typeof refreshToken === 'string' && refreshToken.trim()) entry.refreshToken = refreshToken.trim()
+      if (typeof refreshSource === 'string' && refreshSource.trim()) entry.refreshSource = refreshSource.trim()
       d.accounts[key] = entry
       const ok = await writeAll(dshHome, d)
       return { ok, id: key, kind: credAk && credSk ? 'aksk' : 'token' }

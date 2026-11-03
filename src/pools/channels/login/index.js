@@ -31,7 +31,7 @@ const states = new Map()
 
 const SESSION_TTL_MS = 5 * 60 * 1000
 
-export function startLogin(provider, ch, opts = {}) {
+export async function startLogin(provider, ch, opts = {}) {
   const flow = getFlow(provider, ch)
   const sessionId = randomUUID()
   const expiresAt = Date.now() + SESSION_TTL_MS
@@ -44,7 +44,8 @@ export function startLogin(provider, ch, opts = {}) {
   const callbackWithState = `${callbackUrl}?state=${oauthState}`
   if (base) states.set(oauthState, { sessionId, expiresAt })
 
-  const initial = flow.initial(provider, ch, { ...opts, callbackUrl: callbackWithState, publicBase: base, callbackPath: cbPath }) || {}
+  // 部分渠道（如腾讯 CodeBuddy）的授权地址要**现场向厂商换 state** ⇒ starter 可能是 async
+  const initial = (await flow.initial(provider, ch, { ...opts, callbackUrl: callbackWithState, publicBase: base, callbackPath: cbPath })) || {}
 
   const session = {
     sessionId,

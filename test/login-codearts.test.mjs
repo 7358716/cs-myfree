@@ -19,7 +19,7 @@ const PUB = 'http://150.158.175.241'
 const CB = '/cs-myfree/login/callback'
 
 // ── CodeArts URL 构造 ──
-test('codearts 登录 URL 用公网回调（不是 127.0.0.1）', () => {
+test('codearts 登录 URL 用公网回调（不是 127.0.0.1）', async () => {
   const url = buildLoginUrl(`${PUB}${CB}?state=abc`, 'ticket123')
   assert.ok(url.startsWith(HUAWEI_AUTH_BASE), '必须走华为 authui 登录页')
   const decoded = decodeURIComponent(url)
@@ -31,7 +31,7 @@ test('codearts 登录 URL 用公网回调（不是 127.0.0.1）', () => {
   assert.ok(decoded.includes('plugin-name=snap_jetbrains'))
 })
 
-test('ticket 响应解析：credential 与 result 两种形状', () => {
+test('ticket 响应解析：credential 与 result 两种形状', async () => {
   const a = parseCredentialResponse({ credential: { access: 'AK1', secret: 'SK1', securitytoken: 'ST1', expires_at: '2026-11-05T00:00:00Z' } })
   assert.equal(a.ak, 'AK1'); assert.equal(a.sk, 'SK1'); assert.equal(a.securityToken, 'ST1')
   assert.equal(typeof a.expiresAt, 'number')
@@ -43,7 +43,7 @@ test('ticket 响应解析：credential 与 result 两种形状', () => {
   assert.equal(parseCredentialResponse({ credential: { access: 'A', secret: 'S' } }), null)
 })
 
-test('startCodearts 返回 flow=browser + 公网回调 + 说明', () => {
+test('startCodearts 返回 flow=browser + 公网回调 + 说明', async () => {
   const r = startCodearts('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
   assert.equal(r.flow, 'browser')
   assert.ok(r.url.includes('auth.huaweicloud.com'))
@@ -84,8 +84,8 @@ test('pollCodearts：超过上限 → error（不会永远转圈）', async () =
 })
 
 // ── 状态机 ──
-test('startLogin 注册一次性 state，回调消费后失效（防重放）', () => {
-  const s = startLogin('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
+test('startLogin 注册一次性 state，回调消费后失效（防重放）', async () => {
+  const s = await startLogin('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
   assert.ok(s.state, '必须返回 state')
   assert.ok(s.callbackUrl.startsWith(PUB), '回调地址必须是公网')
   const r1 = handleCallback({ state: s.state, code: 'CODE1' })
@@ -95,8 +95,8 @@ test('startLogin 注册一次性 state，回调消费后失效（防重放）', 
   cancelLogin(s.sessionId)
 })
 
-test('handleCallback 带 code 后会话进入 waiting', () => {
-  const s = startLogin('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
+test('handleCallback 带 code 后会话进入 waiting', async () => {
+  const s = await startLogin('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
   handleCallback({ state: s.state, code: 'C' })
   const sess = getSession(s.sessionId)
   assert.equal(sess.callbackCode, 'C')
@@ -110,14 +110,14 @@ test('pollLogin：会话不存在返回 error', async () => {
 })
 
 test('cancelLogin 后 poll 不会再返回 ok', async () => {
-  const s = startLogin('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
+  const s = await startLogin('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
   cancelLogin(s.sessionId)
   const r = await pollLogin(s.sessionId)
   assert.equal(r.state, 'error')
 })
 
 test('过期会话 poll 返回 expired', async () => {
-  const s = startLogin('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
+  const s = await startLogin('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
   const sess = getSession(s.sessionId)
   sess.expiresAt = Date.now() - 1000
   const r = await pollLogin(s.sessionId)
@@ -126,7 +126,7 @@ test('过期会话 poll 返回 expired', async () => {
 })
 
 // ── flow-map 覆盖度 ──
-test('18 家渠道全部有登录流类型', () => {
+test('18 家渠道全部有登录流类型', async () => {
   const ids = Object.keys(CHANNELS)
   assert.equal(ids.length, 18)
   for (const id of ids) {
@@ -137,7 +137,7 @@ test('18 家渠道全部有登录流类型', () => {
   }
 })
 
-test('未验证渠道必须诚实标注（不能全 true）', () => {
+test('未验证渠道必须诚实标注（不能全 true）', async () => {
   const verified = Object.entries(FLOW_MAP).filter(([, v]) => v.loginVerified).map(([k]) => k)
   assert.ok(verified.includes('codearts'), 'codearts 应已真机验证')
   assert.ok(verified.length < Object.keys(FLOW_MAP).length, '不可能 18 家全验证')
@@ -146,15 +146,17 @@ test('未验证渠道必须诚实标注（不能全 true）', () => {
   }
 })
 
-test('getFlow 对未取证渠道给诚实降级（不造假 userCode/url）', () => {
-  const f = getFlow('buddy', CHANNELS.buddy)
+test('getFlow 对未取证渠道给诚实降级（不造假 userCode/url）', async () => {
+  // buddy/workbuddy 已有真实现（见 test/login-buddy.test.mjs），这里改用仍无实现的 trae
+  const f = getFlow('trae', CHANNELS.trae)
   assert.equal(f.type, FLOW_TYPE.BROWSER)
-  const init = f.initial('buddy', CHANNELS.buddy, {})
+  const init = await f.initial('trae', CHANNELS.trae, {})
   assert.equal(init.userCode ?? null, null, '不许编造设备码')
+  assert.equal(init.url ?? null, null, '未取证渠道不许编造登录 URL')
   assert.ok(Array.isArray(init.instructions) && init.instructions.length > 0, '必须给操作说明')
 })
 
-test('getFlow 对 codearts 用真实现（不会回落到通用壳）', () => {
+test('getFlow 对 codearts 用真实现（不会回落到通用壳）', async () => {
   const f = getFlow('codearts', CHANNELS.codearts)
   assert.equal(typeof f.poll, 'function')
   const init = f.initial('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
@@ -163,7 +165,7 @@ test('getFlow 对 codearts 用真实现（不会回落到通用壳）', () => {
 })
 
 test('poll 的 credential 绝不进 HTTP 可见字段（只有 state/hint/masked）', async () => {
-  const s = startLogin('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
+  const s = await startLogin('codearts', CHANNELS.codearts, { publicBase: PUB, callbackPath: CB })
   const sess = getSession(s.sessionId)
   sess._attempts = 0
   sess.pollImpl = async () => ({ state: 'ok', credential: { ak: 'SECRETAK', sk: 'SECRETSK' } })
@@ -174,7 +176,7 @@ test('poll 的 credential 绝不进 HTTP 可见字段（只有 state/hint/masked
   cancelLogin(s.sessionId)
 })
 
-test('sessions/states 是内存结构，可清理', () => {
+test('sessions/states 是内存结构，可清理', async () => {
   assert.ok(sessions instanceof Map)
   assert.ok(states instanceof Map)
 })

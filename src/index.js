@@ -33,6 +33,12 @@ import { createAccountStore } from './pools/channels/accounts.js'
 import { readCachedModels, channelModelsAsList, parseModelId, makeModelId, refreshAll } from './pools/channels/catalog.js'
 import { streamChat as channelStream } from './pools/channels/driver.js'
 import { CHANNELS, AUTH } from './pools/channels/protocols.js'
+import {
+  createCheckinScheduler, createCheckinExecutor, readCheckinState, writeCheckinState,
+} from './pools/channels/checkin.js'
+import { createRefreshScheduler } from './pools/channels/refresh.js'
+import { refreshLogin } from './pools/channels/login/refresh.js'
+import { fetchAllCredits } from './pools/channels/credits/index.js'
 
 const NAME = 'cs-myfree'
 const VERSION = '1.8.0'
@@ -450,6 +456,66 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
 
   const extraModels = () => channelModelsAsList(channelModelCache)
 
+  // ── 自动签到 / 续期：真实定时器（setTimeout 链 + unref；**不用 ctx.interval**）──
+  //
+  // 历史缺陷：checkin.js/refresh.js 曾是纯函数库，页面开关写盘就算「生效」，
+  // 但没有任何调用点 ⇒ 「自动领积分」永远不跑。这里真正接线。
+  const checkinStateIo = {
+    read: () => readCheckinState(cfg.dshHome),
+    write: (st) => writeCheckinState(cfg.dshHome, st),
+  }
+  const checkinScheduler = createCheckinScheduler({
+    executor: createCheckinExecutor({ accounts: accountStore }),
+    state: checkinStateIo,
+    config: () => ({
+      enabled: cfg.checkin?.enabled !== false,       // 默认开（用户要求「自动领积分」）；显式 false 才关
+      at: cfg.checkin?.at ?? '10:05',
+      retryMinutes: cfg.checkin?.retryMinutes ?? 120,
+    }),
+    logger: log,
+    initialDelayMs: 30_000,                          // 不跟启动抢资源
+  })
+  checkinScheduler.start()
+
+  /** 续期成功后的写回（同一条账号 0600；绝不打印凭据） */
+  const saveRefreshedCredential = async (account, credential, expiresAt) => {
+    if (!account?.id) return false
+    const c = typeof credential === 'string'
+      ? (credential.includes(':') ? { ak: credential.split(':')[0], sk: credential.split(':')[1] } : { credential })
+      : (credential ?? {})
+    try {
+      const r = await accountStore.save({
+        id: account.id,
+        provider: account.provider,
+        label: account.label,
+        credential: c.credential ?? c.token ?? '',
+        ak: c.ak,
+        sk: c.sk,
+        securityToken: c.securityToken,
+        expiresAt: expiresAt ?? account.expiresAt ?? null,
+      })
+      return r.ok === true
+    } catch { return false }
+  }
+  const refreshScheduler = createRefreshScheduler({
+    accounts: accountStore,
+    config: () => ({
+      enabled: cfg.refresh?.enabled !== false,
+      tickMs: cfg.refresh?.tickMs ?? 60_000,
+      leadMinutes: cfg.refresh?.leadMinutes ?? 5,
+    }),
+    refreshAccount: (provider, account) => refreshLogin(provider, account),
+    saveCredential: saveRefreshedCredential,
+    logger: log,
+  })
+  refreshScheduler.start()
+
+  if (typeof checkinScheduler.status === 'function') {
+    const st = checkinScheduler.status()
+    log.info(`自动签到：${st.enabled ? '开启' : '关闭'}（每日 ${st.at}，${st.alive ? '定时器已排程' : '尚未排程'}）`)
+  }
+
+  let lastFailure = null
   let adapter
   try {
     adapter = createAdapter({
@@ -464,7 +530,10 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
       },
       send: cfg.transportBaseUrl ? send : sendDispatch,
       budget: cfg.budgetTurns ?? {},
-      onEvent: (e) => log.debug(`${e.type}`, e),
+      onEvent: (e) => {
+        if (e?.type === 'failure') lastFailure = { kind: e.kind, provider: e.provider, model: e.model, at: Date.now() }
+        log.debug(`${e.type}`, e)
+      },
       onRecord: (r) => { appendRecord(r, { dshHome: cfg.dshHome }).catch(() => {}) },
     })
     const sc = adapter.selfCheck()
@@ -545,6 +614,24 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
         logger: log,
         // 🔴 页面展示的链 = adapter 实际生效的链（同一份内存数据，不是另一份推算）
         getChain: () => defaultChain,
+        // /diag：adapter 注册与派发 + 签到/续期定时器是否活着
+        getRuntime: () => ({
+          adapterReady: Boolean(adapter),
+          modelCount: adapter ? adapter.listModels(PROVIDER_ID).length : 0,
+          chainLength: adapter ? adapter.getChain().effective.length : mergeChain(defaultChain, chainOverrides).length,
+          lastFailure,
+          checkin: checkinScheduler.status(),
+          refresh: refreshScheduler.status(),
+        }),
+        // POST /checkin/run：手动一键签到（显式操作，不受自动开关限制）
+        runCheckin: ({ providers } = {}) => checkinScheduler.runNow(providers),
+        // GET /credits：各家余额/积分（未实现的渠道返回明确错误）
+        getCredits: async () => {
+          let list = []
+          try { list = await accountStore.list() } catch { list = [] }
+          const providers = [...new Set(list.map((a) => a.provider))]
+          return fetchAllCredits(providers, (p) => (typeof accountStore.secretOf === 'function' ? accountStore.secretOf(p) : null), {})
+        },
         getChainState: () => (adapter
           ? adapter.getChain()
           : { builtin: defaultChain, overrides: chainOverrides, effective: mergeChain(defaultChain, chainOverrides) }),
@@ -564,6 +651,13 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
             // 🔴 写盘后**热更新内存 cfg**：否则 GET /config、/state 与发送路径
             //    （vision/budget 等都从这里读）仍是旧值，页面显示「已保存」但没生效。
             cfg = withDefaults(next ?? {})
+            // 🔴 开关必须真实生效：改配置就启停/重排定时器，不是写盘就算
+            try {
+              checkinScheduler.setEnabled(cfg.checkin?.enabled !== false)
+              checkinScheduler.reschedule()
+              refreshScheduler.setEnabled(cfg.refresh?.enabled !== false)
+              refreshScheduler.reschedule()
+            } catch { /* 调度器异常不影响配置保存 */ }
             return true
           } catch { return false }
         },

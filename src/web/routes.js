@@ -77,6 +77,9 @@ export function registerRoutes(webServer, opts = {}) {
     ledger = null,
     trustedHosts = [],
     getConnection = null,          // () => 宿主 connection 服务（真实会话校验；拿不到则 fail-closed）
+    getRuntime = null,             // () => { adapterReady, modelCount, chainLength, lastFailure, checkin, refresh }
+    runCheckin = null,             // async ({providers}) => { results, coversToday }
+    getCredits = null,             // async ({providers}) => [{provider, ok, total, error?}]
     logger = { info: () => {}, warn: () => {} },
     fetchImpl = globalThis.fetch,
     now = () => Date.now(),
@@ -321,6 +324,38 @@ export function registerRoutes(webServer, opts = {}) {
     // 6) 渠道协议表
     add('渠道协议', Object.keys(CHANNELS).length >= 18, `${Object.keys(CHANNELS).length} 个渠道已登记`)
 
+    // 7) adapter 注册与派发（避免「选择器里有但根本派发不了」的假绿）
+    const rt = typeof getRuntime === 'function' ? getRuntime() : null
+    if (rt) {
+      const modelCount = Number(rt.modelCount) || 0
+      const okAdapter = rt.adapterReady === true && modelCount > 0
+      const lastFail = rt.lastFailure
+      add('adapter 注册与派发', okAdapter,
+        !rt.adapterReady
+          ? 'adapter 未创建 ⇒ 模型选择器看不到 cs-myfree'
+          : modelCount === 0
+            ? 'adapter 已注册但没有任何模型 ⇒ 无法选择'
+            : `已注册 ${modelCount} 个模型 / 生效链 ${rt.chainLength ?? '?'} 条` +
+              (lastFail ? `；最近失败：${lastFail.kind}（${lastFail.provider}/${lastFail.model}）` : '；最近无失败'))
+
+      // 8) 签到/续期定时器（避免「页面上有开关但根本没跑」）
+      const ck = rt.checkin ?? null
+      if (ck) {
+        const enabled = ck.enabled === true
+        add('签到定时器', enabled ? ck.alive === true : true,
+          !enabled ? '自动签到已关闭（开关可随时打开）'
+            : ck.alive
+              ? `运行中；下次 ${ck.nextAt ? new Date(ck.nextAt).toLocaleString('zh-CN') : '—'}；上次 ${ck.lastDate ?? '—'} ${ck.lastResult ?? ''}`
+              : '🔴 开关已开但定时器未排程（不会自动跑）')
+      }
+      const rf = rt.refresh ?? null
+      if (rf) {
+        add('续期定时器', rf.enabled === true ? rf.alive === true : true,
+          rf.enabled !== true ? '自动续期已关闭'
+            : rf.alive ? `${Math.round((rf.tickMs ?? 60000) / 1000)}s 扫描一次` : '🔴 开关已开但定时器未排程')
+      }
+    }
+
     const fails = checks.filter((c) => c.ok === false).length
     return {
       ok: fails === 0,
@@ -328,6 +363,80 @@ export function registerRoutes(webServer, opts = {}) {
       checks,
       summary: fails === 0 ? '全部通过' : `${fails} 项异常`,
       cashPath: CASH_PATH,
+    }
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 自动签到 / 领积分 / 余额（task-6；本段只依赖 opts 注入的运行时钩子）
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // ── 手动一键签到（显式操作：不受「自动签到」开关限制）──
+  route('/checkin/run', async ({ body }) => {
+    if (typeof runCheckin !== 'function') {
+      return { ok: false, error: '签到运行时未注册（插件未激活或无 webServer）' }
+    }
+    const providers = Array.isArray(body?.providers) && body.providers.length > 0
+      ? body.providers.map(String)
+      : undefined
+    const t0 = now()
+    try {
+      const out = await runCheckin({ providers })
+      const results = Array.isArray(out?.results) ? out.results : []
+      return {
+        ok: true,
+        at: now(),
+        takesMs: now() - t0,
+        coversToday: out?.coversToday === true,
+        results,
+        summary: {
+          total: results.length,
+          claimed: results.filter((r) => r.kind === 'claimed').length,
+          alreadyClaimed: results.filter((r) => r.kind === 'already-claimed').length,
+          inactive: results.filter((r) => r.kind === 'inactive').length,
+          unsupported: results.filter((r) => r.kind === 'unsupported').length,
+          failed: results.filter((r) => r.kind === 'failed').length,
+        },
+        text: results.length === 0
+          ? '没有可签到的渠道（未登录，或渠道不支持自动签到）'
+          : results.map((r) => `${r.provider}:${r.kind}${r.gain?.amount ? ` +${r.gain.amount}` : ''}`).join('；'),
+      }
+    } catch (err) {
+      return { ok: false, error: String(err?.message ?? err).slice(0, 200) }
+    }
+  })
+
+  // ── 签到状态（今天是否已领 / 下次运行时间 / 欠账）──
+  route('/checkin/status', async () => {
+    const rt = typeof getRuntime === 'function' ? getRuntime() : null
+    const ck = rt?.checkin ?? null
+    if (!ck) return { ok: false, error: '签到运行时未注册' }
+    return {
+      ok: true,
+      at: now(),
+      enabled: ck.enabled === true,
+      alive: ck.alive === true,
+      running: ck.running === true,
+      at_time: ck.at ?? null,
+      nextAt: ck.nextAt ?? null,
+      lastAt: ck.lastAt ?? null,
+      lastDate: ck.lastDate ?? null,
+      lastResult: ck.lastResult ?? null,
+      pending: ck.pending ?? 0,
+      lastError: ck.lastError ?? null,
+      channels: ck.channels ?? [],
+    }
+  })
+
+  // ── 余额/积分（走后端实现；不支持的渠道给明确错误而不是 0）──
+  route('/credits', async () => {
+    if (typeof getCredits !== 'function') {
+      return { ok: false, error: '积分查询运行时未注册' }
+    }
+    try {
+      const list = await getCredits({})
+      return { ok: true, at: now(), providers: list }
+    } catch (err) {
+      return { ok: false, error: String(err?.message ?? err).slice(0, 200) }
     }
   })
 
@@ -389,8 +498,10 @@ export function registerRoutes(webServer, opts = {}) {
     const expiresAt = Number.isFinite(cred.expiresAt)
       ? cred.expiresAt
       : (Number.isFinite(cred.expiresIn) ? Date.now() + cred.expiresIn * 1000 : null)
-    if (ak && sk) return { ak, sk, securityToken, credential: token, expiresAt, masked: `${maskCredential(ak)} / ${maskCredential(sk)}` }
-    if (token) return { credential: token, expiresAt, masked: maskCredential(token) }
+    const refreshToken = String(cred.refreshToken ?? cred.refresh_token ?? '').trim() || undefined
+    const refreshSource = typeof cred.refreshSource === 'string' ? cred.refreshSource : undefined
+    if (ak && sk) return { ak, sk, securityToken, credential: token, expiresAt, refreshToken, refreshSource, masked: `${maskCredential(ak)} / ${maskCredential(sk)}` }
+    if (token) return { credential: token, expiresAt, refreshToken, refreshSource, masked: maskCredential(token) }
     return null
   }
 
@@ -408,6 +519,8 @@ export function registerRoutes(webServer, opts = {}) {
       credential: norm.credential,
       ak: norm.ak,
       sk: norm.sk,
+      refreshToken: norm.refreshToken,
+      refreshSource: norm.refreshSource,
       securityToken: norm.securityToken,
       expiresAt: norm.expiresAt ?? null,
     })
