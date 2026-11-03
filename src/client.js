@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const react = require('react')
     const h = react.createElement
 
-    const VERSION = '1.9.10'
+    const VERSION = '1.9.11'
     const API = '/cs-myfree'
     const CASH_PATH = '/cs-myfree/cash'
 
@@ -1505,7 +1505,12 @@ window.__ModuleLoader__.load({
       })
       const save = () => {
         setBusy(true); setMsg(null)
-        api('/chain', { method: 'POST', body: JSON.stringify({ chain: draft.filter((e) => e.provider && e.model) }) })
+        // 保留 disabled 条目（它们是「剔除规则」，provider/model 必须有、tier 可缺省）
+        const payload = draft.filter((e) => e.provider && e.model).map((e) => (
+          e.disabled ? { provider: e.provider, model: e.model, disabled: true }
+            : { provider: e.provider, model: e.model, tier: e.tier }
+        ))
+        api('/chain', { method: 'POST', body: JSON.stringify({ chain: payload }) })
           .then((r) => { setMsg(r); reload() })
           .catch((e) => setMsg({ ok: false, errors: [String((e && e.message) || e)] }))
           .then(() => setBusy(false))
@@ -1515,7 +1520,10 @@ window.__ModuleLoader__.load({
       const row = (e, i) => {
         const ms = modelsOf(e.provider)
         const modelMissing = e.model && !ms.some((m) => m.id === e.model)
-        return h('div', { key: i, style: Object.assign({}, S.tile, { marginBottom: '6px', display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }) },
+        return h('div', { key: i, style: Object.assign({}, S.tile, {
+          marginBottom: '6px', display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap',
+          ...(e.disabled ? { opacity: 0.5, textDecoration: 'line-through' } : {}),
+        }) },
           h('span', { style: Object.assign({}, S.mono, S.dim) }, '#' + (i + 1)),
           h('select', {
             style: Object.assign({}, S.input, { flex: '1 1 150px', minWidth: '120px' }),
@@ -1543,6 +1551,14 @@ window.__ModuleLoader__.load({
               ? Object.assign({}, x, { tier: 1 })
               : Object.assign({}, x, { tier: Math.max(1, (Number(x.tier) || 1) + (Number(x.tier || 1) === 1 ? 1 : 0)) })))),
           }, '设为首选'),
+          // 🔴 禁用：内置链条目无法物理删除（删了会回来），用 disabled 标记剔除
+          h('span', {
+            style: Object.assign({}, S.btn(false), e.disabled ? S.warn : null),
+            title: e.disabled ? '已禁用（点一下恢复）' : '禁用本条（内置链条目用这个剔除，不是删除）',
+            onClick: () => setDraft((arr) => arr.map((x, j) => (j === i
+              ? Object.assign({}, x, { disabled: !x.disabled, _isDisabled: !x.disabled })
+              : x))),
+          }, e.disabled ? '已禁用' : '禁用'),
           h('span', { style: S.btn(false), onClick: () => move(i, -1), title: '上移' }, '↑'),
           h('span', { style: S.btn(false), onClick: () => move(i, 1), title: '下移' }, '↓'),
           h('span', { style: S.btn(false), onClick: () => del(i), title: '删除' }, '✕'))
@@ -1951,6 +1967,58 @@ window.__ModuleLoader__.load({
           providers.slice(0, 8).map((x) => h('div', { key: x.provider, style: S.row },
             h('span', null, x.provider),
             h('span', { style: S.dim }, x.calls + ' 次  ¥' + x.costCNY)))) : null,
+
+        // 🔴 中断/失败统计（用户要求「页面能看到中断次数与报错」）
+        (() => {
+          const f = d.failures || (d.spend && d.spend.failures) || null
+          if (!f) return null
+          const codeEntries = Object.entries(f.byCode || {})
+          const provEntries = Object.entries(f.byProvider || {})
+          const recent = f.recent || []
+          const CODE_HINT = {
+            AUTH: '凭据无效或未登录',
+            RATE_LIMIT: '被限流（请求太频繁）',
+            QUOTA: '额度用尽',
+            TIMEOUT: '上游超时（网络慢或模型卡住）',
+            TRANSPORT: '网络传输失败',
+            SERVER: '上游 5xx',
+            MODEL_NOT_FOUND: '模型名不存在',
+            NOT_FOUND: '端点不存在',
+            INVALID_REQUEST: '请求参数被上游拒绝',
+            EMPTY_RESPONSE: '上游返回空内容',
+            PERMISSION: '无权限/被风控',
+            REGION_BLOCKED: '地区限制',
+            UNKNOWN: '未能归类（需看原始报错）',
+          }
+          return h('div', { style: S.card },
+            h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '中断 / 失败统计'),
+            h(KV, { k: '总调用', v: String(f.callsTotal ?? 0) }),
+            h(KV, { k: '失败次数', v: String(f.failTotal ?? 0) + '（' + (f.failRate ?? 0) + '%）' }),
+            h(KV, { k: '失明率', v: (f.byCode && f.byCode.UNKNOWN ? ((f.byCode.UNKNOWN / Math.max(1, f.callsTotal)) * 100).toFixed(1) : '0.0') + '%（UNKNOWN 占比，越低越好）', dim: true }),
+            codeEntries.length
+              ? h('div', { style: { marginTop: '10px' } },
+                h('div', { style: Object.assign({ fontWeight: 600 }, S.dim) }, '按失败类型'),
+                codeEntries.map(([code, n]) => h('div', { key: code, style: S.row },
+                  h('span', null, code + (CODE_HINT[code] ? ' · ' + CODE_HINT[code] : '')),
+                  h('span', { style: Object.assign({}, S.dim, S.warn) }, String(n) + ' 次'))))
+              : h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, S.good) }, '✅ 没有失败记录'),
+            provEntries.length
+              ? h('div', { style: { marginTop: '10px' } },
+                h('div', { style: Object.assign({ fontWeight: 600 }, S.dim) }, '按渠道'),
+                provEntries.slice(0, 8).map(([p, n]) => h('div', { key: p, style: S.row },
+                  h('span', null, p),
+                  h('span', { style: Object.assign({}, S.dim, S.warn) }, String(n) + ' 次'))))
+              : null,
+            recent.length
+              ? h('div', { style: { marginTop: '10px' } },
+                h('div', { style: Object.assign({ fontWeight: 600 }, S.dim) }, '最近 20 条中断（时间 / 渠道 / 模型 / 原因）'),
+                h('div', { style: S.pre },
+                  recent.map((r) => {
+                    const t = r.at ? new Date(r.at).toLocaleString('zh-CN', { hour12: false }) : '-'
+                    return `${t}  ${r.provider || '-'}  ${r.model || '-'}  ${r.code || 'UNKNOWN'}`
+                  }).join('\n')))
+              : null)
+        })(),
 
         tokenDays.length ? h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '渠道 Token 账本（最近 5 天）'),

@@ -111,6 +111,34 @@ export function classify(err = {}) {
   return verdict(KIND.UNKNOWN)
 }
 
+/**
+ * 失败类型的**中文人话说明 + 可操作建议**。
+ *
+ * 为什么要它：用户实测反馈「每次中断的提示语要尽量明确」——
+ * 只给 `AUTH` 这种机器码等于没说。UI 与日志都从这里取文案，保证口径一致。
+ */
+export const KIND_HINTS = Object.freeze({
+  [KIND.AUTH]: { text: '凭据无效或未登录', advice: '去「供给源」重新登录该渠道，或检查 AK/SK 是否过期' },
+  [KIND.PERMISSION]: { text: '无权限或被风控', advice: '该账号可能被上游限制（如腾讯 11140）。换账号或稍后再试' },
+  [KIND.QUOTA]: { text: '额度用尽', advice: '换一个渠道/模型，或等额度重置（部分渠道每日刷新）' },
+  [KIND.RATE_LIMIT]: { text: '被限流（请求太频繁）', advice: '等几秒再发；或把该渠道的并发上限调低' },
+  [KIND.TIMEOUT]: { text: '上游超时（网络慢或模型卡住）', advice: '重试；若反复出现，把该模型移出降级链（OVH 冷启动可达 43s）' },
+  [KIND.TRANSPORT]: { text: '网络传输失败（连不上上游）', advice: '检查本机网络/代理；该渠道可能需要代理' },
+  [KIND.SERVER]: { text: '上游服务器错误（5xx）', advice: '上游故障，等一会儿重试；若持续则换渠道' },
+  [KIND.MODEL_NOT_FOUND]: { text: '模型名不存在', advice: '该模型可能已下线：去「降级链」用下拉重新选一个真实模型' },
+  [KIND.NOT_FOUND]: { text: '端点不存在（路径错）', advice: '该渠道协议可能已变更，反馈给维护者' },
+  [KIND.INVALID_REQUEST]: { text: '请求参数被上游拒绝', advice: '常见于「非流式请求不被支持」或工具/图片不被接受；换模型重试' },
+  [KIND.EMPTY_RESPONSE]: { text: '上游返回空内容', advice: '重试；连续空返回请换渠道（部分免费源会这样）' },
+  [KIND.REGION_BLOCKED]: { text: '地区限制', advice: '该渠道在你所在地区被封锁，需要代理或换渠道' },
+  [KIND.UNKNOWN]: { text: '未能归类（需要看原始报错）', advice: '把「可观测」页里的原始错误码发给维护者' },
+})
+
+/** 取某类型的可读说明（找不到就给机器码本身） */
+export function explainKind(kind) {
+  const h = KIND_HINTS[kind]
+  return h ? `${kind} — ${h.text}｜建议：${h.advice}` : String(kind ?? 'UNKNOWN')
+}
+
 function verdict(kind) {
   return {
     kind,

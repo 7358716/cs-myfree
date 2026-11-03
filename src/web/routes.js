@@ -34,7 +34,7 @@ import { SCOPE, readScope, writeScope, effectiveConfig, listScopes } from '../co
 import { startLogin, getSession, pollLogin, cancelLogin, handleCallback } from '../pools/channels/login/index.js'
 import { FLOW_MAP } from '../pools/channels/login/flow-map.js'
 import { refreshLogin, NO_REFRESH_ERROR } from '../pools/channels/login/refresh.js'
-import { classify } from '../adapter/failure-map.js'
+import { classify, explainKind } from '../adapter/failure-map.js'
 import { maskCredential } from '../pools/channels/accounts.js'
 import { builtinModelsOf } from '../pools/channels/builtin-models.js'
 import { chat } from '../pools/channels/driver.js'
@@ -853,6 +853,8 @@ export function registerRoutes(webServer, opts = {}) {
         ms,
         error: safeErrorText(err),
         kind: v.kind,
+        // 人话说明 + 建议（用户要求「每次中断的提示语要尽量明确」）
+        hint: explainKind(v.kind),
         retryable: v.retryable,
         ttlMs: v.ttlMs,
       }

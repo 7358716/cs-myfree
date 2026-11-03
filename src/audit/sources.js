@@ -74,6 +74,10 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
   const file = ledgerFile(dshHome)
   const byDay = new Map()
   const byProvider = new Map()
+  // 🔴 失败/中断统计（用户要求页面可见）
+  const byCode = new Map()
+  const byFailProvider = new Map()
+  const recentFailures = []
   let total = 0, failed = 0, paidCount = 0, costTotal = 0, costUnknown = 0
   let lastAt = null
 
@@ -87,7 +91,16 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
       if (typeof o.at !== 'number' || o.at < fromMs) continue
       total++
       if (lastAt === null || o.at > lastAt) lastAt = o.at
-      if (o.ok === false) failed++
+      if (o.ok === false) {
+        failed++
+        const code = o.code ?? 'UNKNOWN'
+        byCode.set(code, (byCode.get(code) ?? 0) + 1)
+        const pv = o.provider || '(unknown)'
+        byFailProvider.set(pv, (byFailProvider.get(pv) ?? 0) + 1)
+        if (recentFailures.length < 20) {
+          recentFailures.push({ at: o.at, provider: pv, model: o.model ?? null, code, ms: o.ms ?? null })
+        }
+      }
 
       const day = o.day || dateKeyCN(o.at)
       if (!byDay.has(day)) byDay.set(day, { date: day, calls: 0, costCNY: 0, costUnknown: 0, in: 0, out: 0, paid: 0, providers: new Set() })
@@ -129,6 +142,14 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
     costTotalCNY: Number(costTotal.toFixed(6)),
     costUnknown,
     lastAt,
+    failures: {
+      failTotal: failed,
+      callsTotal: total,
+      failRate: total > 0 ? Number(((failed / total) * 100).toFixed(1)) : 0,
+      byCode: Object.fromEntries([...byCode.entries()].sort((a, b) => b[1] - a[1])),
+      byProvider: Object.fromEntries([...byFailProvider.entries()].sort((a, b) => b[1] - a[1])),
+      recent: recentFailures.slice(0, 20),
+    },
     days: [...byDay.values()]
       .map((d) => ({ ...d, providers: [...d.providers], costCNY: Number(d.costCNY.toFixed(6)) }))
       .sort((a, b) => b.date.localeCompare(a.date))
@@ -180,6 +201,36 @@ export async function collectLedger({ dshHome, fromMs = 0 } = {}) {
       costUnknown: spend.costUnknown ?? 0,
       lastAt: spend.lastAt ?? null,
     },
+    // 🔴 中断/失败统计（用户要求「页面能看到中断次数与报错」）
+    //    数据来自自有账本：每条 ok:false 的记录都带 code（失败分类）
+    failures: (() => {
+      try {
+        const recs = spend.records ?? []
+        const byCode = new Map()
+        const byProvider = new Map()
+        const recent = []
+        for (const r of recs) {
+          if (r.ok !== false) continue
+          const code = r.code ?? 'UNKNOWN'
+          byCode.set(code, (byCode.get(code) ?? 0) + 1)
+          const pv = r.provider ?? 'unknown'
+          byProvider.set(pv, (byProvider.get(pv) ?? 0) + 1)
+          if (recent.length < 20) recent.push({ at: r.at, provider: pv, model: r.model ?? null, code })
+        }
+        const total = recs.length || 1
+        const failTotal = [...byCode.values()].reduce((a, b) => a + b, 0)
+        return {
+          failTotal,
+          callsTotal: recs.length,
+          failRate: Number(((failTotal / total) * 100).toFixed(1)),
+          byCode: Object.fromEntries([...byCode.entries()].sort((a, b) => b[1] - a[1])),
+          byProvider: Object.fromEntries([...byProvider.entries()].sort((a, b) => b[1] - a[1])),
+          recent: recent.sort((a, b) => (b.at ?? 0) - (a.at ?? 0)),
+        }
+      } catch {
+        return { failTotal: 0, callsTotal: 0, failRate: 0, byCode: {}, byProvider: {}, recent: [] }
+      }
+    })(),
   }
 }
 

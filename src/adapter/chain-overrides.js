@@ -36,6 +36,9 @@ export function normalizeEntry(e, index = 0) {
     tier: e.tier ?? 1,
   }
   if (e.paid === true) out.paid = true
+  // 🔴 disabled：内置链里的条目无法「物理删除」，用禁用条剔除（用户实测反馈：
+  //    kilo/ovh 在页面删掉后又回来 —— 因为只在覆盖层删了，内置链还在）
+  if (e.disabled === true) out.disabled = true
   if (typeof e.note === 'string' && e.note.trim() !== '') out.note = e.note.trim()
   out._i = index
   return out
@@ -121,15 +124,20 @@ export function mergeChain(builtin = [], overrides = []) {
   for (const e of ov) ovByKey.set(`${e.provider}\u0000${e.model}`, e)
   const baseKeys = new Set(base.map((e) => `${e.provider}\u0000${e.model}`))
 
+  // 禁用集合：覆盖层里 disabled:true 的条目 ⇒ 从生效链中剔除（内置 + 覆盖都剔）
+  const disabledKeys = new Set(ov.filter((e) => e.disabled === true).map((e) => `${e.provider}\u0000${e.model}`))
+
   const out = []
   for (const e of base) {
     const k = `${e.provider}\u0000${e.model}`
+    if (disabledKeys.has(k)) continue                       // 🔴 用户禁用 ⇒ 不生效
     const o = ovByKey.get(k)
     if (o) out.push({ ...e, tier: o.tier, paid: o.paid === true ? true : e.paid, note: o.note ?? e.note })
     else out.push(e)
   }
   for (const e of ov) {
     const k = `${e.provider}\u0000${e.model}`
+    if (e.disabled === true) continue                       // 禁用的是剔除，不是新增
     if (!baseKeys.has(k)) out.push(e)
   }
 
