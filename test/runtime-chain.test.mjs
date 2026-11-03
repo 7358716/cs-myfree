@@ -226,3 +226,20 @@ test('validateOverrides + normalizeChainAliases 去重与别名归一', () => {
   assert.equal(v.ok, false, '归一后重复必须被校验发现（防重复计费/重试）')
   assert.ok(v.errors.some((e) => e.includes('重复')))
 })
+
+// ── ③ 渠道链条目（provider=渠道 + 裸模型名）也要走渠道 ──
+
+test('🔴 routeTarget：三种写法都正确分流（渠道/渠道/免密）', async () => {
+  const { routeTarget } = await import('../src/index.js')
+  // ① 规范 id（选择器）
+  assert.deepEqual(routeTarget({ provider: 'cs-myfree', model: 'codearts/deepseek-v4-pro' }), {
+    kind: 'channel', channelId: 'codearts', modelId: 'deepseek-v4-pro', model: 'codearts/deepseek-v4-pro',
+  })
+  // ② 链条目：渠道 + 裸模型名（「17 条渠道链」常见写法）⇒ 补前缀
+  assert.deepEqual(routeTarget({ provider: 'codearts', model: 'deepseek-v4-pro' }), {
+    kind: 'channel', channelId: 'codearts', modelId: 'deepseek-v4-pro', model: 'codearts/deepseek-v4-pro',
+  })
+  // ③ 免密源
+  assert.equal(routeTarget({ provider: 'kilo', model: 'kilo-auto/free' }).kind, 'keyless')
+  assert.equal(routeTarget({ provider: 'kilo-free', model: 'kilo-auto/free' }).kind, 'keyless')
+})

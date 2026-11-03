@@ -29,7 +29,7 @@ import { registerRoutes, PREFIX as API_PREFIX } from './web/routes.js'
 import { appendRecord } from './audit/sources.js'
 import { createState } from './web/state.js'
 import { createAccountStore } from './pools/channels/accounts.js'
-import { readCachedModels, channelModelsAsList, parseModelId, refreshAll } from './pools/channels/catalog.js'
+import { readCachedModels, channelModelsAsList, parseModelId, makeModelId, refreshAll } from './pools/channels/catalog.js'
 import { streamChat as channelStream } from './pools/channels/driver.js'
 import { CHANNELS } from './pools/channels/protocols.js'
 
@@ -84,6 +84,24 @@ export async function* parseSse(body, now = () => Date.now()) {
       } catch { /* 忽略心跳/注释行 */ }
     }
   }
+}
+
+/**
+ * 纯函数：一条候选该走「渠道」还是「免密源」，以及规范化后的模型 id。
+ *
+ * 三种写法都要能走通（profile 的「17 条渠道链」通常写成第 2 种）：
+ *   ① model = `codearts/deepseek-v4-pro`（选择器里的规范 id）
+ *   ② {provider:'codearts', model:'deepseek-v4-pro'}（渠道 + 裸模型名）
+ *   ③ {provider:'kilo', model:'kilo-auto/free'}（免密源）
+ */
+export function routeTarget({ provider, model } = {}) {
+  const parsed = parseModelId(model)
+  if (parsed) return { kind: 'channel', channelId: parsed.channelId, modelId: parsed.modelId, model }
+  const p = String(provider ?? '')
+  if (CHANNELS[p]) {
+    return { kind: 'channel', channelId: p, modelId: String(model ?? ''), model: makeModelId(p, model) }
+  }
+  return { kind: 'keyless', provider: p, model }
 }
 
 /**
@@ -319,9 +337,12 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     })
   }
 
-  /** 统一发送入口：渠道模型 vs 免密源，自动分流 */
+  /**
+   * 统一发送入口：渠道模型 vs 免密源，自动分流（判定逻辑见 routeTarget）。
+   */
   const sendDispatch = async (o) => {
-    if (parseModelId(o.model)) return sendToChannel(o)
+    const target = routeTarget({ provider: o.provider, model: o.model })
+    if (target.kind === 'channel') return sendToChannel({ ...o, model: target.model })
     return sendToKeyless(o)
   }
 
