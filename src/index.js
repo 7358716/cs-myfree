@@ -27,9 +27,13 @@ import { judge, sendJson } from './web/guard.js'
 import { registerRoutes, PREFIX as API_PREFIX } from './web/routes.js'
 import { appendRecord } from './audit/sources.js'
 import { createState } from './web/state.js'
+import { createAccountStore } from './pools/channels/accounts.js'
+import { readCachedModels, channelModelsAsList, parseModelId, refreshAll } from './pools/channels/catalog.js'
+import { streamChat as channelStream } from './pools/channels/driver.js'
+import { CHANNELS } from './pools/channels/protocols.js'
 
 const NAME = 'cs-myfree'
-const VERSION = '1.5.2'
+const VERSION = '1.6.0'
 
 export const name = NAME
 export const version = VERSION
@@ -154,6 +158,41 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
    *   图片 → OVH Qwen2.5-VL → 文字描述 → 注入主模型
    * 这样主模型不需要是多模态，也不会有「静默丢图」问题。
    */
+  /** 渠道模型发送：id 形如 `codearts/xxx`，用该渠道的登录凭证发 */
+  const sendToChannel = async ({ model, messages, signal, options }) => {
+    const parsed = parseModelId(model)
+    if (!parsed) throw Object.assign(new Error('无法解析渠道模型：' + model), { code: 'MODEL_NOT_FOUND' })
+    const ch = CHANNELS[parsed.channelId]
+    if (!ch) throw Object.assign(new Error('未知渠道：' + parsed.channelId), { code: 'MODEL_NOT_FOUND' })
+    const cred = await accountStore.credentialOf(parsed.channelId)
+    if (!cred) throw Object.assign(new Error(`渠道 ${parsed.channelId} 尚未登录`), { code: 'AUTH' })
+
+    let prepared = messages
+    try {
+      const r = await preprocessImages(messages, {
+        mode: cfg.vision?.mode ?? MODE.OFF,
+        consented: cfg.vision?.consented === true,
+        cache: visionCache,
+      })
+      prepared = r.messages
+    } catch { /* 识图失败不影响 */ }
+
+    return channelStream({
+      channelId: parsed.channelId,
+      ch,
+      cred: { token: cred, ak: cred.split(':')[0], sig: cred.split(':')[1] },
+      model: parsed.modelId,
+      messages: convertMessages(prepared, options),
+      signal,
+    })
+  }
+
+  /** 统一发送入口：渠道模型 vs 免密源，自动分流 */
+  const sendDispatch = async (o) => {
+    if (parseModelId(o.model)) return sendToChannel(o)
+    return sendToKeyless(o)
+  }
+
   const sendToKeyless = async ({ provider, model, messages, signal, options }) => {
     // 🔑 归一别名（kilo-free → kilo），否则用户手填旧名字会报「未知供应源」
     const srcId = resolveSourceId(provider)
@@ -189,12 +228,20 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     })
   }
 
+  // ── 已登录渠道的模型（登录后自动出现在模型选择器里）──
+  const accountStore = createAccountStore(cfg.dshHome)
+  let channelModelCache = {}
+  readCachedModels(cfg.dshHome).then((c) => { channelModelCache = c || {} }).catch(() => {})
+
+  const extraModels = () => channelModelsAsList(channelModelCache)
+
   let adapter
   try {
     adapter = createAdapter({
+      extraModels,
       builtin: defaultChain,
       overrides: cfg.chain?.overrides ?? [],
-      send: cfg.transportBaseUrl ? send : sendToKeyless,
+      send: cfg.transportBaseUrl ? send : sendDispatch,
       budget: cfg.budgetTurns ?? {},
       onEvent: (e) => log.debug(`${e.type}`, e),
       onRecord: (r) => { appendRecord(r, { dshHome: cfg.dshHome }).catch(() => {}) },

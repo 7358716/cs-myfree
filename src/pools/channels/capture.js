@@ -35,43 +35,80 @@ export function captureCredential(raw) {
   const text = String(raw ?? '').trim()
   if (!text) return { ok: false, error: '没有内容' }
 
-  // ① JSON
+  // ① JSON（含 access_token / code 等字段）
   if (/^[[{]/.test(text)) {
     try {
       const obj = JSON.parse(text)
       const found = findKey(obj)
       if (found) return { ok: true, credential: found.value, kind: 'json', extra: { field: found.key } }
       return { ok: false, error: 'JSON 里没找到 token / code 字段' }
-    } catch { /* 不是合法 JSON，继续 */ }
+    } catch {
+      return { ok: false, error: '看着像 JSON 但格式不对' }
+    }
   }
 
-  // ② URL 或查询串
-  let qs = null
-  try {
-    if (/^https?:\/\//i.test(text)) qs = new URL(text).searchParams
-    else if (text.includes('=') && !text.includes(' ')) qs = new URLSearchParams(text)
-  } catch { /* ignore */ }
+  // ② URL 或查询串 —— **只认带凭证参数的**
+  const isUrl = /^https?:\/\//i.test(text)
+  const looksLikeQuery = !isUrl && /^[^\s]+=[^\s]*/.test(text) && text.includes('=')
+  if (isUrl || looksLikeQuery) {
+    let qs = null
+    try {
+      qs = isUrl ? new URL(text).searchParams : new URLSearchParams(text)
+    } catch { /* URL 畸形 */ }
+    if (!qs) return { ok: false, error: '链接格式不对' }
 
-  if (qs) {
     for (const k of KEY_NAMES) {
       const v = qs.get(k)
-      if (v && v.length >= 6) return { ok: true, credential: v, kind: 'url', extra: { field: k } }
+      if (v && looksLikeCredential(v)) return { ok: true, credential: v, kind: 'url', extra: { field: k } }
     }
-    // 大小写不敏感再找一遍
     for (const [k, v] of qs.entries()) {
-      if (KEY_NAMES.some((n) => n.toLowerCase() === k.toLowerCase()) && v.length >= 6) {
+      if (KEY_NAMES.some((n) => n.toLowerCase() === k.toLowerCase()) && looksLikeCredential(v)) {
         return { ok: true, credential: v, kind: 'url', extra: { field: k } }
       }
     }
-    return { ok: false, error: '链接里没找到 code / token 参数' }
+    // 🔴 关键：URL 里没有凭证参数 ⇒ **明确拒绝**，绝不把整条 URL 当令牌
+    return { ok: false, error: '这是普通网页地址，里面没有 code / token 参数。登录完成后要复制**跳转后**那条带 ?code= 的链接' }
   }
 
-  // ③ 裸凭证（长度够就当 token）
-  if (text.length >= 8 && !/\s/.test(text)) {
-    return { ok: true, credential: text, kind: 'raw' }
-  }
+  // ③ 裸令牌 —— 必须通过形态校验
+  if (looksLikeCredential(text)) return { ok: true, credential: text, kind: 'raw' }
 
-  return { ok: false, error: '识别不出来。可以粘贴完整回调链接，或直接粘贴 token' }
+  return { ok: false, error: '识别不出来。请粘贴带 ?code= 的回调链接，或一段令牌' }
+}
+
+/**
+ * 🔑 判断一段文本**像不像**凭证（严格）。
+ *
+ * 血泪教训：之前只判断「长度 ≥ 8 且无空格」，
+ * 结果 `https://www.baidu.com`（21 字符无空格）被当成令牌保存了。
+ *
+ * 严格规则：
+ *  · 长度 8~4096
+ *  · 不含空白
+ *  · 不含 URL 特征（:// 或 http 开头或含 .com/.cn 这类域名）
+ *  · 字符集限定为 token 常见字符（字母数字 + - _ . ~ + / =）
+ *  · 不能是纯自然语言单词（要有数字或符号，或足够长且混合大小写）
+ */
+export function looksLikeCredential(s) {
+  const v = String(s ?? '').trim()
+  if (v.length < 8 || v.length > 4096) return false
+  if (/\s/.test(v)) return false
+  // 排除 URL 与域名
+  if (/^https?:\/\//i.test(v)) return false
+  if (v.includes('://')) return false
+  if (/^[a-z0-9.-]+\.(com|cn|net|org|io|sh|ai|dev|app)(\/|$)/i.test(v)) return false
+  // 字符集
+  if (!/^[A-Za-z0-9._~+/=-]+$/.test(v)) return false
+  // 纯字母单词（如 password）拒掉；真实 token 通常含数字或符号
+  const hasDigit = /[0-9]/.test(v)
+  const hasSymbol = /[._~+/=-]/.test(v)
+  const hasUpper = /[A-Z]/.test(v)
+  const hasLower = /[a-z]/.test(v)
+  if (!hasDigit && !hasSymbol) {
+    // 纯字母：必须足够长且大小写混合（如 JWT 片段）
+    return v.length >= 24 && hasUpper && hasLower
+  }
+  return true
 }
 
 /** 在对象里深度找凭证字段 */

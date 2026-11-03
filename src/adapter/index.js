@@ -48,6 +48,7 @@ export function createAdapter(opts = {}) {
     budget = {},
     onEvent = () => {},
     onRecord = () => {},
+    extraModels = () => [],        // 已登录渠道的模型（动态）
     now = () => Date.now(),
     providerId = PROVIDER_ID,
     displayName = 'Myfree（免费模型）',
@@ -57,13 +58,30 @@ export function createAdapter(opts = {}) {
 
   let chain = mergeChain(builtin, overrides)
 
-  /** 链里的模型（去重），供 listModels 用 */
+  /**
+   * 全部可选模型 = 链里的模型 + 已登录渠道的模型（去重）。
+   * 宿主 listModels 要求 id 唯一，所以渠道模型带 `<channel>/<model>` 前缀。
+   */
   function catalog() {
     const seen = new Map()
     for (const e of chain) {
       if (seen.has(e.model)) continue
       seen.set(e.model, e)
     }
+    // 追加已登录渠道的模型（id 已带渠道前缀，天然不撞名）
+    try {
+      for (const m of extraModels() || []) {
+        if (!m?.id || seen.has(m.id)) continue
+        seen.set(m.id, {
+          provider: m.channelId,
+          model: m.id,
+          name: m.name,
+          tier: 9,                        // 渠道模型排在免密源之后，但可手动钉选
+          inputModalities: m.inputModalities,
+          channelModel: true,
+        })
+      }
+    } catch { /* extraModels 出错不影响免密源 */ }
     return [...seen.values()]
   }
 
@@ -72,6 +90,11 @@ export function createAdapter(opts = {}) {
     setChain(nextBuiltin, nextOverrides) {
       chain = mergeChain(nextBuiltin ?? builtin, nextOverrides ?? overrides)
       return chain.length
+    },
+
+    /** 更新可用模型总数（含渠道模型），供 UI/诊断展示 */
+    modelCount() {
+      return catalog().length
     },
 
     /** 供页面展示（与选路共用同一份数据） */
@@ -145,12 +168,14 @@ export function createAdapter(opts = {}) {
         try {
           onEvent({ type: 'attempt', provider: cand.provider, model: cand.model, layer: ladder.snapshot().layer })
 
+          // 渠道模型（id 形如 codearts/xxx）交给 send 自己判断分发
           const iter = await send({
             provider: cand.provider,
             model: cand.model,
             messages: options.messages,
             signal: options.signal,
             options,
+            isChannelModel: cand.channelModel === true,
           })
 
           // 提交点：先在**简化增量**层缓冲，提交后才转成宿主的块事件流

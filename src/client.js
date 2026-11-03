@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const react = require('react')
     const h = react.createElement
 
-    const VERSION = '1.5.2'
+    const VERSION = '1.6.0'
     const API = '/cs-myfree'
     const CASH_PATH = '/cs-myfree/cash'
 
@@ -260,44 +260,19 @@ window.__ModuleLoader__.load({
         }
       }, [open, mode])
 
-      // 本地即时识别
+      // 本地只做「有没有填」的判断；真正识别交给后端 /channels/parse
       const parsed = react.useMemo(() => {
         if (mode === 'aksk') {
           const a = ak.trim(), s = sk.trim()
           if (!a && !s) return { ok: false, error: '先填 AK 和 SK' }
           if (!a) return { ok: false, error: '还差 AK' }
           if (!s) return { ok: false, error: '还差 SK' }
-          return { ok: true, credential: a + ':' + s, preview: 'AK/SK 已填齐（长度 ' + (a.length + s.length + 1) + '）' }
+          return { ok: true, credential: a + ':' + s, preview: 'AK/SK 已填齐' }
         }
         const s = String(raw || '').trim()
         if (!s) return { ok: false, error: '把链接或令牌粘贴进来' }
-        if (/^[[{]/.test(s)) {
-          try {
-            const o = JSON.parse(s)
-            const f = (obj, d = 0) => {
-              if (!obj || typeof obj !== 'object' || d > 4) return null
-              for (const k of ['access_token','accessToken','token','id_token','code','api_key','apiKey']) {
-                if (typeof obj[k] === 'string' && obj[k].length >= 6) return obj[k]
-              }
-              for (const v of Object.values(obj)) { if (v && typeof v === 'object') { const r = f(v, d+1); if (r) return r } }
-              return null
-            }
-            const v = f(o)
-            return v ? { ok: true, credential: v, preview: '识别到 ' + v.slice(0,4) + '…' + v.slice(-4) } : { ok: false, error: 'JSON 里没找到令牌' }
-          } catch { return { ok: false, error: 'JSON 格式不对' } }
-        }
-        try {
-          const qs = /^https?:\/\//i.test(s) ? new URL(s).searchParams : (s.indexOf('=') >= 0 && !/\s/.test(s) ? new URLSearchParams(s) : null)
-          if (qs) {
-            for (const k of ['code','access_token','token','auth_code','api_key']) {
-              const v = qs.get(k)
-              if (v && v.length >= 6) return { ok: true, credential: v, preview: '从链接识别到 ' + v.slice(0,4) + '…' + v.slice(-4) }
-            }
-            return { ok: false, error: '链接里没找到 code/token' }
-          }
-        } catch (_) {}
-        if (s.length >= 8 && !/\s/.test(s)) return { ok: true, credential: s, preview: '当作令牌（' + s.slice(0,4) + '…' + s.slice(-4) + '）' }
-        return { ok: false, error: '识别不出来，粘贴完整链接试试' }
+        // 本地不再猜测，交给后端校验（粘贴时自动触发）
+        return { ok: false, error: '粘贴后会自动识别并保存' }
       }, [raw, mode, ak, sk])
 
       const doSave = (cred) => {
@@ -316,42 +291,26 @@ window.__ModuleLoader__.load({
           .then(() => { setBusy(false); setAutoSaved(false) })
       }
 
-      // 🔑 粘贴即自动保存（不用户再点按钮）
+      // 🔑 粘贴 → 交给**后端**统一校验（不再前端自己猜，避免规则不一致）
       const onPaste = (e) => {
+        let text = ''
         try {
-          const text = (e.clipboardData || window.clipboardData).getData('text')
-          if (text) {
-            setRaw(text)
-            // 延迟一点点让 parsed 先更新
-            setTimeout(() => {
-              const s = String(text).trim()
-              // 直接在这里独立识别一遍，避免依赖 render 时序
-              let cred = null
-              if (/^[[{]/.test(s)) {
-                try {
-                  const o = JSON.parse(s)
-                  const f = (obj, d = 0) => {
-                    if (!obj || typeof obj !== 'object' || d > 4) return null
-                    for (const k of ['access_token','accessToken','token','id_token','code','api_key','apiKey']) {
-                      if (typeof obj[k] === 'string' && obj[k].length >= 6) return obj[k]
-                    }
-                    for (const v of Object.values(obj)) { if (v && typeof v === 'object') { const r = f(v, d+1); if (r) return r } }
-                    return null
-                  }
-                  cred = f(o)
-                } catch (_) {}
-              }
-              if (!cred) {
-                try {
-                  const qs = /^https?:\/\//i.test(s) ? new URL(s).searchParams : (s.indexOf('=') >= 0 && !/\s/.test(s) ? new URLSearchParams(s) : null)
-                  if (qs) for (const k of ['code','access_token','token','auth_code','api_key']) { const v = qs.get(k); if (v && v.length >= 6) { cred = v; break } }
-                } catch (_) {}
-              }
-              if (!cred && s.length >= 8 && !/\s/.test(s)) cred = s
-              if (cred) { setAutoSaved(true); doSave(cred) }
-            }, 50)
-          }
-        } catch (_) {}
+          text = (e.clipboardData || window.clipboardData).getData('text') || ''
+        } catch (_) { return }
+        if (!text.trim()) return
+        setRaw(text)
+        setAutoSaved(false)
+        // 后端判定：只有真的识别出凭证才自动保存
+        api('/channels/parse', { method: 'POST', body: JSON.stringify({ text }) })
+          .then((r) => {
+            if (r.ok) {
+              setMsg({ ok: true, text: '✅ ' + (r.preview || '已识别') + '，正在保存…' })
+              doSave(r.credential)     // 识别成功才自动保存
+            } else {
+              setMsg({ ok: false, error: r.error || '这段内容里没有有效令牌' })
+            }
+          })
+          .catch((err) => setMsg({ ok: false, error: String((err && err.message) || err) }))
       }
 
       const del = (id) => {

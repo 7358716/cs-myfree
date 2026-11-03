@@ -28,6 +28,8 @@ import { planReload, RELOAD_SCOPE } from '../ops/feed.js'
 import { collectLedger } from '../audit/sources.js'
 import { createAccountStore } from '../pools/channels/accounts.js'
 import { listChannels, LOGIN_GUIDES } from './channels.js'
+import { captureCredential, previewCapture, looksLikeCredential } from '../pools/channels/capture.js'
+import { readCachedModels, refreshAll, channelModelsAsList } from '../pools/channels/catalog.js'
 import { SCOPE, readScope, writeScope, effectiveConfig, listScopes } from '../config/scope.js'
 
 export const PREFIX = '/cs-myfree'
@@ -295,6 +297,10 @@ export function registerRoutes(webServer, opts = {}) {
     if (!CHANNELS[body.provider]) return { ok: false, error: '未知渠道：' + body.provider }
     const cred = String(body.credential || '').trim()
     if (!cred) return { ok: false, error: '凭证不能为空' }
+    // 🔴 后端也做一次形态校验（防前端绕过 / 防误存普通网址）
+    if (!looksLikeCredential(cred)) {
+      return { ok: false, error: '这不像一个有效令牌（可能是普通网址或太短）。请粘贴带 ?code= 的回调链接或真正的令牌。' }
+    }
     // 🔴 绝不把凭证写日志
     const r = await accounts.save({
       id: body.id,
@@ -303,7 +309,19 @@ export function registerRoutes(webServer, opts = {}) {
       credential: cred,
       expiresAt: Number.isFinite(body.expiresAt) ? body.expiresAt : null,
     })
-    return { ok: r.ok, id: r.id, hint: r.ok ? '已保存到本机 ~/.dsh/cs-myfree/accounts.json（权限 0600），不会上传' : '保存失败' }
+    if (r.ok) {
+      // 🔑 保存成功后**立刻拉取该渠道模型**，让模型选择器马上能看到
+      refreshAll(opts.dshHome, accounts, { fetchImpl })
+        .then((res) => {
+          const cnt = (res[body.provider]?.models || []).length
+          logger.info?.(`渠道 ${body.provider} 模型已刷新：${cnt} 个`)
+        })
+        .catch(() => {})
+    }
+    return {
+      ok: r.ok, id: r.id,
+      hint: r.ok ? '已保存，正在拉取可用模型…（几秒后刷新模型选择器）' : '保存失败',
+    }
   })
 
   route('/channels/remove', async ({ body }) => {
@@ -312,6 +330,43 @@ export function registerRoutes(webServer, opts = {}) {
   })
 
   route('/channels/guides', async () => ({ ok: true, guides: LOGIN_GUIDES }))
+
+  // ── 渠道模型（登录后拉取，出现在模型选择器里）──
+  route('/channels/models', async ({ body }) => {
+    if (body === undefined) {
+      const cache = await readCachedModels(opts.dshHome)
+      const list = channelModelsAsList(cache)
+      return {
+        ok: true,
+        at: now(),
+        total: list.length,
+        models: list,
+        byChannel: Object.fromEntries(Object.entries(cache).map(([k, v]) => [k, { ok: v.ok, count: (v.models || []).length, error: v.error, at: v.at }])),
+      }
+    }
+    // POST ⇒ 重新拉取
+    try {
+      const r = await refreshAll(opts.dshHome, accounts, { fetchImpl })
+      const list = channelModelsAsList(r)
+      return { ok: true, refreshed: Object.keys(r).length, total: list.length, models: list }
+    } catch (err) {
+      return { ok: false, error: String(err?.message ?? err).slice(0, 200) }
+    }
+  })
+
+  // ── 解析（前端粘贴内容交给后端统一判定，避免两套规则不一致）──
+  route('/channels/parse', async ({ body }) => {
+    const text = String(body?.text ?? '')
+    const r = captureCredential(text)
+    return {
+      ok: r.ok,
+      credential: r.ok ? r.credential : null,
+      kind: r.kind ?? null,
+      field: r.extra?.field ?? null,
+      preview: r.ok ? previewCapture(r) : null,
+      error: r.ok ? null : r.error,
+    }
+  })
 
   // ── 作用域 ──
   route('/scope', async ({ body }) => {
