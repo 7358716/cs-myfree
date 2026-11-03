@@ -143,7 +143,14 @@ test('免密/普通渠道仍不因签名逻辑改变行为（Bearer 渠道照旧
     fetchImpl: async (url, init) => { seen = { url, headers: init.headers }; return { ok: true, body: null } },
   })
   assert.equal(seen.headers.authorization, 'Bearer tok123')
-  assert.equal(seen.url, 'https://api.lkeap.cloud.tencent.com/v1/chat/completions', '不得再出现 /v1/v1')
+  // 腾讯 CodeBuddy 真实端点是 copilot.tencent.com/v2/chat/completions
+  // （api.lkeap.cloud.tencent.com 是另一套产品，带 Bearer 会 401 not_authorized）
+  assert.equal(seen.url, 'https://copilot.tencent.com/v2/chat/completions', '必须是真实端点，且不得出现 /v1/v1')
+  // 准入头必须齐全（缺则 401/400）
+  assert.equal(seen.headers['X-Domain'], 'copilot.tencent.com')
+  assert.equal(seen.headers['X-Product-Code'], 'codebuddy')
+  assert.ok(seen.headers['X-Conversation-ID'], '必须有会话头')
+  assert.equal(seen.headers['X-Conversation-ID'], seen.headers['X-Conversation-Request-ID'], '三枚会话头同值')
 })
 
 // ── ④ AK/SK 凭据结构 + 历史两条账号配对 ──
