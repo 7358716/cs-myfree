@@ -494,6 +494,7 @@ async function mount({ backend, clipboard } = {}) {
       return flush()
     },
     inputs: (type) => flatten(rt.tree).filter((n) => n.type === 'input' && (!type || n.props.type === type)),
+    selects: () => flatten(rt.tree).filter((n) => n.type === 'select'),
     textareas: () => flatten(rt.tree).filter((n) => n.type === 'textarea'),
     async openTab(label) {
       const tab = ctrl.exactText(label).find((n) => typeof n.props.onClick === 'function')
@@ -566,6 +567,16 @@ function makeBackend(overrides = {}) {
         case '/cs-myfree/state': return { body: stateBody() }
         case '/cs-myfree/channels': return { body: { ok: true, at: Date.now(), channels: clone(db.channels), total: db.channels.length } }
         case '/cs-myfree/chain': return { body: { ok: true, builtin: clone(db.builtin), overrides: clone(db.overrides), effective: eff(), tiers: chainSummary(eff()), applied: true } }
+        case '/cs-myfree/chain/catalog': return {
+          body: {
+            ok: true, at: Date.now(),
+            sources: [
+              { kind: 'keyless', provider: 'kilo', label: 'Kilo 免费池', models: [{ id: 'kilo-auto/free', name: 'kilo-auto/free' }] },
+              { kind: 'keyless', provider: 'ovh', label: 'OVH 免费视觉', models: [{ id: 'Qwen3.5-397B-A17B', name: 'Qwen3.5-397B-A17B' }] },
+              { kind: 'channel', provider: 'codearts', label: 'CodeArts（华为云）', models: [{ id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' }], accounts: 1 },
+            ],
+          },
+        }
         case '/cs-myfree/models': return { body: clone(FIX.models) }
         case '/cs-myfree/channels/models': return { body: clone(db.channelModels) }
         case '/cs-myfree/config': return { body: { ok: true, config: clone(db.runtimeConfig), defaults: clone(FIX.config.defaults) } }
@@ -942,28 +953,32 @@ test('流程② 改降级链：加一条→保存→重载保持→上移→删�
     await c.start()
     await c.openTab('降级链 ★')
     await c.click('+ 加一条')
-    let inputs = c.inputs()
-    assert.equal(inputs.length, 6, '两行 × 3 输入')
-    await c.change(inputs[3], 'pollinations')
-    await c.change(inputs[4], 'openai')
-    await c.change(inputs[5], '2')
+    // 降级链已改成下拉选择（provider / model / tier），不再是手输输入框
+    let sels = c.selects()
+    assert.equal(sels.length, 6, '两行 × 3 下拉（provider/model/tier）')
+    await c.change(sels[3], 'ovh')                    // 第 2 行 provider
+    // 换 provider 后 model 自动选该 provider 第一项，这里再显式选目标模型
+    sels = c.selects()
+    await c.change(sels[4], 'Qwen3.5-397B-A17B')      // 第 2 行 model
+    sels = c.selects()
+    await c.change(sels[5], '2')                      // 第 2 行 tier
     await c.click('保存覆盖层')
     const strip = (list) => list.map((e) => ({ provider: e.provider, model: e.model, tier: e.tier }))
     assert.deepEqual(strip(be.db.overrides), [
       { provider: 'kilo', model: 'kilo-auto/free', tier: 1 },
-      { provider: 'pollinations', model: 'openai', tier: 2 },
+      { provider: 'ovh', model: 'Qwen3.5-397B-A17B', tier: 2 },
     ], '保存应把草稿整表写入（留空过滤）：' + JSON.stringify(be.db.overrides))
     assert.ok(c.text().includes('✅ 已保存并立即生效'), c.text().slice(-400))
 
     // 重载后草稿 = 磁盘覆盖层（刷新保持）
-    assert.equal(c.inputs().length, 6, '保存并 reload 后应仍有 2 行')
+    assert.equal(c.selects().length, 6, '保存并 reload 后应仍有 2 行（每行 3 个下拉）')
     assert.ok(c.text().includes('覆盖层2 条'), c.text().slice(-400))
 
     // 上移第 2 行并保存
     const ups = c.nodes().filter((n) => n.props && n.props.title === '上移')
     await c.click(ups[1])
     await c.click('保存覆盖层')
-    assert.equal(be.db.overrides[0].provider, 'pollinations', '上移后应排到第一：' + JSON.stringify(be.db.overrides))
+    assert.equal(be.db.overrides[0].provider, 'ovh', '上移后应排到第一：' + JSON.stringify(be.db.overrides))
 
     // 删除第 1 行并保存
     const dels = c.nodes().filter((n) => n.props && n.props.title === '删除')

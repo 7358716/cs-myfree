@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const react = require('react')
     const h = react.createElement
 
-    const VERSION = '1.9.5'
+    const VERSION = '1.9.6'
     const API = '/cs-myfree'
     const CASH_PATH = '/cs-myfree/cash'
 
@@ -1455,9 +1455,10 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ── W3 降级链编辑器（核心）──
+    // ── W3 降级链编辑器（下拉选择版，不要求手输 provider/model）──
     function ChainZone() {
       const [s, reload] = useApi('/chain')
+      const [cat, reloadCat] = useApi('/chain/catalog')
       const [draft, setDraft] = react.useState([])
       const [msg, setMsg] = react.useState(null)
       const [busy, setBusy] = react.useState(false)
@@ -1467,10 +1468,36 @@ window.__ModuleLoader__.load({
       if (s.error) return h(Err, { error: s.error })
       if (!s.data) return h(Loading, { on: s.loading })
       const d = s.data
+      const sources = (cat.data && Array.isArray(cat.data.sources)) ? cat.data.sources : []
+      const byProvider = {}
+      for (const src of sources) byProvider[src.provider] = src
+      const providerOpts = sources.map((src) => ({
+        value: src.provider,
+        label: src.label + (src.kind === 'channel-unlogged' ? '（未登录）' : src.kind === 'keyless' ? '（免密）' : ''),
+      }))
 
-      const set = (i, k, v) => setDraft((arr) => arr.map((e, j) => (j === i ? Object.assign({}, e, { [k]: v }) : e)))
+      /** 取某 provider 的可选模型 */
+      const modelsOf = (provider) => {
+        const src = byProvider[provider]
+        return src && Array.isArray(src.models) ? src.models : []
+      }
+
+      const set = (i, k, v) => setDraft((arr) => arr.map((e, j) => {
+        if (j !== i) return e
+        const next = Object.assign({}, e, { [k]: v })
+        // 换 provider ⇒ 自动选该 provider 的第一个模型
+        if (k === 'provider') {
+          const ms = modelsOf(v)
+          next.model = ms.length > 0 ? ms[0].id : ''
+        }
+        return next
+      }))
       const del = (i) => setDraft((arr) => arr.filter((_, j) => j !== i))
-      const add = () => setDraft((arr) => arr.concat([{ provider: '', model: '', tier: 1 }]))
+      const add = () => setDraft((arr) => {
+        const first = sources[0]
+        if (!first) return arr.concat([{ provider: '', model: '', tier: 1 }])
+        return arr.concat([{ provider: first.provider, model: (first.models[0] || {}).id || '', tier: 1 }])
+      })
       const move = (i, dir) => setDraft((arr) => {
         const j = i + dir
         if (j < 0 || j >= arr.length) return arr
@@ -1484,6 +1511,37 @@ window.__ModuleLoader__.load({
           .then(() => setBusy(false))
       }
 
+      /** 一行：provider 下拉 + model 下拉 + tier 下拉 + 上移/下移/删除 */
+      const row = (e, i) => {
+        const ms = modelsOf(e.provider)
+        const modelMissing = e.model && !ms.some((m) => m.id === e.model)
+        return h('div', { key: i, style: Object.assign({}, S.tile, { marginBottom: '6px', display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }) },
+          h('span', { style: Object.assign({}, S.mono, S.dim) }, '#' + (i + 1)),
+          h('select', {
+            style: Object.assign({}, S.input, { flex: '1 1 150px', minWidth: '120px' }),
+            value: e.provider,
+            onChange: (ev) => set(i, 'provider', ev.target.value),
+            title: '渠道 / 免密源',
+          }, providerOpts.map((o) => h('option', { key: o.value, value: o.value }, o.label))),
+          h('select', {
+            style: Object.assign({}, S.input, { flex: '1 1 200px', minWidth: '150px' }),
+            value: e.model,
+            onChange: (ev) => set(i, 'model', ev.target.value),
+            title: '该渠道可用的模型',
+          },
+            modelMissing ? h('option', { value: e.model }, e.model + '（清单里没有，可能是旧值）') : null,
+            ms.map((m) => h('option', { key: m.id, value: m.id }, m.name && m.name !== m.id ? (m.name + ' · ' + m.id) : m.id))),
+          h('select', {
+            style: Object.assign({}, S.input, { width: '78px' }),
+            value: String(e.tier || 1),
+            onChange: (ev) => set(i, 'tier', Number(ev.target.value) || 1),
+            title: '优先级：tier 越小越先尝试',
+          }, [1, 2, 3, 4, 5].map((t) => h('option', { key: t, value: String(t) }, 'T' + t))),
+          h('span', { style: S.btn(false), onClick: () => move(i, -1), title: '上移' }, '↑'),
+          h('span', { style: S.btn(false), onClick: () => move(i, 1), title: '下移' }, '↓'),
+          h('span', { style: S.btn(false), onClick: () => del(i), title: '删除' }, '✕'))
+      }
+
       return h('div', null,
         h('div', { style: S.card },
           h(KV, { k: '内置链', v: (Array.isArray(d.builtin) ? d.builtin.length : 0) + ' 条' }),
@@ -1492,28 +1550,22 @@ window.__ModuleLoader__.load({
           h(KV, { k: '生效链来源', v: '内置 ' + (Array.isArray(d.builtin) ? d.builtin.length : 0) + ' + 覆盖 ' + (Array.isArray(d.overrides) ? d.overrides : []).length + ' ⇒ 合并 ' + (Array.isArray(d.effective) ? d.effective.length : 0) + ' 条' }),
           (d.tiers || []).length ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
             d.tiers.map((t) => 'T' + t.tier + ':' + t.count).join('  ')) : null,
-          // 诚实标注「页面显示的链」与「运行时实际选路」是否同源
           d.applied === true
             ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.good) }, '✅ 页面这份链 = 运行时实际选路（同源）')
             : d.applied === false
               ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '⚠️ 页面这份链与运行时不一致：保存后需重启插件/宿主才生效')
               : h('div', { style: Object.assign({ marginTop: '6px' }, S.dim) }, '（后端未报告该链是否已应用到运行时）')),
 
-        h('div', { style: { fontWeight: 600, margin: '14px 0 8px' } }, '覆盖层（钉选 / 替换 / 增删 / 排序）'),
-        h('div', { style: S.dim }, '同 provider+model ⇒ 替换内置条目的 tier；新的 ⇒ 追加到该层末尾。留空的条目保存时会被忽略。'),
+        h('div', { style: { fontWeight: 600, margin: '14px 0 8px' } }, '降级链配置（全部用下拉选择）'),
+        h('div', { style: S.dim }, 'T1 最先尝试，失败后依次降级。同 provider+model ⇒ 替换内置条目的 tier；新的 ⇒ 追加。留空的条目保存时会被忽略。'),
 
+        cat.error ? h('div', { style: Object.assign({}, S.dim, S.warn) }, '可选项加载失败：' + cat.error + '（仍可保存已有配置）') : null,
         draft.length === 0 ? h('div', { style: Object.assign({ margin: '10px 0' }, S.dim) }, '（空 —— 保存后完全使用内置链）') : null,
-        draft.map((e, i) => h('div', { key: i, style: Object.assign({}, S.tile, { marginBottom: '6px', display: 'flex', gap: '6px', alignItems: 'center' }) },
-          h('span', { style: Object.assign({}, S.mono, S.dim) }, '#' + (i + 1)),
-          h('input', { style: S.input, placeholder: 'provider（如 kilo）', value: e.provider, onChange: (ev) => set(i, 'provider', ev.target.value) }),
-          h('input', { style: S.input, placeholder: 'model（如 kilo-auto/free）', value: e.model, onChange: (ev) => set(i, 'model', ev.target.value) }),
-          h('input', { style: Object.assign({}, S.input, { width: '56px' }), type: 'number', min: 1, max: 5, value: e.tier, onChange: (ev) => set(i, 'tier', Number(ev.target.value) || 1) }),
-          h('span', { style: S.btn(false), onClick: () => move(i, -1), title: '上移' }, '↑'),
-          h('span', { style: S.btn(false), onClick: () => move(i, 1), title: '下移' }, '↓'),
-          h('span', { style: S.btn(false), onClick: () => del(i), title: '删除' }, '✕'))),
+        draft.map(row),
 
-        h('div', { style: { display: 'flex', gap: '8px', marginTop: '10px' } },
-          h('button', { style: S.btn(false), onClick: add }, '+ 加一条'),
+        h('div', { style: { display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' } },
+          h('button', { style: S.btn(false), onClick: add, disabled: sources.length === 0 }, '+ 加一条'),
+          h('button', { style: S.btn(false), onClick: () => reloadCat() }, '刷新可选项'),
           h('button', { style: S.btn(true), onClick: save, disabled: busy }, busy ? '保存中…' : '保存覆盖层'),
           h('button', { style: S.btn(false), onClick: () => { setDraft([]); setMsg(null) } }, '清空草稿')),
 

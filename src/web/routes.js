@@ -197,6 +197,60 @@ export function registerRoutes(webServer, opts = {}) {
   })
 
   // ── 链 ──
+  // ── 降级链可选项（给 UI 做下拉，不用手输 provider/model）──
+  //
+  // 返回三类可入链的候选：
+  //   keyless  — 免密源（kilo / ovh …）及其默认模型
+  //   channel  — 已登录渠道 + 其可用模型（远端拉取过就用真实清单，否则用内置兜底）
+  route('/chain/catalog', async () => {
+    const sources = []
+    // ① 免密源
+    for (const src of keylessSources()) {
+      const realId = String(src.id ?? '').replace(/-free$|-vision$/, '')
+      const model = DEFAULT_MODEL[realId] ?? DEFAULT_MODEL[src.id] ?? null
+      if (!model) continue
+      sources.push({
+        kind: 'keyless',
+        provider: realId,
+        label: src.label ?? realId,
+        models: [{ id: model, name: model }],
+      })
+    }
+    // ② 已登录渠道（把真实模型清单拌进去；没有就内置兜底）
+    const cache = await readCachedModels(opts.dshHome)
+    const logged = await accounts.list()
+    const loggedProviders = [...new Set(logged.map((a) => a.provider))]
+    for (const provider of loggedProviders) {
+      const ch = CHANNELS[provider]
+      if (!ch) continue
+      const cached = Array.isArray(cache?.[provider]?.models) ? cache[provider].models : []
+      const models = cached.length > 0
+        ? cached.map((m) => ({ id: m.id, name: m.name || m.id }))
+        : builtinModelsOf(provider).map((m) => ({ id: m.id, name: m.name || m.id }))
+      sources.push({
+        kind: 'channel',
+        provider,
+        label: ch.label ?? provider,
+        models,
+        accounts: logged.filter((a) => a.provider === provider).length,
+      })
+    }
+    // ③ 未登录但已登记的渠道（允许配置，只是会 AUTH 失败；UI 会提示）
+    for (const [id, ch] of Object.entries(CHANNELS)) {
+      if (loggedProviders.includes(id)) continue
+      const builtin = builtinModelsOf(id)
+      if (builtin.length === 0) continue
+      sources.push({
+        kind: 'channel-unlogged',
+        provider: id,
+        label: ch.label ?? id,
+        models: builtin.map((m) => ({ id: m.id, name: m.name || m.id })),
+        accounts: 0,
+      })
+    }
+    return { ok: true, at: now(), sources }
+  })
+
   route('/chain', async ({ body }) => {
     if (body === undefined) {
       const view = await chainView()

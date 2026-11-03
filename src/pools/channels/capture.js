@@ -67,7 +67,14 @@ export function captureCredential(raw) {
       }
     }
     // 🔴 关键：URL 里没有凭证参数 ⇒ **明确拒绝**，绝不把整条 URL 当令牌
-    return { ok: false, error: '这是普通网页地址，里面没有 code / token 参数。登录完成后要复制**跳转后**那条带 ?code= 的链接' }
+    // 用户容易把「登录页地址」当成「回调地址」贴进来（实测反馈）
+    const looksLikeLoginPage = /(?:login|authorization|auth|signin|oauth)/i.test(text)
+    return {
+      ok: false,
+      error: looksLikeLoginPage
+        ? '这是**登录页地址**，不是回调地址。像腾讯/讯飞这类「轮询式」渠道**不需要复制任何东西**：在浏览器里把登录走完，插件会自动检测并完成（回到本页等几秒即可）。若渠道要求回调链接，请复制**授权后跳转**那条带 ?code= 的链接。'
+        : '这是普通网页地址，里面没有 code / token 参数。登录完成后要复制**跳转后**那条带 ?code= 的链接',
+    }
   }
 
   // ③ 裸令牌 —— 必须通过形态校验
