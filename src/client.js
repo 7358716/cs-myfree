@@ -229,122 +229,209 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ── 渠道登录卡片（普通人视角：粘什么都能识别）──
+    // ── 渠道登录卡片（傻瓜式：优先一步，粘贴即保存）──
+    // 每家渠道的推荐登录方式（与后端 login-mode.js 保持一致）
+    const AK_SK_SET = ['qiniu','officeace','codearts','zcode','minimax','minimaxintl','accio','qoder','qodercn']
+    function recommendModeOf(ch) {
+      if (AK_SK_SET.indexOf(ch.id) >= 0) return 'aksk'
+      if (ch.login === 'paste-key' || ch.login === 'none') return 'token'
+      return 'oauth'
+    }
+
     function ChannelLogin(props) {
       const ch = props.channel
       const [open, setOpen] = react.useState(false)
+      const rec = recommendModeOf(ch)
+      const [mode, setMode] = react.useState(rec)
       const [raw, setRaw] = react.useState('')
-      const [mode, setMode] = react.useState('auto')     // auto | aksk
       const [ak, setAk] = react.useState('')
       const [sk, setSk] = react.useState('')
       const [msg, setMsg] = react.useState(null)
       const [busy, setBusy] = react.useState(false)
+      const [autoSaved, setAutoSaved] = react.useState(false)
+      const inputRef = react.useRef(null)
+      const saveTimer = react.useRef(null)
 
-      // 本地即时识别（不联网）
+      // 打开时自动聚焦输入框（省一次点击）
+      react.useEffect(() => {
+        if (open && inputRef.current && inputRef.current.focus) {
+          setTimeout(() => { try { inputRef.current.focus() } catch (_) {} }, 80)
+        }
+      }, [open, mode])
+
+      // 本地即时识别
       const parsed = react.useMemo(() => {
         if (mode === 'aksk') {
-          if (!ak.trim() || !sk.trim()) return { ok: false, error: '还差 AK 或 SK' }
-          return { ok: true, credential: ak.trim() + ':' + sk.trim(), kind: 'aksk', preview: 'AK/SK 已填齐' }
+          const a = ak.trim(), s = sk.trim()
+          if (!a && !s) return { ok: false, error: '先填 AK 和 SK' }
+          if (!a) return { ok: false, error: '还差 AK' }
+          if (!s) return { ok: false, error: '还差 SK' }
+          return { ok: true, credential: a + ':' + s, preview: 'AK/SK 已填齐（长度 ' + (a.length + s.length + 1) + '）' }
         }
         const s = String(raw || '').trim()
-        if (!s) return { ok: false, error: '还没粘贴内容' }
-        // 前端也做一遍同样的识别，给用户即时反馈
+        if (!s) return { ok: false, error: '把链接或令牌粘贴进来' }
         if (/^[[{]/.test(s)) {
           try {
             const o = JSON.parse(s)
             const f = (obj, d = 0) => {
               if (!obj || typeof obj !== 'object' || d > 4) return null
-              for (const k of ['access_token', 'accessToken', 'token', 'id_token', 'code', 'api_key', 'apiKey']) {
+              for (const k of ['access_token','accessToken','token','id_token','code','api_key','apiKey']) {
                 if (typeof obj[k] === 'string' && obj[k].length >= 6) return obj[k]
               }
-              for (const v of Object.values(obj)) { if (v && typeof v === 'object') { const r = f(v, d + 1); if (r) return r } }
+              for (const v of Object.values(obj)) { if (v && typeof v === 'object') { const r = f(v, d+1); if (r) return r } }
               return null
             }
             const v = f(o)
-            return v ? { ok: true, credential: v, kind: 'json', preview: '识别到 ' + v.slice(0, 4) + '…' + v.slice(-4) } : { ok: false, error: 'JSON 里没找到 token' }
+            return v ? { ok: true, credential: v, preview: '识别到 ' + v.slice(0,4) + '…' + v.slice(-4) } : { ok: false, error: 'JSON 里没找到令牌' }
           } catch { return { ok: false, error: 'JSON 格式不对' } }
         }
         try {
-          const qs = /^https?:\/\//i.test(s) ? new URL(s).searchParams : (s.includes('=') && !s.includes(' ') ? new URLSearchParams(s) : null)
+          const qs = /^https?:\/\//i.test(s) ? new URL(s).searchParams : (s.indexOf('=') >= 0 && !/\s/.test(s) ? new URLSearchParams(s) : null)
           if (qs) {
-            for (const k of ['code', 'access_token', 'token', 'auth_code', 'api_key']) {
+            for (const k of ['code','access_token','token','auth_code','api_key']) {
               const v = qs.get(k)
-              if (v && v.length >= 6) return { ok: true, credential: v, kind: 'url', preview: '从链接识别到 ' + v.slice(0, 4) + '…' + v.slice(-4) }
+              if (v && v.length >= 6) return { ok: true, credential: v, preview: '从链接识别到 ' + v.slice(0,4) + '…' + v.slice(-4) }
             }
-            return { ok: false, error: '链接里没找到 code/token 参数' }
+            return { ok: false, error: '链接里没找到 code/token' }
           }
-        } catch { /* ignore */ }
-        if (s.length >= 8 && !/\s/.test(s)) return { ok: true, credential: s, kind: 'raw', preview: '直接当作 token（' + s.slice(0, 4) + '…' + s.slice(-4) + '）' }
-        return { ok: false, error: '识别不出来，试试粘贴完整链接' }
+        } catch (_) {}
+        if (s.length >= 8 && !/\s/.test(s)) return { ok: true, credential: s, preview: '当作令牌（' + s.slice(0,4) + '…' + s.slice(-4) + '）' }
+        return { ok: false, error: '识别不出来，粘贴完整链接试试' }
       }, [raw, mode, ak, sk])
 
-      const save = () => {
-        if (!parsed.ok) { setMsg({ ok: false, error: parsed.error }); return }
+      const doSave = (cred) => {
         setBusy(true); setMsg(null)
-        api('/channels/save', { method: 'POST', body: JSON.stringify({ provider: ch.id, credential: parsed.credential }) })
+        api('/channels/save', { method: 'POST', body: JSON.stringify({ provider: ch.id, credential: cred }) })
           .then((r) => {
-            setMsg(r.ok ? { ok: true, text: '✅ 已保存' } : { ok: false, error: r.error })
-            if (r.ok) { setRaw(''); setAk(''); setSk(''); props.onChanged && props.onChanged() }
+            if (r.ok) {
+              setMsg({ ok: true, text: '✅ 已保存，可以用了' })
+              setRaw(''); setAk(''); setSk('')
+              props.onChanged && props.onChanged()
+            } else {
+              setMsg({ ok: false, error: r.error })
+            }
           })
           .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
-          .then(() => setBusy(false))
+          .then(() => { setBusy(false); setAutoSaved(false) })
       }
+
+      // 🔑 粘贴即自动保存（不用户再点按钮）
+      const onPaste = (e) => {
+        try {
+          const text = (e.clipboardData || window.clipboardData).getData('text')
+          if (text) {
+            setRaw(text)
+            // 延迟一点点让 parsed 先更新
+            setTimeout(() => {
+              const s = String(text).trim()
+              // 直接在这里独立识别一遍，避免依赖 render 时序
+              let cred = null
+              if (/^[[{]/.test(s)) {
+                try {
+                  const o = JSON.parse(s)
+                  const f = (obj, d = 0) => {
+                    if (!obj || typeof obj !== 'object' || d > 4) return null
+                    for (const k of ['access_token','accessToken','token','id_token','code','api_key','apiKey']) {
+                      if (typeof obj[k] === 'string' && obj[k].length >= 6) return obj[k]
+                    }
+                    for (const v of Object.values(obj)) { if (v && typeof v === 'object') { const r = f(v, d+1); if (r) return r } }
+                    return null
+                  }
+                  cred = f(o)
+                } catch (_) {}
+              }
+              if (!cred) {
+                try {
+                  const qs = /^https?:\/\//i.test(s) ? new URL(s).searchParams : (s.indexOf('=') >= 0 && !/\s/.test(s) ? new URLSearchParams(s) : null)
+                  if (qs) for (const k of ['code','access_token','token','auth_code','api_key']) { const v = qs.get(k); if (v && v.length >= 6) { cred = v; break } }
+                } catch (_) {}
+              }
+              if (!cred && s.length >= 8 && !/\s/.test(s)) cred = s
+              if (cred) { setAutoSaved(true); doSave(cred) }
+            }, 50)
+          }
+        } catch (_) {}
+      }
+
       const del = (id) => {
         api('/channels/remove', { method: 'POST', body: JSON.stringify({ id }) })
           .then(() => props.onChanged && props.onChanged()).catch(() => {})
       }
 
       const accs = ch.accounts || []
+      const MODES = [
+        { id: 'aksk', label: 'AK / SK 永久授权', badge: '一步' },
+        { id: 'token', label: '粘贴令牌', badge: '一步' },
+        { id: 'oauth', label: '登录后自动识别', badge: '两步' },
+      ]
 
       return h('div', { style: Object.assign({}, S.card, { marginBottom: '8px' }) },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' } },
           h('div', null,
             h('span', { style: { fontWeight: 600 } }, ch.label),
-            ch.loggedIn ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.good) }, '✅ 已登录 ' + accs.length + ' 个') : null,
+            ch.loggedIn ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.good) }, '✅ 已登录 ' + accs.length) : null,
             ch.checkin ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) }, '· 可签到') : null,
             ch.proxyRequired ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.warn) }, '· 需代理') : null),
           h('div', { style: { display: 'flex', gap: '6px' } },
             ch.loginUrl ? h('a', {
               href: ch.loginUrl, target: '_blank', rel: 'noreferrer',
               style: Object.assign({}, S.btn(false), { textDecoration: 'none', color: 'inherit' }),
-            }, '去官网登录') : null,
+            }, '去官网') : null,
             h('span', { style: S.btn(ch.loggedIn ? false : true), onClick: () => setOpen(!open) },
-              open ? '收起' : (ch.loggedIn ? '再加一个' : '添加账号')))),
+              open ? '收起' : (ch.loggedIn ? '再加一个' : '登录')))),
 
         accs.map((a) => h('div', { key: a.id, style: Object.assign({}, S.row, { marginTop: '6px' }) },
           h('span', null, a.label + ' ' + (a.masked || '')),
           h('span', { style: Object.assign({ cursor: 'pointer' }, S.dim, S.bad), onClick: () => del(a.id) }, '删除'))),
 
         open ? h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' } },
-          // 方式选择
-          h('div', { style: { display: 'flex', gap: '6px', marginBottom: '10px' } },
-            h('span', { style: S.btn(mode === 'auto'), onClick: () => setMode('auto') }, '① 粘贴链接/令牌（推荐）'),
-            h('span', { style: S.btn(mode === 'aksk'), onClick: () => setMode('aksk') }, '② AK / SK 永久授权')),
+          // 方式切换（默认选中推荐的那个）
+          h('div', { style: { display: 'flex', gap: '6px', marginBottom: '10px', flexWrap: 'wrap' } },
+            MODES.map((m) => h('span', {
+              key: m.id,
+              style: Object.assign({}, S.btn(mode === m.id), { fontSize: '11px' }),
+              onClick: () => { setMode(m.id); setMsg(null) },
+            }, m.label + ' · ' + m.badge))),
 
-          mode === 'auto'
+          mode === 'aksk'
             ? h('div', null,
                 h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
-                  '把浏览器地址栏里那串**以 ?code= 开头的完整链接**整个复制过来，或者把接口返回的那段 JSON 整个粘过来 —— 插件会自动认出里面的令牌，你不用自己找。'),
-                h('textarea', {
-                  style: Object.assign({}, S.input, { height: '72px', fontFamily: 'ui-monospace, monospace' }),
-                  value: raw,
-                  placeholder: '粘贴完整链接（https://...?code=xxx），或整段 JSON，或直接粘 token',
-                  onChange: (e) => setRaw(e.target.value),
+                  '在官网控制台的「访问密钥 / API 密钥」里创建一对，粘贴到下面两个框。**配一次永久有效，不用再登录。**'),
+                h('input', {
+                  ref: inputRef,
+                  style: Object.assign({}, S.input, { marginBottom: '6px' }),
+                  value: ak, placeholder: 'AK（Access Key / AccessKeyId）',
+                  onChange: (e) => setAk(e.target.value),
+                }),
+                h('input', {
+                  style: S.input, value: sk, placeholder: 'SK（Secret Key / AccessKeySecret）',
+                  onChange: (e) => setSk(e.target.value),
                 }))
             : h('div', null,
-                h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
-                  'AK/SK 是**永久凭证**，配一次以后不用再登录。在厂商控制台的「访问密钥 / API 密钥」里创建，把两个值分别填进来。'),
-                h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), value: ak, placeholder: 'AK（Access Key / AccessKeyId）', onChange: (e) => setAk(e.target.value) }),
-                h('input', { style: S.input, value: sk, placeholder: 'SK（Secret Key / AccessKeySecret）', onChange: (e) => setSk(e.target.value) })),
+                mode === 'oauth'
+                  ? h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
+                      '① 点上面「去官网」完成登录　② 回来把地址栏那一整串链接**直接粘贴**到下面 —— 粘贴的瞬间就自动保存了，不用点按钮。')
+                  : h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
+                      '把令牌**直接粘贴**到下面，粘贴瞬间自动保存。'),
+                h('input', {
+                  ref: inputRef,
+                  style: S.input, value: raw,
+                  placeholder: '在这里按 Ctrl+V 粘贴（支持完整链接、JSON、或裸令牌）',
+                  onPaste: onPaste,
+                  onChange: (e) => setRaw(e.target.value),
+                })),
 
-          // 实时识别反馈
+          // 实时反馈
           h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, parsed.ok ? S.good : S.warn) },
-            (parsed.ok ? '✅ ' : '⏳ ') + (parsed.ok ? (parsed.preview || '已识别') : parsed.error)),
+            busy ? '⏳ 正在保存…'
+              : autoSaved ? '✅ 已自动识别并保存'
+              : (parsed.ok ? '✅ ' + parsed.preview + '（点保存或直接粘贴自动存）' : '⏳ ' + parsed.error)),
 
           ch.loginWarn ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '⚠️ ' + ch.loginWarn) : null,
 
           h('div', { style: { display: 'flex', gap: '8px', marginTop: '10px' } },
-            h('button', { style: S.btn(true), onClick: save, disabled: busy || !parsed.ok }, busy ? '保存中…' : '保存'),
+            h('button', { style: S.btn(true), onClick: () => parsed.ok && doSave(parsed.credential), disabled: busy || !parsed.ok },
+              busy ? '保存中…' : '保存'),
             h('button', { style: S.btn(false), onClick: () => { setRaw(''); setAk(''); setSk(''); setMsg(null); setOpen(false) } }, '取消')),
 
           h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
