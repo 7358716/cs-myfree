@@ -209,18 +209,20 @@ export function registerRoutes(webServer, opts = {}) {
     const saved = await state?.writeChain?.({ chain: v.entries, at: now() })
     // 🔴 写盘成功必须**立刻**让 adapter 换链，否则「存了不生效，要重启」
     let applied = false
+    let requiresRestart = false
     if (saved !== false && typeof applyChain === 'function') {
       try {
-        await applyChain(v.entries)
-        applied = true
+        applied = (await applyChain(v.entries)) !== false
+        requiresRestart = !applied
       } catch (err) {
         logger.warn?.(`覆盖层已保存但生效失败：${err?.message ?? err}`)
-        return { ok: false, errno: 'CHAIN_APPLY_FAILED', count: v.entries.length, applied: false, error: String(err?.message ?? err).slice(0, 200) }
+        return { ok: false, errno: 'CHAIN_APPLY_FAILED', count: v.entries.length, applied: false, requiresRestart: true, error: String(err?.message ?? err).slice(0, 200) }
       }
     } else {
       applied = saved !== false
+      requiresRestart = saved !== false
     }
-    return { ok: saved !== false, errors: v.errors, count: v.entries.length, savedAt: now(), applied, effective: (await chainView()).effective }
+    return { ok: saved !== false, errors: v.errors, count: v.entries.length, savedAt: now(), applied, requiresRestart, effective: (await chainView()).effective }
   })
 
   // ── 探测（真实推理）──

@@ -492,7 +492,9 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
         // POST /chain 写盘后立刻换链，做到「存了即生效，重启也一致」
         applyChain: (entries) => {
           chainOverrides = Array.isArray(entries) ? entries : []
-          if (adapter) adapter.setChain(defaultChain, chainOverrides)
+          if (!adapter) return false          // adapter 创建失败 ⇒ 只能等重启
+          adapter.setChain(defaultChain, chainOverrides)
+          return true
         },
         getConfig: () => cfg,
         setConfig: async (next) => {
