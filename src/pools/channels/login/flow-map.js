@@ -17,6 +17,7 @@ import { startQr, pollQr } from './qr.js'
 import { startCodearts, pollCodearts } from './codearts.js'
 import { startQoder, pollQoder } from './qoder.js'
 import { startCline, pollCline } from './cline.js'
+import { startMinimax, pollMinimax } from './minimax.js'
 import { startBuddy, pollBuddy } from './buddy.js'
 import { startWorkbuddy, pollWorkbuddy } from './workbuddy.js'
 import { startLoomy, pollLoomy } from './loomy.js'
@@ -90,8 +91,14 @@ export const FLOW_MAP = Object.freeze({
     loginVerified: false,
     loginNote: 'Cline：WorkOS 标准设备码（端点已对拍），待真机验证',
   },
-  minimax: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'MiniMax：OAuth PKCE，端点待取证' },
-  minimaxintl: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'MiniMax 国际：端点待取证' },
+  minimax: {
+    type: FLOW_TYPE.DEVICE, start: startMinimax, poll: pollMinimax,
+    loginVerified: false, loginNote: 'MiniMax 中国版：OAuth 设备码+PKCE（端点已对拍），待真机验证',
+  },
+  minimaxintl: {
+    type: FLOW_TYPE.DEVICE, start: startMinimax, poll: pollMinimax,
+    loginVerified: false, loginNote: 'MiniMax 国际版：OAuth 设备码+PKCE（端点已对拍），待真机验证',
+  },
   zcode: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'ZCode 智谱：设备码+验证码，端点待取证' },
   // ── QR 扫码 ──
   loomy: {
