@@ -671,6 +671,16 @@ window.__ModuleLoader__.load({
       ? Number(window.__CS_MYFREE_POLL_MS)
       : 1500
     const flowMeta = (flow) => FLOW_META[flow] || { label: flow || '登录', tip: '' }
+    /**
+     * flow 的「人话」名称。device 流有两种形态：
+     *  · 有 url（如 qoder：浏览器授权页 + 纯轮询，userCode 为空）⇒ 浏览器授权（轮询）
+     *  · 无 url + userCode ⇒ 设备码
+     */
+    const flowLabelOf = (flow, sess) => {
+      if (flow === 'device') return (sess && sess.url) ? '浏览器授权（轮询）' : '设备码'
+      if (flow === 'browser') return (sess && sess.pollingOnly) ? '浏览器授权（轮询）' : '浏览器授权'
+      return flowMeta(flow).label
+    }
 
     /** 把 QR 内容渲染成 SVG（单个 path：v10 也只有一个 DOM 节点，窄屏不溢出） */
     function QrCode(props) {
@@ -801,7 +811,7 @@ window.__ModuleLoader__.load({
        */
       const startLogin = (preOpened) => {
         // 同步开窗（在用户手势内）；flow 未知时也先开，paste/aksk 回来再关掉
-        const win = preOpened === undefined ? ((flow === 'browser' || flow === 'device' || flow === 'qr') ? preOpenWindow() : null) : preOpened
+        const win = preOpened === undefined ? ((flow === 'browser' || flow === 'device') ? preOpenWindow() : null) : preOpened
         setBusy(true); setMsg(null); setSess(null); setFallback(false)
         api('/login/start', { method: 'POST', body: JSON.stringify({ provider: ch.id }) })
           .then((r) => {
@@ -834,21 +844,26 @@ window.__ModuleLoader__.load({
               polls: 0,
             }
             // 响应回来：给预开窗口导航（这才是真正的用户手势窗口，不会被拦）
-            if (!manual && next.url && next.flow === 'browser') {
-              if (navigateWindow(win, next.url)) next.popup = 'opened'
+            // device 流可能是「有授权页 URL」（qoder）或「只有设备码」两种形态
+            const navUrl = (!manual && next.url) ? next.url : ''
+            const deviceUrl = (!manual && next.flow === 'device' && !next.url) ? next.verificationUri : ''
+            if (navUrl) {
+              if (navigateWindow(win, navUrl)) next.popup = 'opened'
               else {
                 // 没预开成功（浏览器拦截）⇒ 页面里必须有可点的「打开登录页」按钮 + 明确提示
                 next.popup = 'blocked'
                 setMsg({ ok: false, error: '浏览器拦截了新窗口，请点下面的「打开登录页」继续。' })
               }
-            } else if (!manual && next.flow === 'device' && next.verificationUri) {
-              if (navigateWindow(win, next.verificationUri)) next.popup = 'opened'
-              else next.popup = 'blocked'
+            } else if (deviceUrl) {
+              // 真设备码：没有 url，验证页作为辅助入口
+              try { if (win && win.close) win.close() } catch (_) {}
+              next.popup = 'not-needed'
             } else {
-              // qr/无 url：不需要新窗口，关掉空白页
+              // qr / 都没有：不需要新窗口，关掉空白页
               try { if (win && win.close) win.close() } catch (_) {}
               next.popup = 'not-needed'
             }
+            if (!manual && !next.url && !next.qr && !next.userCode) setFallback(true)
             setSess(next)
           })
           .catch((e) => {
@@ -991,13 +1006,16 @@ window.__ModuleLoader__.load({
       const renderSession = () => {
         const stt = sess.status
         const blocked = sess.popup === 'blocked'
+        const deviceHasUrl = sess.flow === 'device' && !!sess.url
         const statusText =
           stt === 'waiting'
             ? (sess.flow === 'qr'
                 ? '等待扫码确认…（已查 ' + (sess.polls || 0) + ' 次）'
-                : sess.pollingOnly
-                  ? '已打开登录页，正在等待授权…（纯轮询，已查 ' + (sess.polls || 0) + ' 次）'
-                  : '等待你在浏览器完成授权…（已轮询 ' + (sess.polls || 0) + ' 次）')
+                : (sess.pollingOnly || deviceHasUrl)
+                  ? '已打开登录页，等待你在浏览器完成授权…（纯轮询，已查 ' + (sess.polls || 0) + ' 次）'
+                  : sess.flow === 'device' && sess.userCode
+                    ? '已打开验证页，等待你输入设备码确认…（已查 ' + (sess.polls || 0) + ' 次）'
+                    : '等待你在浏览器完成授权…（已轮询 ' + (sess.polls || 0) + ' 次）')
             : stt === 'ok' ? '✅ 登录成功' + (sess.maskedAccount ? '：' + sess.maskedAccount : '')
               : stt === 'error' ? '❌ ' + (sess.error || '登录失败') : ''
         const statusStyle = Object.assign({}, S.dim,
@@ -1005,16 +1023,36 @@ window.__ModuleLoader__.load({
           stt === 'waiting' && sess.flow === 'qr' ? { textAlign: 'center' } : null)
 
         const openSessionUrl = () => {
-          const url = sess.flow === 'device' ? sess.verificationUri : sess.url
+          // device 流：有 url 用 url；没有 url 才退回 verificationUri
+          const url = (sess.flow === 'device' && sess.url) ? sess.url
+            : (sess.flow === 'device' ? sess.verificationUri : sess.url)
           if (!url) return
           if (!openUrl(url)) setMsg({ ok: false, error: '浏览器拦截了新窗口。请允许本页弹窗后重试，或手动复制链接打开。' })
         }
 
+        // device 流三种形态：有授权页 url / 有设备码 userCode / 都没有（诚实提示）
+        const deviceView = sess.flow === 'device'
+          ? (sess.url
+              ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', width: '100%' } },
+                  h('div', { style: S.dim }, '本渠道是浏览器授权 + 纯轮询（没有设备码）：点「① 打开登录页」完成授权，回到本页自动完成。'),
+                  h('div', { style: Object.assign({}, S.dim, { wordBreak: 'break-all', opacity: 0.55, fontSize: '11px' }) }, sess.url))
+              : sess.userCode
+                ? h('div', null,
+                    h('div', { style: S.bigCode }, sess.userCode),
+                    sess.verificationUri
+                      ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim) }, '打开验证页后输入上面的设备码；本页自动轮询结果。')
+                      : h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '后端没有返回验证页地址（verificationUri 为空），可手动在厂商官网输入设备码。'))
+                : h('div', { style: Object.assign({}, S.dim, S.warn) },
+                    '后端未返回登录地址（既没有 url 也没有设备码）⇒ 可用下方「粘贴凭据」备用方式。'))
+          : null
+
         const bigBtn = (sess.flow === 'browser' && sess.url)
           ? h('button', { style: S.primaryBtn, onClick: openSessionUrl }, '① 打开登录页')
-          : (sess.flow === 'device' && sess.verificationUri)
-            ? h('button', { style: S.primaryBtn, onClick: openSessionUrl }, '① 打开验证页')
-            : null
+          : (sess.flow === 'device' && sess.url)
+            ? h('button', { style: S.primaryBtn, onClick: openSessionUrl }, '① 打开登录页')
+            : (sess.flow === 'device' && sess.verificationUri)
+              ? h('button', { style: S.primaryBtn, onClick: openSessionUrl }, '① 打开验证页')
+              : null
 
         const qrView = sess.flow === 'qr'
           ? (sess.qr
@@ -1033,8 +1071,8 @@ window.__ModuleLoader__.load({
         return h('div', { style: S.wizard },
           // ① 主操作
           bigBtn,
-          // 设备码（大字）
-          sess.flow === 'device' && sess.userCode ? h('div', { style: S.bigCode }, sess.userCode) : null,
+          // device：三种形态（url / 设备码 / 都没有）
+          deviceView,
           // 二维码（大图居中）
           qrView,
           // ② 状态行
@@ -1051,7 +1089,7 @@ window.__ModuleLoader__.load({
             h('span', { style: S.secondaryLink, onClick: cancelLogin }, '取消登录'),
             ch.loginUrl ? h('span', { style: S.secondaryLink, onClick: () => openUrl(ch.loginUrl) }, '或在浏览器打开厂商页面') : null) : null,
           stt === 'error' ? h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'center' } },
-            h('button', { style: S.primaryBtn, onClick: () => startLogin(flow === 'browser' ? preOpenWindow() : null) }, '重试'),
+            h('button', { style: S.primaryBtn, onClick: () => startLogin((flow === 'browser' || flow === 'device') ? preOpenWindow() : null) }, '重试'),
             h('span', { style: S.secondaryLink, onClick: () => setSess(null) }, '关闭')) : null,
           // 登录指引（最后，不抢注意力）
           (sess.instructions || []).length
@@ -1095,7 +1133,7 @@ window.__ModuleLoader__.load({
             h('button', {
               style: S.primaryBtn,
               // 🔴 同步开窗：必须在点击的同一个 task 里（否则 Promise 回调里会被弹窗拦截）
-              onClick: () => startLogin(flow === 'browser' ? preOpenWindow() : null),
+              onClick: () => startLogin((flow === 'browser' || flow === 'device') ? preOpenWindow() : null),
               disabled: busy,
             }, busy ? '发起中…' : '一键登录'),
             h('span', { style: S.secondaryLink, onClick: () => setFallback(!fallback) }, fallback ? '收起粘贴框' : '拿不到授权？直接粘贴'),
@@ -1132,7 +1170,7 @@ window.__ModuleLoader__.load({
                     : h(Badge, { kind: 'warn', title: loginNote || '该渠道登录端点尚未真机验证' }, '未验证'))
                 : h(Badge, { kind: 'warn', title: capabilityReason }, '暂不可用')),
             h('div', { style: Object.assign({ marginTop: '4px', wordBreak: 'break-all' }, S.dim) },
-              flowMeta(flow).label
+              flowLabelOf(flow, sess)
               + (ch.checkin ? ' · 可签到' : '')
               + (ch.proxyRequired ? ' · 需代理' : '')
               + (implemented
@@ -1150,9 +1188,9 @@ window.__ModuleLoader__.load({
                 }
                 setOpen(nextOpen); setMsg(null); setAccMsg(null); setSess(null); setFallback(false)
                 if (!nextOpen) return
-                // 🔴 browser 流：在点击的同一个 task 里同步开空白窗口（否则 Promise 回调里会被拦截）
-                if (flow === 'browser') startLogin(preOpenWindow())
-                else if (flow !== 'paste' && flow !== 'aksk') startLogin(null)   // device/qr 不需要新窗口
+                // 🔴 browser/device 流：在点击的同一个 task 里同步开空白窗口（否则 Promise 回调里会被拦截）
+                if (flow === 'browser' || flow === 'device') startLogin(preOpenWindow())
+                else if (flow !== 'paste' && flow !== 'aksk') startLogin(null)   // qr 不需要新窗口
               },
             }, open ? '收起' : (ch.loggedIn ? '再加一个' : '一键登录')),
             ch.loginUrl

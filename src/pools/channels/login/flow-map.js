@@ -16,6 +16,7 @@ import { startPaste } from './paste.js'
 import { startQr, pollQr } from './qr.js'
 import { startCodearts, pollCodearts } from './codearts.js'
 import { startQoder, pollQoder } from './qoder.js'
+import { startCline, pollCline } from './cline.js'
 import { startBuddy, pollBuddy } from './buddy.js'
 import { startWorkbuddy, pollWorkbuddy } from './workbuddy.js'
 import { startLoomy, pollLoomy } from './loomy.js'
@@ -82,7 +83,13 @@ export const FLOW_MAP = Object.freeze({
     loginVerified: false,
     loginNote: 'Qoder 中国版：设备码+PKCE 轮询（端点已对拍），公开端点可能已失效',
   },
-  cline: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'Cline：WorkOS 设备码，端点待取证' },
+  cline: {
+    type: FLOW_TYPE.DEVICE,
+    start: startCline,
+    poll: pollCline,
+    loginVerified: false,
+    loginNote: 'Cline：WorkOS 标准设备码（端点已对拍），待真机验证',
+  },
   minimax: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'MiniMax：OAuth PKCE，端点待取证' },
   minimaxintl: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'MiniMax 国际：端点待取证' },
   zcode: { type: FLOW_TYPE.DEVICE, loginVerified: false, loginNote: 'ZCode 智谱：设备码+验证码，端点待取证' },
@@ -128,6 +135,7 @@ export function getFlow(provider, ch, forcedType) {
   const poll = (sameType && entry?.poll) || DEFAULT_POLL[type] || null
   return {
     type,
+    start,                       // 便于测试/诊断直接取用（状态机走 initial）
     initial: (p, c, opts) => start(p, c, opts),
     poll,
     loginVerified: entry?.loginVerified ?? false,

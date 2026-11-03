@@ -422,7 +422,10 @@ function makeBackend(overrides = {}) {
           callbackUrl: 'http://150.158.175.241/cs-myfree/login/callback',
         }, db.startExtra[provider] || {})
         if (flow === 'browser') body.url = body.url || 'https://example.com/oauth/authorize?client_id=demo&state=xyz'
-        if (flow === 'device') { body.userCode = body.userCode || 'ABCD-1234'; body.verificationUri = body.verificationUri || 'https://example.com/device' }
+        if (flow === 'device') {
+          if (!('userCode' in body)) body.userCode = 'ABCD-1234'
+          if (!('verificationUri' in body)) body.verificationUri = 'https://example.com/device'
+        }
         if (flow === 'qr') { body.qr = body.qr || db.qrText; body.shortLink = body.shortLink || 'https://example.com/s/abc' }
         return { body }
       }
@@ -726,7 +729,7 @@ test('pollingOnly 渠道：等待文案为「已打开登录页，正在等待�
     await c.start()
     await c.openTab('供给源')
     await c.clickIn(c.cardOf('buddy'), '一键登录')
-    await c.waitFor(() => has(c, '已打开登录页，正在等待授权'), { label: 'pollingOnly 文案' })
+    await c.waitFor(() => has(c, '已打开登录页，等待你在浏览器完成授权'), { label: 'pollingOnly 文案' })
   } finally { c.unmount() }
 })
 
@@ -938,3 +941,72 @@ function flattenText(node) {
   walk(node)
   return out.join('')
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑧ device 流三分支：有 url（qoder 浏览器授权+纯轮询）/ 设备码 / 都没有
+// ─────────────────────────────────────────────────────────────────────────────
+test('device 流但返回 url（qoder 真实形态）：当作「浏览器授权 + 纯轮询」，不显示设备码', async () => {
+  const be = makeBackend()
+  be.db.pollStates.qoder = ['waiting']
+  be.db.startExtra.qoder = {
+    flow: 'device',
+    url: 'https://qoder.com/device/selectAccounts?state=abc123',
+    userCode: null,
+    verificationUri: null,
+    pollingOnly: true,
+  }
+  const c = await mount({ backend: be.backend })
+  try {
+    const fakeWin = { location: { href: '' }, close: () => {} }
+    c.setWindowOpen(() => fakeWin)
+    await c.start()
+    await c.openTab('供给源')
+    const card = () => c.cardOf('qoder')
+    // 开始前：flow 文案是「设备码」
+    assert.ok(flattenText(card()).includes('设备码'), '开始前应按 flow 显示「设备码」')
+
+    await c.clickIn(card(), '一键登录')
+    await c.waitFor(() => has(c, '已打开登录页，等待你在浏览器完成授权'), { label: '浏览器授权等待文案' })
+    // 有 url ⇒ 主按钮是「打开登录页」，并已同步导航预开窗口
+    assert.ok(c.opened.some(([u]) => u === 'about:blank'), '点击时应同步开 about:blank')
+    assert.equal(fakeWin.location.href, 'https://qoder.com/device/selectAccounts?state=abc123', '应打开后端返回的授权页 URL')
+    assert.ok(has(c, '① 打开登录页'), '有 url 时必须给「① 打开登录页」')
+    assert.equal(has(c, '① 打开验证页'), false, '有 url 时不应显示设备码验证页按钮')
+    assert.equal(has(c, '后端未返回登录地址'), false, '有 url 时不应报「未返回登录地址」')
+    // flow 文案动态改成「浏览器授权（轮询）」
+    assert.ok(flattenText(card()).includes('浏览器授权（轮询）'), 'device+url 的 flow 文案应为「浏览器授权（轮询）」：' + flattenText(card()).slice(0, 400))
+    // 没有 userCode 就不该出现大字设备码区域
+    assert.equal(c.nodes().some((n) => n.props && n.props.style && n.props.style.fontSize === '20px'), false, '不应渲染设备码大字')
+  } finally { c.unmount() }
+})
+
+test('device 流只有设备码（无 url）：大字 userCode + 「打开验证页」', async () => {
+  const be = makeBackend()
+  be.db.pollStates.qoder = ['waiting']
+  be.db.startExtra.qoder = { flow: 'device', url: null, userCode: 'WXYZ-9876', verificationUri: 'https://qoder.com/device', pollingOnly: false }
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start()
+    await c.openTab('供给源')
+    await c.clickIn(c.cardOf('qoder'), '一键登录')
+    await c.waitFor(() => has(c, 'WXYZ-9876'), { label: '设备码大字' })
+    assert.ok(has(c, '① 打开验证页'), '无 url 有设备码时主按钮应是「打开验证页」')
+    assert.ok(has(c, '等待你输入设备码确认'), '状态行应提示输入设备码')
+    assert.ok(flattenText(c.cardOf('qoder')).includes('设备码'), 'flow 文案仍是「设备码」')
+  } finally { c.unmount() }
+})
+
+test('device 流既无 url 也无设备码：诚实提示「后端未返回登录地址」+ 备用粘贴', async () => {
+  const be = makeBackend()
+  be.db.pollStates.qoder = ['waiting']
+  be.db.startExtra.qoder = { flow: 'device', url: null, userCode: null, verificationUri: null, pollingOnly: true }
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start()
+    await c.openTab('供给源')
+    await c.clickIn(c.cardOf('qoder'), '一键登录')
+    await c.waitFor(() => has(c, '后端未返回登录地址'), { label: '诚实提示' })
+    assert.ok(has(c, '后端未返回登录地址（既没有 url 也没有设备码）'), c.text().slice(-500))
+    assert.ok(has(c, '备用：直接粘贴凭据') || has(c, '粘贴'), '仍应有备用粘贴入口')
+  } finally { c.unmount() }
+})
