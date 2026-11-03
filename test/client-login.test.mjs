@@ -335,6 +335,9 @@ function makeBackend(overrides = {}) {
   const db = {
     channels: Object.keys(FLOW_OF).map((id) => ({
       id, label: LABEL[id] || id, flow: FLOW_OF[id],
+      implemented: id === 'codearts' || id === 'qiniu',
+      authKind: id === 'codearts' ? 'signed-huawei' : 'bearer',
+      reason: (id === 'codearts' || id === 'qiniu') ? null : '登录换取未实现（端点待取证）',
       loginVerified: id === 'codearts',
       loginNote: id === 'codearts' ? 'AK/SK 永久授权，已真机验证' : (LABEL[id] || id) + '：登录端点待取证',
       refreshable: id !== 'loomy',
@@ -395,6 +398,8 @@ function makeBackend(overrides = {}) {
         case '/cs-myfree/scope': return { body: { ok: true, scopes: ['global', 'preset', 'session'], files: [], effective: { config: {}, layers: { global: 0, preset: 0, session: 0 } }, hint: '' } }
         case '/cs-myfree/ledger': return { body: { ok: true, summary: {}, spend: { ok: false, days: [], providers: [] }, token: { days: [] } } }
         case '/cs-myfree/cash': return { body: { ok: true, deepseek: { available: true, balances: [{ currency: 'CNY', total: 1, granted: 0, topped: 1 }] }, errors: [] } }
+        case '/cs-myfree/checkin/status': return { body: { ok: true, enabled: true, alive: true, running: false, at_time: '10:05', nextAt: Date.now() + 3600_000, lastAt: null, lastDate: null, lastResult: null, pending: 0, lastError: null, channels: [] } }
+        case '/cs-myfree/credits': return { body: { ok: true, providers: [] } }
       }
       return { status: 404, body: { ok: false, error: 'not found ' + base } }
     }
@@ -514,8 +519,10 @@ test('供给源：18 家渠道 + 已登录/未登录/已验证/未验证徽标 +
     await c.openTab('供给源')
     assert.ok(has(c, '账号渠道（18 家 · 已登录 2 家'), c.text().slice(-500))
     assert.ok(has(c, '已验证'), 'codearts 应显示已验证')
-    assert.ok(has(c, '未验证'), '未验证渠道必须有黄色徽标')
-    assert.ok(has(c, '⚠️ 未验证：CodeBuddy（腾讯）：登录端点待取证'), '未验证渠道必须显示后端 note：' + c.text().slice(-900))
+    assert.ok(has(c, '未验证'), '未验证渠道（如 qiniu）必须有黄色徽标')
+    assert.ok(has(c, '登录可用'), 'implemented=true 的渠道要标「登录可用」')
+    assert.ok(has(c, '暂不可用'), '未实现登录换取的渠道必须标「暂不可用」')
+    assert.ok(has(c, '⚠️ 暂不可用：登录换取未实现（端点待取证）'), '必须展示后端的 reason：' + c.text().slice(-900))
     // 每种 flow 的卡片都带 data-flow
     const flows = new Set(c.nodes().filter((n) => n.props && n.props['data-flow']).map((n) => n.props['data-flow']))
     for (const f of ['browser', 'device', 'qr', 'paste']) assert.ok(flows.has(f), '缺少 flow=' + f)

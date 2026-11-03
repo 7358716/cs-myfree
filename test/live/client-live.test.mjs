@@ -246,3 +246,59 @@ liveTest('POST /channels/parse：普通网址必须拒绝，带 code 回调链�
   assert.equal(typeof good.preview, 'string')
   assert.ok(good.preview.includes('…'), '必须掩码：' + good.preview)
 })
+
+liveTest('GET /channels：能力字段 implemented / authKind / reason（旧进程可能缺少）', async () => {
+  const d = (await req('/cs-myfree/channels')).json
+  assert.equal(d.ok, true)
+  let withImplemented = 0
+  for (const c of d.channels) {
+    if ('implemented' in c) {
+      withImplemented++
+      assert.equal(typeof c.implemented, 'boolean', `${c.id}.implemented 必须是布尔`)
+      if (c.implemented === false) {
+        assert.ok(typeof c.reason === 'string' && c.reason.length > 0, `${c.id} 标了不可用但没有 reason`)
+      }
+    }
+    if ('authKind' in c && c.authKind != null) assert.equal(typeof c.authKind, 'string')
+    if ('flow' in c && c.flow != null) assert.ok(['browser', 'device', 'qr', 'paste', 'aksk'].includes(c.flow), `${c.id}.flow 非法：${c.flow}`)
+    if ('loginVerified' in c) assert.equal(typeof c.loginVerified, 'boolean')
+  }
+  if (withImplemented > 0) {
+    assert.ok(d.channels.some((c) => c.implemented === true), '至少 codearts 应 implemented=true')
+  }
+})
+
+liveTest('GET /checkin/status：签到运行时契约（未注册时返回可读 error）', async () => {
+  const r = await req('/cs-myfree/checkin/status')
+  assert.equal(r.status, 200, '旧进程可能 404：' + r.text.slice(0, 120))
+  const d = r.json
+  assert.ok(d && typeof d === 'object')
+  if (d.ok === false) {
+    assert.equal(typeof d.error, 'string', '未注册时必须返回可读 error，而不是空响应')
+    return
+  }
+  assert.equal(typeof d.enabled, 'boolean')
+  assert.equal(typeof d.alive, 'boolean')
+  assert.ok('at_time' in d)
+  assert.ok('nextAt' in d)
+  assert.ok('lastAt' in d)
+  assert.ok(Array.isArray(d.channels), 'channels 必须是数组')
+})
+
+liveTest('GET /credits：积分契约（未实现渠道给 error 而不是 0）', async () => {
+  const r = await req('/cs-myfree/credits')
+  assert.equal(r.status, 200, '旧进程可能 404：' + r.text.slice(0, 120))
+  const d = r.json
+  assert.ok(d && typeof d === 'object')
+  if (d.ok === false) {
+    assert.equal(typeof d.error, 'string')
+    return
+  }
+  assert.ok(Array.isArray(d.providers), 'providers 必须是数组')
+  for (const p of d.providers) {
+    assert.equal(typeof p.provider, 'string')
+    assert.equal(typeof p.ok, 'boolean')
+    if (p.ok === false) assert.ok(typeof p.error === 'string' && p.error.length > 0, `${p.provider} 未实现但没给 error（不能返回 0 冒充）`)
+    else assert.ok(p.total != null || p.unit != null, `${p.provider} ok=true 但没有 total/unit`)
+  }
+})

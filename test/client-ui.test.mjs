@@ -35,6 +35,9 @@ function mkChannel(id, label, extra = {}) {
     id,
     label,
     login: 'browser-callback',
+    implemented: false,
+    authKind: 'bearer',
+    reason: '需 OAuth token，未实现',
     guideKind: 'browser',
     guideTitle: '浏览器授权登录',
     guideSteps: ['点下面「打开登录页」按钮', '在打开的页面完成登录并授权', '授权完成后把浏览器地址栏的授权码（code）复制过来', '粘贴到下方输入框并点保存'],
@@ -101,6 +104,9 @@ const FIX = {
     total: 18,
     channels: [
       mkChannel('codearts', 'CodeArts（华为云）', {
+        implemented: true,
+        authKind: 'signed-huawei',
+        reason: null,
         loginWarn: null,
         accounts: [
           { id: 'codearts-1793686308695', label: 'CodeArts（华为云）', masked: 'HPUA…7NLO', addedAt: 1793686308695, expiresAt: null },
@@ -119,15 +125,16 @@ const FIX = {
       mkChannel('raccoon', 'Raccoon（商汤）', { login: 'qr-wechat', checkin: false }),
       mkChannel('minimax', 'MiniMax Code', {
         login: 'oauth-pkce',
+        reason: '需 OAuth token，未实现',
         loginWarn: '这类渠道的登录入口在官网深处，插件无法代你跳转；请按上面步骤自己找',
       }),
       mkChannel('minimaxintl', 'MiniMax 国际', { login: 'oauth-pkce', loginWarn: '这类渠道的登录入口在官网深处' }),
       mkChannel('zcode', 'ZCode（智谱）', { login: 'device-code' }),
       mkChannel('opencode', 'OpenCode', { login: 'none', guideKind: 'none', guideTitle: '无需登录', guideSteps: ['该渠道不需要账号'], field: 'API Key（可选）', checkin: false }),
-      mkChannel('gemini', 'Gemini Code Assist', { proxyRequired: true, checkin: false }),
+      mkChannel('gemini', 'Gemini Code Assist', { proxyRequired: true, checkin: false, reason: '本机网络不可达' }),
       mkChannel('officeace', 'OfficeAce（华为 MaaS）', { login: 'oauth-pkce', loginWarn: '入口较深' }),
       mkChannel('accio', 'Accio（阿里）', { checkin: false }),
-      mkChannel('qiniu', 'Qiniu（七牛）', { login: 'paste-key', guideKind: 'paste', guideTitle: '粘贴 API Key', guideSteps: ['创建 API Key', '粘贴', '保存'], field: 'API Key', checkin: false }),
+      mkChannel('qiniu', 'Qiniu（七牛）', { login: 'paste-key', implemented: true, authKind: 'api-key', reason: null, guideKind: 'paste', guideTitle: '粘贴 API Key', guideSteps: ['创建 API Key', '粘贴', '保存'], field: 'API Key', checkin: false }),
     ],
   },
   channelsModels: {
@@ -188,6 +195,28 @@ const FIX = {
     summary: { todayCNY: 0, monthCNY: 0, todayCalls: 10, totalCalls: 10, failedCalls: 1, paidCalls: 0, costUnknown: 0, lastAt: 1793689675044 },
   },
   cash: { ok: true, deepseek: { available: true, balances: [{ currency: 'CNY', total: 11, granted: 0, topped: 11 }] }, errors: [] },
+  checkinStatus: {
+    ok: true, enabled: true, alive: true, running: false, at_time: '10:05',
+    nextAt: 1793745900000, lastAt: 1793664300000, lastDate: '2026-11-03',
+    lastResult: '领取 2 个账号（+2000 积分）', pending: 0, lastError: null,
+    channels: [{ provider: 'codearts', kind: 'claimed', text: '领取成功 +1000 积分', gain: { amount: 1000 } }],
+  },
+  checkinRun: {
+    ok: true, at: 1793664300000, takesMs: 1234, coversToday: true,
+    results: [
+      { provider: 'codearts', kind: 'claimed', gain: { amount: 1000 }, message: '领取成功', ms: 800 },
+      { provider: 'buddy', kind: 'unsupported', message: '该渠道不支持自动签到', ms: 10 },
+    ],
+    summary: { total: 2, claimed: 1, alreadyClaimed: 0, inactive: 0, unsupported: 1, failed: 0 },
+    text: 'codearts:claimed +1000；buddy:unsupported',
+  },
+  credits: {
+    ok: true,
+    providers: [
+      { provider: 'codearts', ok: true, total: 2000, unit: '积分' },
+      { provider: 'buddy', ok: false, error: '需 OAuth token，未实现' },
+    ],
+  },
   diag: {
     ok: true,
     at: 1793690413973,
@@ -471,6 +500,18 @@ async function mount({ backend, clipboard } = {}) {
       if (!tab) throw new Error('找不到标签页：' + label)
       await ctrl.click(tab)
     },
+    cardOf(id) {
+      return flatten(rt.tree).find((n) => n.props && n.props['data-channel'] === id)
+    },
+    async waitFor(pred, { timeout = 5000, label = '' } = {}) {
+      const start = Date.now()
+      while (Date.now() - start < timeout) {
+        await ctrl.flush()
+        if (pred()) return true
+        await sleep(15)
+      }
+      throw new Error('等待超时' + (label ? '：' + label : '') + '\n实际：' + ctrl.text().slice(-900))
+    },
     setClipboard(c) { sandbox.navigator.clipboard = c },
     unmount() {
       for (const inst of rt.hooks.values()) for (const s of inst.hooks) if (s.cleanup) { try { s.cleanup() } catch (_) {} }
@@ -536,6 +577,8 @@ function makeBackend(overrides = {}) {
           },
         }
         case '/cs-myfree/login/status': return { body: clone(FIX.loginStatus) }
+        case '/cs-myfree/checkin/status': return { body: clone(FIX.checkinStatus) }
+        case '/cs-myfree/credits': return { body: clone(FIX.credits) }
         case '/cs-myfree/login/poll': {
           const sid = new URL('http://x' + url).searchParams.get('sessionId')
           const s2 = db.loginSessions[sid]
@@ -659,6 +702,8 @@ function makeBackend(overrides = {}) {
         }
         return { body: { ok: false, error: '账号不存在' } }
       }
+      case '/cs-myfree/checkin/run':
+        return { body: clone(FIX.checkinRun) }
       case '/cs-myfree/probe': {
         db.probe = { at: Date.now(), results: [{ id: 'kilo', ok: true, ms: 100, sample: 'pong' }, { id: 'ovh', ok: false, ms: 20000, error: 'timeout' }], anyOk: true, okCount: 1 }
         return { body: { ok: true, ...db.probe } }
@@ -682,11 +727,11 @@ async function waitFor(c, pred, { timeout = 9000, label = '' } = {}) {
 
 const PANELS = [
   { tab: '总览', must: ['一眼看懂当前状态', '2 条候选', '1/18 家已登录', '免密源 3 个（Kilo 免费池 / OVH 免费视觉 / Pollinations）', '默认降级链 2 条：kilo → ovh', '默认全关（不会自动花钱）'] },
-  { tab: '供给源', must: ['探测免密源', '全部测试', '全部续期', '免密源（无需登录）', '账号渠道（18 家 · 已登录 1 家', '已验证', '未验证', '需代理', '去官网', '一键登录'] },
+  { tab: '供给源', must: ['探测免密源', '全部测试', '全部续期', '免密源（无需登录）', '账号渠道（18 家 · 已登录 1 家', '登录可用', '暂不可用', '已验证', '未验证', '需代理', '去官网', '一键登录'] },
   { tab: '模型目录', must: ['免密源默认模型', 'kilo-auto/free', 'Qwen3.5-397B-A17B', '✅ 860ms', '❌ timeout', '已登录渠道的模型（4 个）', 'codearts · 4 个', 'codearts/deepseek-v4.1-flash', '来源：内置清单', 'text 输入模态'] },
   { tab: '降级链 ★', must: ['内置链2 条', '覆盖层1 条', '生效链2 条', '生效链来源', '内置 2 + 覆盖 1 ⇒ 合并 2 条', '+ 加一条', '保存覆盖层', '清空草稿', '页面这份链 = 运行时实际选路'] },
   { tab: '钉选', must: ['生效链里 tier 最小的就是当前首选', '★ kilo / kilo-auto/free', 'ovh / Qwen3.5-397B-A17B'] },
-  { tab: '额度健康', must: ['免密源状态', '最近探测', '可用', '可签到渠道', '需人工重登1 家', '需代理1 家'] },
+  { tab: '额度健康', must: ['自动签到 / 领积分', '立即签到（全部渠道）', '定时器', '✅ 运行中', '积分 / 余额（按渠道）', '2000 积分', '未实现/未登录：需 OAuth token，未实现', '签到 / 续期开关', '免密源状态', '最近探测', '可签到渠道'] },
   { tab: '保护策略', must: ['当前生效值', '识图档位', '搜索预算', '15000 ms', '只声明了 text 模态'] },
   { tab: '预算付费', must: ['当前生效值', '① 付费源', '④ 单次限额', '¥1', '¥10', '¥100', '五道闸门', '禁止付费'] },
   { tab: '省 Token', must: ['RTK 工具输出压缩', '取决于宿主是否调用', '诚实说明'] },
@@ -728,7 +773,7 @@ test('每个面板的按钮/开关都注册了回调（不走纯文本假按钮�
     '模型目录': ['刷新', '重新拉取渠道模型'],
     '降级链 ★': ['+ 加一条', '保存覆盖层', '清空草稿'],
     '钉选': [],
-    '额度健康': ['刷新'],
+    '额度健康': ['立即签到（全部渠道）', '刷新状态', '保存', '重新加载'],
     '保护策略': ['保存', '重新加载'],
     '预算付费': ['保存', '重新加载'],
     '省 Token': [],
@@ -764,7 +809,7 @@ test('全部 13 面板在接口 500 时都有错误文案（不静默假装加�
       '模型目录': '读取失败',
       '降级链 ★': '出错了',
       '钉选': '出错了',
-      '额度健康': '出错了',
+      '额度健康': '状态接口读取失败',
       '保护策略': '配置读取失败',
       '预算付费': '配置读取失败',
       '可观测': '出错了',
@@ -816,6 +861,8 @@ test('空数据时 13 面板有明确空态（不崩、不显示假数据）', a
     assert.ok(c.text().includes('已设 0 个顶层键'))
     await c.openTab('可观测')
     assert.ok(c.text().includes('今日花费') && c.text().includes('¥0'))
+    await c.openTab('额度健康')
+    assert.ok(c.text().includes('暂无已登录渠道的积分数据'), c.text().slice(-500))
   } finally { c.unmount() }
 })
 
@@ -1091,5 +1138,55 @@ test('诚实性：13 个 tab 全部挂载时没有 Render 错误被 ErrorBoundar
       await sleep(3)     // 给 effect 里的 fetch 一点时间暴露渲染期错误
       assert.deepEqual(c.runtime.errors.map((e) => String(e.error && e.error.message)), [], `${p.tab} 抛错`)
     }
+  } finally { c.unmount() }
+})
+
+
+test('供给源：渠道能力按 implemented 显示「登录可用 / 暂不可用」+ reason（codearts/qiniu 可用）', async () => {
+  const c = await mount({ backend: makeBackend().backend })
+  try {
+    await c.start()
+    await c.openTab('供给源')
+    assert.equal(c.cardOf('codearts').props['data-implemented'], '1')
+    assert.equal(c.cardOf('qiniu').props['data-implemented'], '1')
+    assert.equal(c.cardOf('buddy').props['data-implemented'], '0')
+    assert.ok(c.text().includes('⚠️ 暂不可用：需 OAuth token，未实现'), '必须展示后端的 reason：' + c.text().slice(-800))
+    assert.ok(c.text().includes('⚠️ 暂不可用：本机网络不可达'), 'gemini 的不可达原因必须展示')
+    assert.ok(c.text().includes('登录可用'), 'implemented=true 的渠道要标「登录可用」')
+  } finally { c.unmount() }
+})
+
+test('额度健康：自动签到状态 + 积分真实数据 + 立即签到结果 + 开关保存生效', async () => {
+  const be = makeBackend()
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start()
+    await c.openTab('额度健康')
+    // 状态来自 /checkin/status（不是硬编码）
+    for (const s of ['自动签到 / 领积分', '✅ 已开启（每天 10:05）', '✅ 运行中', '下次运行', '上次运行', '领取 2 个账号（+2000 积分）']) {
+      assert.ok(c.text().includes(s), '缺少签到状态：' + s + '\n' + c.text().slice(-700))
+    }
+    // 积分来自 /credits：成功显示数字+单位，失败显示错误（不是 0）
+    assert.ok(c.text().includes('2000 积分'), c.text().slice(-700))
+    assert.ok(c.text().includes('未实现/未登录：需 OAuth token，未实现'), '未实现渠道不能显示 0')
+
+    // 立即签到：逐个结果 + 汇总
+    await c.click('立即签到（全部渠道）')
+    await c.waitFor(() => c.text().includes('签到完成'), { label: '签到完成' })
+    assert.ok(c.text().includes('领取 1'), '汇总应含领取数：' + c.text().slice(-800))
+    assert.ok(c.text().includes('不支持 1'), '汇总应含不支持数')
+    assert.ok(c.text().includes('codearts:claimed') || c.text().includes('领取成功'), '应显示逐渠道结果')
+    assert.ok(be.db.log.some((x) => x.url === '/cs-myfree/checkin/run'), '应调用 /checkin/run')
+    assert.ok(c.text().includes('1234ms'), '应显示耗时')
+
+    // 开关：切换「自动签到」→ 保存 → POST /config 带上 checkin.enabled=false
+    await c.click('已开启')                     // 第一个开关 = 自动签到
+    assert.ok(c.text().includes('已关闭'), '切换后应显示已关闭')
+    await c.click('保存')
+    await c.waitFor(() => c.text().includes('已保存'), { label: '配置保存反馈' })
+    const saved = be.db.log.filter((x) => x.url === '/cs-myfree/config' && x.method === 'POST')
+    assert.ok(saved.length >= 1, '应 POST /config')
+    assert.equal(be.db.config.checkin?.enabled, false, '配置应写入 checkin.enabled=false')
+    assert.ok(be.db.config.checkin, '配置里必须有 checkin 对象')
   } finally { c.unmount() }
 })

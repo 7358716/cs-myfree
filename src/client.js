@@ -701,6 +701,9 @@ window.__ModuleLoader__.load({
       const loginNote = ch.loginNote || st.note || ''
       const refreshable = st.refreshable !== false
       const accs = Array.isArray(ch.accounts) ? ch.accounts : []
+      // 能力实况：implemented=false ⇒ 登录换取尚未实现/渠道不可用，必须显示「暂不可用」+ reason
+      const implemented = ch.implemented !== false
+      const capabilityReason = ch.reason || (implemented ? '' : '该渠道登录换取尚未实现')
 
       const [open, setOpen] = react.useState(false)
       const [sess, setSess] = react.useState(null)          // /login/start 的会话
@@ -1053,6 +1056,7 @@ window.__ModuleLoader__.load({
         'data-channel': ch.id,
         'data-flow': flow,
         'data-verified': verified ? '1' : '0',
+        'data-implemented': implemented ? '1' : '0',
         style: Object.assign({}, S.card, { marginBottom: '8px', maxWidth: '100%', boxSizing: 'border-box' }),
       },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' } },
@@ -1061,9 +1065,14 @@ window.__ModuleLoader__.load({
             ch.loggedIn
               ? h(Badge, { kind: 'good' }, '已登录 ' + accs.length)
               : h(Badge, { kind: 'dim' }, '未登录'),
-            verified
-              ? h(Badge, { kind: 'good', title: loginNote }, '已验证')
-              : h(Badge, { kind: 'warn', title: loginNote || '该渠道登录端点尚未真机验证' }, '未验证'),
+            implemented
+              ? h(Badge, { kind: 'good', title: ch.authKind ? ('认证类型：' + ch.authKind) : '' }, '登录可用')
+              : h(Badge, { kind: 'warn', title: capabilityReason }, '暂不可用'),
+            implemented
+              ? (verified
+                  ? h(Badge, { kind: 'good', title: loginNote }, '已验证')
+                  : h(Badge, { kind: 'warn', title: loginNote || '该渠道登录端点尚未真机验证' }, '未验证'))
+              : null,
             h(Badge, { kind: 'dim', title: flowMeta(flow).tip }, flowMeta(flow).label),
             ch.checkin ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) }, '· 可签到') : null,
             ch.proxyRequired ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.warn) }, '· 需代理') : null),
@@ -1073,6 +1082,7 @@ window.__ModuleLoader__.load({
               : null,
             h('span', {
               style: S.btn(!ch.loggedIn),
+              title: implemented ? '' : ('暂不可用：' + capabilityReason + '（仍可尝试，失败会如实提示）'),
               onClick: () => {
                 const nextOpen = !open
                 // 收起时若还有等待中的会话，顺手取消（避免后端会话占着 5 分钟）
@@ -1084,10 +1094,13 @@ window.__ModuleLoader__.load({
                 if (nextOpen && flow !== 'paste' && flow !== 'aksk') startLogin()
               },
             }, open ? '收起' : (ch.loggedIn ? '再加一个' : '一键登录')))),
-        loginNote
-          ? h('div', { style: Object.assign({ marginTop: '4px', wordBreak: 'break-all' }, S.dim, verified ? null : S.warn) },
-              (verified ? '' : '⚠️ 未验证：' ) + loginNote)
-          : null,
+        !implemented
+          ? h('div', { style: Object.assign({ marginTop: '4px', wordBreak: 'break-all' }, S.dim, S.warn) },
+              '⚠️ 暂不可用：' + (capabilityReason || loginNote || '该渠道登录换取尚未实现'))
+          : loginNote
+            ? h('div', { style: Object.assign({ marginTop: '4px', wordBreak: 'break-all' }, S.dim, verified ? null : S.warn) },
+                (verified ? '' : '⚠️ 未验证：') + loginNote)
+            : null,
 
         accs.map((a) => {
           const key = a.id
@@ -1445,23 +1458,111 @@ window.__ModuleLoader__.load({
     // ── W5 额度健康 ──
     function HealthZone() {
       const [s, reload] = useApi('/state')
-      if (s.error) return h(Err, { error: s.error })
-      if (!s.data) return h(Loading, { on: s.loading })
+      const [ck, reloadCk] = useApi('/checkin/status')
+      const [cr, reloadCr] = useApi('/credits')
+      const [running, setRunning] = react.useState(false)
+      const [runMsg, setRunMsg] = react.useState(null)
+
+      const runCheckin = () => {
+        setRunning(true); setRunMsg(null)
+        api('/checkin/run', { method: 'POST', body: JSON.stringify({}) })
+          .then((r) => setRunMsg(r))
+          .catch((e) => setRunMsg({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => { setRunning(false); reloadCk(); reloadCr() })
+      }
+      const fmtTime = (ts) => {
+        try { return ts ? new Date(ts).toLocaleString() : '—' } catch { return '—' }
+      }
+      const reloadAll = () => { reload(); reloadCk(); reloadCr() }
+
       const d = s.data
+      const st = ck.data
+      const credits = cr.data && Array.isArray(cr.data.providers) ? cr.data.providers : []
+      const KIND_LABEL = {
+        'claimed': '领取成功', 'already-claimed': '今天已领过', 'inactive': '账号不活跃',
+        'unsupported': '该渠道不支持自动签到', 'failed': '失败',
+      }
+      const KIND_COLOR = (kind) => (kind === 'claimed' ? S.good : kind === 'already-claimed' ? S.dim : kind === 'unsupported' ? S.dim : S.warn)
+
       return h('div', null,
+        (s.error && !d) ? h(Err, { error: '状态接口读取失败：' + s.error }) : null,
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '自动签到 / 领积分'),
+          ck.error
+            ? h(Err, { error: '签到状态读取失败：' + ck.error })
+            : !st
+              ? h('div', { style: S.dim }, '加载签到状态…')
+              : h('div', null,
+                  h(KV, { k: '自动签到', v: st.enabled ? '✅ 已开启（每天 ' + (st.at_time || '10:05') + '）' : '⛔ 已关闭（手动「立即签到」仍可用）' }),
+                  h(KV, { k: '定时器', v: st.alive ? '✅ 运行中' : '❌ 未运行（开关改完仍无效 ⇒ 看诊断页）' }),
+                  h(KV, { k: '下次运行', v: fmtTime(st.nextAt), dim: true }),
+                  h(KV, { k: '上次运行', v: st.lastAt ? fmtTime(st.lastAt) + (st.lastResult ? ' · ' + String(st.lastResult) : '') : '还没跑过', dim: true }),
+                  st.pending ? h(KV, { k: '欠账', v: st.pending + ' 天未领', dim: true }) : null,
+                  st.lastError ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '上次错误：' + st.lastError) : null,
+                  (st.channels || []).length
+                    ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
+                        st.channels.map((c, i) => h('div', { key: c.provider + i },
+                          '· ' + c.provider + '：' + (c.text || KIND_LABEL[c.kind] || c.kind || '') + (c.gain ? '（+' + (c.gain.amount ?? c.gain) + '）' : ''))))
+                    : null,
+                  h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
+                    h('button', { style: S.btn(true), onClick: runCheckin, disabled: running }, running ? '签到中…（真实请求）' : '立即签到（全部渠道）'),
+                    h('button', { style: S.btn(false), onClick: () => { reloadCk(); reloadCr() } }, '刷新状态'))),
+          runMsg
+            ? h('div', { style: Object.assign({}, S.card, { marginTop: '8px', borderColor: runMsg.ok ? 'rgba(64,160,96,0.5)' : 'rgba(200,80,80,0.5)' }) },
+                h('div', { style: { fontWeight: 600 } }, runMsg.ok
+                  ? (runMsg.summary
+                    ? '✅ 签到完成：领取 ' + runMsg.summary.claimed + ' · 已领过 ' + runMsg.summary.alreadyClaimed + ' · 不支持 ' + runMsg.summary.unsupported + ' · 失败 ' + runMsg.summary.failed + (runMsg.takesMs != null ? '（' + runMsg.takesMs + 'ms）' : '')
+                    : '✅ 签到完成' + (runMsg.takesMs != null ? '（' + runMsg.takesMs + 'ms）' : ''))
+                  : '❌ 签到失败'),
+                runMsg.text ? h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) }, runMsg.text) : null,
+                (runMsg.results || []).map((r, i) => h('div', { key: (r.provider || 'x') + i, style: S.row },
+                  h('span', null, '· ' + (r.provider || '?')),
+                  h('span', { style: Object.assign({ textAlign: 'right' }, S.dim, KIND_COLOR(r.kind)) },
+                    (KIND_LABEL[r.kind] || r.kind || '') + (r.gain && (r.gain.amount ?? r.gain) ? ' +' + (r.gain.amount ?? r.gain) : '') + (r.message ? ' · ' + r.message : '') + (r.ms != null ? '（' + r.ms + 'ms）' : '')))),
+                runMsg.error ? h('div', { style: Object.assign({ marginTop: '6px' }, S.mono, S.bad) }, runMsg.error) : null)
+            : null),
+
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '积分 / 余额（按渠道）'),
+          cr.error
+            ? h(Err, { error: '积分读取失败：' + cr.error })
+            : credits.length === 0
+              ? h('div', { style: S.dim }, '暂无已登录渠道的积分数据（登录后会自动查询）')
+              : credits.map((p, i) => h('div', { key: p.provider + i, style: S.row },
+                  h('span', null, (p.ok ? '✅ ' : '❌ ') + (p.provider || '?')),
+                  h('span', { style: Object.assign({ textAlign: 'right', marginLeft: '12px' }, S.dim, p.ok ? null : S.warn) },
+                    p.ok
+                      ? ((p.total != null ? String(p.total) : '—') + ' ' + (p.unit || ''))
+                      : ('未实现/未登录：' + (p.error || '未知原因')))))),
+
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '8px' } }, '签到 / 续期开关（保存后立即生效）'),
+          h(ConfigEditor, {
+            defaults: { checkin: { enabled: true, at: '10:05' }, refresh: { enabled: true } },
+            fields: [
+              { path: ['checkin', 'enabled'], label: '自动签到（每日领积分）', type: 'bool', hint: '关 = 不再自动领；手动「立即签到」仍可用' },
+              { path: ['checkin', 'at'], label: '每天几点签到（HH:MM）', type: 'text', hint: '默认 10:05（避开渠道 10:00 的积分刷新）' },
+              { path: ['refresh', 'enabled'], label: '自动续期（到期前刷新）', type: 'bool', hint: '用 refresh_token 在 expires_at 前 5 分钟续期' },
+            ],
+            onSaved: () => { reloadCk(); reloadCr() },
+          })),
+
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '免密源状态'),
-          d.probe ? h('div', null,
-            h(KV, { k: '最近探测', v: new Date(d.probe.at).toLocaleString() }),
-            h(KV, { k: '可用', v: d.probe.okCount + ' 个（只探测默认优先源 Kilo/OVH）' + (d.probe.anyOk ? ' ✅' : ' ❌') }))
+          d && d.probe
+            ? h('div', null,
+                h(KV, { k: '最近探测', v: new Date(d.probe.at).toLocaleString() }),
+                h(KV, { k: '可用', v: d.probe.okCount + ' 个（只探测默认优先源 Kilo/OVH）' + (d.probe.anyOk ? ' ✅' : ' ❌') }))
             : h('div', { style: S.dim }, '尚未探测 ⇒ 去「供给源」点探测')),
+
         h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '签到与续期'),
-          h('div', { style: Object.assign({}, S.dim, { marginBottom: '6px' }) }, d.checkin.note),
-          h(KV, { k: '可签到渠道', v: d.checkin.supported.join(', ') || '无' }),
-          h(KV, { k: '需人工重登', v: d.sources.counts.manualRefresh + ' 家（见供给源）', dim: true }),
-          h(KV, { k: '需代理', v: d.sources.counts.proxyRequired + ' 家', dim: true })),
-        h('button', { style: S.btn(false), onClick: reload }, '刷新'),
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '渠道签到期与续期'),
+          h('div', { style: Object.assign({}, S.dim, { marginBottom: '6px' }) }, (d && d.checkin && d.checkin.note) || '签到由渠道层执行；本页展示自动签到结果'),
+          h(KV, { k: '可签到渠道', v: (d && d.checkin && Array.isArray(d.checkin.supported)) ? (d.checkin.supported.join(', ') || '无') : '未知' }),
+          h(KV, { k: '需人工重登', v: (d && d.sources && d.sources.counts ? d.sources.counts.manualRefresh : '?') + ' 家（见供给源）', dim: true }),
+          h(KV, { k: '需代理', v: (d && d.sources && d.sources.counts ? d.sources.counts.proxyRequired : '?') + ' 家', dim: true })),
+
+        h('button', { style: S.btn(false), onClick: reloadAll }, '刷新'),
       )
     }
 
@@ -1487,7 +1588,11 @@ window.__ModuleLoader__.load({
         cur[path[path.length - 1]] = v
         return next
       })
-      const val = (path) => path.reduce((o, k) => (o == null ? undefined : o[k]), cfg)
+      const getDefault = (path) => path.reduce((o, k) => (o == null ? undefined : o[k]), props.defaults || {})
+      const val = (path) => {
+        const v = path.reduce((o, k) => (o == null ? undefined : o[k]), cfg)
+        return v === undefined ? getDefault(path) : v
+      }
 
       const save = () => {
         setBusy(true); setMsg(null)
@@ -1544,8 +1649,9 @@ window.__ModuleLoader__.load({
                     },
                   })),
                 h('span', {
+                  onClick: () => setPath(f.path, !(val(f.path) === true)),
                   style: {
-                    fontWeight: 600,
+                    fontWeight: 600, cursor: 'pointer', userSelect: 'none',
                     color: val(f.path) === true ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-secondary)',
                   },
                 }, val(f.path) === true ? '已开启' : '已关闭'))
