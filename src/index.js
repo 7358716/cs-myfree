@@ -11,7 +11,9 @@
  * @module cs-myfree
  */
 
-import { createAdapter, providerRetryPolicy, DEFAULT_CANDIDATES } from './adapter/index.js'
+import { createAdapter, providerRetryPolicy, DEFAULT_CANDIDATES, PROVIDER_ID } from './adapter/index.js'
+import { streamWithFallback, PRIORITY as KEYLESS_PRIORITY, DEFAULT_MODEL as KEYLESS_MODEL } from './pools/keyless/index.js'
+import { ADAPTERS as KEYLESS_ADAPTERS } from './pools/keyless/index.js'
 import { keylessSources, SOURCES, buildOrder } from './pools/registry.js'
 import { evaluate, DECISION } from './policy/paid-gate.js'
 import { shouldEgress, MODE } from './vision/bridge.js'
@@ -84,6 +86,35 @@ export async function* parseSse(body, now = () => Date.now()) {
  * 并落进恢复模式自动禁用插件 —— 用户表现为「重启就起不来」。
  * 所以这里所有宿主 API 都走 compat 层的安全调用。
  */
+/**
+ * 宿主 messages → OpenAI 兼容格式。
+ * 纯文本时压成字符串（很多免费端点对数组形式支持不好）。
+ */
+export function convertMessages(messages, options = {}) {
+  const out = []
+  const sys = options?.systemPrompt ?? options?.system
+  if (typeof sys === 'string' && sys) out.push({ role: 'system', content: sys })
+  for (const m of Array.isArray(messages) ? messages : []) {
+    const role = m?.role === 'assistant' ? 'assistant' : m?.role === 'developer' ? 'system' : (m?.role || 'user')
+    const c = m?.content
+    if (typeof c === 'string') { out.push({ role, content: c }); continue }
+    if (!Array.isArray(c)) continue
+    const parts = []
+    for (const b of c) {
+      if (!b || typeof b !== 'object') continue
+      if (b.type === 'text' && b.text) parts.push({ type: 'text', text: String(b.text) })
+      else if (b.type === 'image') {
+        const url = b.url || (b.data ? `data:${b.mime || 'image/png'};base64,${b.data}` : null)
+        if (url) parts.push({ type: 'image_url', image_url: { url } })
+      }
+    }
+    if (parts.length === 0) continue
+    if (parts.every((x) => x.type === 'text')) out.push({ role, content: parts.map((x) => x.text).join('\n') })
+    else out.push({ role, content: parts })
+  }
+  return out
+}
+
 export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
   const log = makeLogger(ctx, NAME)
   const hostVer = detectHostVersion(ctx)
@@ -104,15 +135,37 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     send = async () => { throw new Error('传输层不可用') }
   }
 
+  // ── 默认链：直接用 3 个免密源（装完即可用，无需任何账号）──
+  const defaultChain = cfg.chainBase ?? KEYLESS_PRIORITY.map((id, i) => ({
+    provider: id,
+    model: KEYLESS_MODEL[id],
+    tier: i < 2 ? 1 : 2,          // kilo/ovh 优先，pollinations 次之
+  }))
+
+  /** 真实发送：按 provider 分发到对应免密源适配器 */
+  const sendToKeyless = async ({ provider, model, messages, signal, options }) => {
+    const a = KEYLESS_ADAPTERS[provider]
+    if (!a) throw Object.assign(new Error(`未知供应源：${provider}`), { code: 'MODEL_NOT_FOUND' })
+    // 透传 reasoning 等选项（宿主给的 options 含 temperature 等）
+    return a.stream({
+      model: model || KEYLESS_MODEL[provider],
+      messages: convertMessages(messages, options),
+      signal,
+    })
+  }
+
   let adapter
   try {
     adapter = createAdapter({
-      builtin: cfg.chainBase ?? DEFAULT_CANDIDATES,
+      builtin: defaultChain,
       overrides: cfg.chain?.overrides ?? [],
-      send,
+      send: cfg.transportBaseUrl ? send : sendToKeyless,
       budget: cfg.budgetTurns ?? {},
       onEvent: (e) => log.debug(`${e.type}`, e),
     })
+    const sc = adapter.selfCheck()
+    if (!sc.ok) log.warn(`adapter 契约自检未通过：${sc.problems.join('；')}`)
+    else log.info(`adapter 契约自检通过（${sc.modelCount} 个模型）`)
   } catch (err) {
     log.error(`adapter 创建失败（跳过注册）：${err?.message ?? err}`)
   }
@@ -120,9 +173,13 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
   // ── 注册到宿主（全部走安全调用）──
   if (adapter) {
     const ok = safeInject(ctx, ['llm'], (scoped) => {
-      const registered = safeRegisterAdapter(scoped?.llm, 'cs-myfree', adapter)
-      if (registered) log.info(`adapter 已注册（${adapter.describe().chain.length} 条候选）`)
-      else log.warn('宿主无 registerAdapter：adapter 未注册（降级为仅内建能力）')
+      const r = safeRegisterAdapter(scoped?.llm, [PROVIDER_ID], adapter)
+      if (r.ok) {
+        log.info(`✅ adapter 已注册：provider="${PROVIDER_ID}"，${adapter.describe().chain.length} 条候选`)
+      } else {
+        // 🔴 大声报：这是「模型选择器看不到 cs-myfree」的唯一原因
+        log.error(`❌ adapter 注册失败（模型选择器不会出现 ${PROVIDER_ID}）：${r.error}`)
+      }
     }, `${NAME}: llm`)
     if (!ok) log.warn('宿主无 inject：跳过 llm 注册')
   }

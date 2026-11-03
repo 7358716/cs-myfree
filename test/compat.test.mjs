@@ -52,9 +52,21 @@ test('safeInject 宿主无 inject 返回 false', () => {
 test('safeProvide 宿主无 provide 返回 false', () => {
   assert.equal(safeProvide({}, 'k', {}), false)
 })
-test('safeRegisterAdapter 宿主无方法返回 false', () => {
-  assert.equal(safeRegisterAdapter({}, 'id', {}), false)
-  assert.equal(safeRegisterAdapter({ registerAdapter: (id) => { throw new Error('x') } }, 'id', {}), false)
+test('safeRegisterAdapter 宿主无方法 ⇒ ok:false 且带原因', () => {
+  const a = safeRegisterAdapter({}, 'id', {})
+  assert.equal(a.ok, false)
+  assert.match(a.error, /registerAdapter/)
+})
+test('safeRegisterAdapter 传字符串也会自动包成数组（兼容）', () => {
+  let got = null
+  const a = safeRegisterAdapter({ registerAdapter: (list) => { got = list } }, 'cs-myfree', {})
+  assert.equal(a.ok, true)
+  assert.deepEqual(got, ['cs-myfree'], '必须是数组')
+})
+test('safeRegisterAdapter 抛错时返回原因而非静默', () => {
+  const a = safeRegisterAdapter({ registerAdapter: () => { throw new Error('DUPLICATE_ADAPTER') } }, 'id', {})
+  assert.equal(a.ok, false)
+  assert.match(a.error, /DUPLICATE/)
 })
 test('safeRegisterSearch 同上', () => {
   assert.equal(safeRegisterSearch({}, {}), false)

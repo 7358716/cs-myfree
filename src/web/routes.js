@@ -26,6 +26,9 @@ import { judge, sendJson } from './guard.js'
 import { withDefaults, DEFAULTS } from '../config/store.js'
 import { planReload, RELOAD_SCOPE } from '../ops/feed.js'
 import { collectLedger } from '../audit/sources.js'
+import { createAccountStore } from '../pools/channels/accounts.js'
+import { listChannels, LOGIN_GUIDES } from './channels.js'
+import { SCOPE, readScope, writeScope, effectiveConfig, listScopes } from '../config/scope.js'
 
 export const PREFIX = '/cs-myfree'
 
@@ -272,6 +275,64 @@ export function registerRoutes(webServer, opts = {}) {
     try {
       const data = await collectLedger({ dshHome: opts.dshHome })
       return { ok: true, at: now(), ...data }
+    } catch (err) {
+      return { ok: false, error: String(err?.message ?? err).slice(0, 200) }
+    }
+  })
+
+  // ── 渠道账号（登录）──
+  const accounts = createAccountStore(opts.dshHome)
+
+  route('/channels', async () => ({
+    ok: true,
+    at: now(),
+    channels: await listChannels(accounts),
+    total: Object.keys(CHANNELS).length,
+  }))
+
+  route('/channels/save', async ({ body }) => {
+    if (!body || !body.provider) return { ok: false, error: '缺少 provider' }
+    if (!CHANNELS[body.provider]) return { ok: false, error: '未知渠道：' + body.provider }
+    const cred = String(body.credential || '').trim()
+    if (!cred) return { ok: false, error: '凭证不能为空' }
+    // 🔴 绝不把凭证写日志
+    const r = await accounts.save({
+      id: body.id,
+      provider: body.provider,
+      label: body.label || CHANNELS[body.provider].label,
+      credential: cred,
+      expiresAt: Number.isFinite(body.expiresAt) ? body.expiresAt : null,
+    })
+    return { ok: r.ok, id: r.id, hint: r.ok ? '已保存到本机 ~/.dsh/cs-myfree/accounts.json（权限 0600），不会上传' : '保存失败' }
+  })
+
+  route('/channels/remove', async ({ body }) => {
+    if (!body || !body.id) return { ok: false, error: '缺少 id' }
+    return accounts.remove(body.id)
+  })
+
+  route('/channels/guides', async () => ({ ok: true, guides: LOGIN_GUIDES }))
+
+  // ── 作用域 ──
+  route('/scope', async ({ body }) => {
+    if (body === undefined) {
+      const q = new URLSearchParams()
+      return {
+        ok: true,
+        scopes: [SCOPE.GLOBAL, SCOPE.PRESET, SCOPE.SESSION],
+        files: await listScopes(opts.dshHome),
+        effective: await effectiveConfig({ dshHome: opts.dshHome }),
+        hint: '优先级：会话 > 预设 > 全局。会话/预设作用域需传 id。',
+      }
+    }
+    const scope = body.scope
+    if (![SCOPE.GLOBAL, SCOPE.PRESET, SCOPE.SESSION].includes(scope)) {
+      return { ok: false, error: '未知作用域：' + scope }
+    }
+    try {
+      const ok = await writeScope(opts.dshHome, scope, body.id, body.config || {})
+      const eff = await effectiveConfig({ dshHome: opts.dshHome, presetId: body.presetId, sessionId: body.sessionId })
+      return { ok, scope, layers: eff.layers, hint: ok ? '已写入 ' + scope + ' 作用域' : '写入失败' }
     } catch (err) {
       return { ok: false, error: String(err?.message ?? err).slice(0, 200) }
     }

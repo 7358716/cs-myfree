@@ -18,7 +18,42 @@ test('describe 返回与选路共用的链', () => {
 
 test('listModels 去重', () => {
   const a = createAdapter({ builtin: [...chain, { provider: 'x', model: 'm1', tier: 1 }], send: async () => [] })
-  assert.equal(a.listModels().length, 3)
+  assert.equal(a.listModels('cs-myfree').length, 3)
+})
+
+test('🔴 listModels 每项必须含 provider 字段（宿主契约）', () => {
+  const a = createAdapter({ builtin: chain, send: async () => [] })
+  for (const m of a.listModels('cs-myfree')) {
+    assert.equal(m.provider, 'cs-myfree')
+    assert.ok(m.id && m.name)
+  }
+})
+
+test('🔴 providerInfo 必须含 id 且等于 provider（宿主契约）', () => {
+  const a = createAdapter({ builtin: chain, send: async () => [] })
+  const pi = a.providerInfo('cs-myfree')
+  assert.equal(pi.id, 'cs-myfree')
+  assert.ok(pi.name)
+})
+
+test('🔴 resolveModel 的 provider 与 id 都必须对（宿主契约）', () => {
+  const a = createAdapter({ builtin: chain, send: async () => [] })
+  const r = a.resolveModel('cs-myfree', 'm1')
+  assert.equal(r.provider, 'cs-myfree')
+  assert.equal(r.id, 'm1')
+})
+
+test('selfCheck 全绿', () => {
+  const a = createAdapter({ builtin: chain, send: async () => [] })
+  const sc = a.selfCheck()
+  assert.equal(sc.ok, true, '契约问题：' + sc.problems.join('; '))
+})
+
+test('prepareCall 返回 { model, stream }', async () => {
+  const a = createAdapter({ builtin: chain, send: async () => [] })
+  const pc = await a.prepareCall('cs-myfree', 'm1')
+  assert.equal(pc.model.id, 'm1')
+  assert.equal(typeof pc.stream, 'function')
 })
 
 test('第一个候选成功则不再尝试后面的', async () => {

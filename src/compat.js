@@ -98,13 +98,29 @@ export function safeProvide(ctx, key, value) {
   } catch { return false }
 }
 
-/** 安全地注册 adapter（宿主没有 registerAdapter 就跳过） */
-export function safeRegisterAdapter(llm, id, adapter) {
+/**
+ * 安全地注册 adapter。
+ *
+ * 🔴 关键：宿主签名是 `registerAdapter(providers: string[], adapter)` ——
+ *    **第一参数必须是数组**。曾经传字符串导致注册必然失败且被静默吞掉，
+ *    表现为「插件装了但模型选择器里没有它」。
+ *
+ * @param {object} llm 宿主 llm 服务
+ * @param {string|string[]} providers provider id 或数组
+ * @param {object} adapter
+ * @returns {{ok:boolean, error?:string}}
+ */
+export function safeRegisterAdapter(llm, providers, adapter) {
   try {
-    if (!has(llm, 'registerAdapter')) return false
-    llm.registerAdapter(id, adapter)
-    return true
-  } catch { return false }
+    if (!has(llm, 'registerAdapter')) return { ok: false, error: '宿主无 registerAdapter' }
+    const list = Array.isArray(providers) ? providers : [providers]
+    if (list.length === 0) return { ok: false, error: 'providers 为空' }
+    llm.registerAdapter(list, adapter)
+    return { ok: true }
+  } catch (err) {
+    // ⚠️ 不吞掉原因：调用方需要把它显示给用户
+    return { ok: false, error: String(err?.message ?? err).slice(0, 300) }
+  }
 }
 
 /** 安全地注册搜索 provider */

@@ -20,6 +20,7 @@ window.__ModuleLoader__.load({
     const CASH_PATH = '/cs-myfree/cash'
 
     const ZONES = [
+      { id: 'W0', key: 'overview', label: '总览' },
       { id: 'W1', key: 'sources', label: '供给源' },
       { id: 'W2', key: 'catalog', label: '模型目录' },
       { id: 'W3', key: 'chain', label: '降级链 ★' },
@@ -188,12 +189,119 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ── W0 总览 ──
+    function OverviewZone() {
+      const [st, reload] = useApi('/state')
+      const [ch, reloadCh] = useApi('/channels')
+      const d = st.data
+      const c = ch.data
+
+      const chainLen = d && d.chain ? d.chain.effectiveCount : null
+      const chTotal = c ? c.total : null
+      const chLogged = c ? (c.channels || []).filter((x) => x.loggedIn).length : null
+      const keylessOk = d && d.probe ? d.probe.okCount + '/' + d.sources.counts.keyless : '未探测'
+
+      const status = (ok, label, detail) => h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid rgba(128,128,128,0.12)' } },
+        h('span', null, (ok === true ? '✅ ' : ok === false ? '❌ ' : '⏸ ') + label),
+        h('span', { style: S.dim }, detail))
+
+      return h('div', null,
+        h(CashCard),
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '一眼看懂当前状态'),
+          status(chainLen > 0, '降级链', chainLen === null ? '加载中' : (chainLen + ' 条候选' + (chainLen === 0 ? '（空 ⇒ 必失败）' : ''))),
+          status(keylessOk !== '未探测' && d && d.probe && d.probe.anyOk, '免密源', keylessOk),
+          status(chLogged > 0, '渠道账号', chTotal === null ? '加载中' : (chLogged + '/' + chTotal + ' 家已登录')),
+          status(null, 'DeepSeek 余额', '见上方卡片'),
+          status(null, '付费闸门', '默认全关（不会自动花钱）')),
+
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '现在能用什么'),
+          h('div', { style: S.dim },
+            '· 免费模型：3 个免密源（Kilo / OVH / Pollinations），**不需要任何账号**'),
+          h('div', { style: S.dim },
+            '· 你自己的账号：到「供给源」页点对应渠道的「登录」按钮'),
+          h('div', { style: S.dim },
+            '· 凭证只存本机 ~/.dsh/cs-myfree/accounts.json（0600），不上传')),
+
+        h('div', { style: { display: 'flex', gap: '8px', marginTop: '10px' } },
+          h('button', { style: S.btn(false), onClick: () => { reload(); reloadCh() } }, '刷新')),
+      )
+    }
+
+    // ── 渠道登录卡片 ──
+    function ChannelLogin(props) {
+      const ch = props.channel
+      const [open, setOpen] = react.useState(false)
+      const [val, setVal] = react.useState('')
+      const [msg, setMsg] = react.useState(null)
+      const [busy, setBusy] = react.useState(false)
+
+      const save = () => {
+        if (!val.trim()) { setMsg({ ok: false, error: '请先填入凭证' }); return }
+        setBusy(true); setMsg(null)
+        api('/channels/save', { method: 'POST', body: JSON.stringify({ provider: ch.id, credential: val.trim() }) })
+          .then((r) => {
+            setMsg(r.ok ? { ok: true, text: r.hint } : { ok: false, error: r.error })
+            if (r.ok) { setVal(''); props.onChanged && props.onChanged() }
+          })
+          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => setBusy(false))
+      }
+      const del = (id) => {
+        api('/channels/remove', { method: 'POST', body: JSON.stringify({ id }) })
+          .then(() => props.onChanged && props.onChanged())
+          .catch(() => {})
+      }
+
+      const accs = ch.accounts || []
+
+      return h('div', { style: Object.assign({}, S.card, { marginBottom: '8px' }) },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+          h('div', null,
+            h('span', { style: { fontWeight: 600 } }, ch.label),
+            ch.loggedIn ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.good) }, '已登录 ' + accs.length) : null,
+            ch.checkin ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) }, '· 可签到') : null,
+            ch.proxyRequired ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.warn) }, '· 需代理') : null),
+          h('div', { style: { display: 'flex', gap: '6px' } },
+            ch.loginUrl ? h('a', {
+              href: ch.loginUrl, target: '_blank', rel: 'noreferrer',
+              style: Object.assign({}, S.btn(false), { textDecoration: 'none', color: 'inherit' }),
+            }, '打开登录页') : null,
+            h('span', { style: S.btn(ch.loggedIn ? false : true), onClick: () => setOpen(!open) },
+              open ? '收起' : (ch.loggedIn ? '再登一个' : '登录')))),
+
+        accs.map((a) => h('div', { key: a.id, style: Object.assign({}, S.row, { marginTop: '6px' }) },
+          h('span', null, a.label + ' ' + (a.masked || '')),
+          h('span', { style: Object.assign({ cursor: 'pointer' }, S.dim, S.bad), onClick: () => del(a.id) }, '删除'))),
+
+        open ? h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '4px' } }, ch.guideTitle),
+          h('ol', { style: Object.assign({ margin: '0 0 8px 18px', padding: 0 }, S.dim) },
+            (ch.guideSteps || []).map((s, i) => h('li', { key: i, style: { marginBottom: '2px' } }, s))),
+          ch.note ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim, S.warn) }, '注意：' + ch.note) : null,
+          h('input', {
+            style: S.input, value: val, placeholder: '粘贴' + (ch.field || '凭证') + '…',
+            onChange: (e) => setVal(e.target.value),
+          }),
+          h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
+            h('button', { style: S.btn(true), onClick: save, disabled: busy }, busy ? '保存中…' : '保存凭证'),
+            h('button', { style: S.btn(false), onClick: () => { setVal(''); setMsg(null); setOpen(false) } }, '取消')),
+          h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
+            '🔒 凭证只存本机 ~/.dsh/cs-myfree/accounts.json（权限 0600），不上传任何服务器。'),
+          msg ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, msg.ok ? S.good : S.bad) },
+            (msg.ok ? '✅ ' : '❌ ') + (msg.text || msg.error)) : null) : null,
+      )
+    }
+
     // ── W1 供给源 ──
     function SourcesZone() {
       const [s, reload] = useApi('/state')
+      const [cs, reloadCh] = useApi('/channels')
       const [probing, setProbing] = react.useState(false)
       const [probe, setProbe] = react.useState(null)
       const d = s.data
+      const chData = cs.data
 
       const runProbe = () => {
         setProbing(true)
@@ -224,11 +332,13 @@ window.__ModuleLoader__.load({
           h('div', { style: S.dim }, k.note || '')))),
 
         h('div', { style: { fontWeight: 600, margin: '16px 0 8px' } },
-          '账号渠道（' + d.sources.counts.channels + ' 家，' +
-          d.sources.counts.checkin + ' 家可签到，' + d.sources.counts.manualRefresh + ' 家需人工重登）'),
-        h('div', null, (d.sources.channels || []).map((c) => h('div', { key: c.id, style: S.row },
-          h('span', null, c.label + (c.note ? h('span', { style: Object.assign({ marginLeft: '6px' }, S.dim) }, '（' + c.note + '）') : '')),
-          h('span', { style: S.dim }, (c.checkin ? '签到 ' : '') + c.refresh)))),
+          '账号渠道（' + (chData ? chData.total : d.sources.counts.channels) + ' 家 · 点「登录」用你自己的账号）'),
+        h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
+          '每个渠道都可以登录多个账号。凭证只存本机，不上传。'),
+        (chData && chData.channels ? chData.channels : []).map((c) => h(ChannelLogin, {
+          key: c.id, channel: c, onChanged: reloadCh,
+        })),
+        !chData ? h('div', { style: S.dim }, '渠道列表加载中…（若一直不出现，看「诊断」页）') : null,
       )
     }
 
@@ -520,12 +630,69 @@ window.__ModuleLoader__.load({
 
     // ── W11 作用域 ──
     function ScopeZone() {
-      return h('div', { style: S.card },
-        h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '作用域'),
-        h(KV, { k: '当前', v: '全局（写入 ~/.dsh/cs-myfree/）' }),
-        h(KV, { k: '会话级 / 预设级', v: '后续版本' }),
-        h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
-          '全局配置对所有会话生效。会话级覆盖会让同一台机器上不同会话用不同链。'))
+      const [s, reload] = useApi('/scope')
+      const [msg, setMsg] = react.useState(null)
+      const [busy, setBusy] = react.useState(false)
+      const [scope, setScope] = react.useState('global')
+      const [id, setId] = react.useState('')
+      const [json, setJson] = react.useState('')
+
+      if (s.error) return h('div', null, h(Err, { error: s.error }), h('button', { style: S.btn(false), onClick: reload }, '重试'))
+
+      const d = s.data || {}
+
+      const save = () => {
+        let cfg
+        try { cfg = json.trim() ? JSON.parse(json) : {} } catch (e) { setMsg({ ok: false, error: 'JSON 格式错误：' + e.message }); return }
+        setBusy(true); setMsg(null)
+        api('/scope', { method: 'POST', body: JSON.stringify({ scope, id: id || undefined, config: cfg }) })
+          .then((r) => { setMsg(r.ok ? { ok: true, text: r.hint } : { ok: false, error: r.error }); reload() })
+          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => setBusy(false))
+      }
+
+      return h('div', null,
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '生效配置来源'),
+          h(KV, { k: '全局层', v: (d.effective ? d.effective.layers.global : 0) + ' 项' }),
+          h(KV, { k: '预设层', v: (d.effective ? d.effective.layers.preset : 0) + ' 项' }),
+          h(KV, { k: '会话层', v: (d.effective ? d.effective.layers.session : 0) + ' 项' }),
+          h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) }, d.hint || '优先级：会话 > 预设 > 全局')),
+
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '8px' } }, '写入某个作用域'),
+          h('div', { style: { display: 'flex', gap: '8px', marginBottom: '8px' } },
+            h('select', {
+              style: Object.assign({}, S.input, { width: '140px' }),
+              value: scope, onChange: (e) => setScope(e.target.value),
+            },
+              h('option', { value: 'global' }, '全局'),
+              h('option', { value: 'preset' }, '预设'),
+              h('option', { value: 'session' }, '会话')),
+            scope !== 'global'
+              ? h('input', {
+                  style: S.input, value: id, placeholder: scope === 'preset' ? 'presetId' : 'sessionId',
+                  onChange: (e) => setId(e.target.value),
+                })
+              : h('span', { style: Object.assign({}, S.dim, { alignSelf: 'center' }) }, '（全局对所有会话生效）')),
+          h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) }, '要写入的配置（JSON，会与该层现有值合并）：'),
+          h('textarea', {
+            style: Object.assign({}, S.input, { height: '100px', fontFamily: 'ui-monospace, monospace' }),
+            value: json, placeholder: '{"budget":{"perCallCNY":2}}',
+            onChange: (e) => setJson(e.target.value),
+          }),
+          h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
+            h('button', { style: S.btn(true), onClick: save, disabled: busy }, busy ? '保存中…' : '写入'),
+            h('button', { style: S.btn(false), onClick: reload }, '刷新')),
+          msg ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, msg.ok ? S.good : S.bad) },
+            (msg.ok ? '✅ ' : '❌ ') + (msg.text || msg.error)) : null),
+
+        (d.files || []).length ? h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '已存在的作用域文件'),
+          d.files.map((f) => h('div', { key: f.name, style: S.row },
+            h('span', { style: S.mono }, f.name),
+            h('span', { style: S.dim }, f.scope)))) : null,
+      )
     }
 
     // ── W12 诊断 ──
@@ -552,6 +719,7 @@ window.__ModuleLoader__.load({
     }
 
     const ZONE_VIEWS = {
+      overview: OverviewZone,
       sources: SourcesZone, catalog: CatalogZone, chain: ChainZone, pin: PinZone,
       health: HealthZone, policy: PolicyZone, budget: BudgetZone, saver: SaverZone,
       observe: ObserveZone, io: IoZone, scope: ScopeZone, diag: DiagZone,
@@ -559,7 +727,7 @@ window.__ModuleLoader__.load({
 
     // ── 主设置页（含 Tab）──
     function MyfreeSection() {
-      const [tab, setTab] = react.useState('sources')
+      const [tab, setTab] = react.useState('overview')
       const View = ZONE_VIEWS[tab] || SourcesZone
       return h('div', { style: S.root },
         h('div', { style: S.h2 }, 'Myfree'),

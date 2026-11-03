@@ -110,6 +110,7 @@ test('组件能渲染出 12 个区', () => {
   mod.apply(ctx)
   const tree = captured[0]()
   const json = JSON.stringify(tree, (k, v) => (typeof v === 'function' ? '[fn]' : v))
+  assert.ok(json.includes('总览'), '缺少总览标签')
   for (let i = 1; i <= 12; i++) assert.ok(json.includes(`W${i}`), `缺少 W${i}`)
 })
 
@@ -134,14 +135,15 @@ test('apply 在 register 抛错时也不抛（防白屏）', () => {
   }))
 })
 
-test('导出的 ZONES 必须是 12 个（主管要求的 12 区）', () => {
+test('ZONES 必须含 W0 总览 + W1..W12（共 13 区）', () => {
   const { decl } = loadClient('src/client.js')
   const mod = decl.factory((id) => {
     if (id === 'react') return fakeReact
     throw new Error('unexpected ' + id)
   })
-  assert.equal(mod.ZONES.length, 12)
+  assert.equal(mod.ZONES.length, 13, '总览 + 12 功能区')
   const ids = mod.ZONES.map((z) => z.id)
+  assert.ok(ids.includes('W0'), '缺少总览 W0')
   for (let i = 1; i <= 12; i++) assert.ok(ids.includes('W' + i), '缺少 W' + i)
 })
 
