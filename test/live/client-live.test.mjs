@@ -127,7 +127,8 @@ liveTest('GET /channels/models：模型 id 带渠道前缀；新版本应回传�
   const by = d.byChannel || {}
   const ALLOWED = new Set(['remote', 'builtin', 'builtin-after-http-error', 'builtin-empty-remote', 'none'])
   for (const [id, v] of Object.entries(by)) {
-    if ('source' in v) assert.ok(ALLOWED.has(v.source), `${id}.source 非法：${v.source}`)
+    // 旧缓存里 source 可能是 null（老版本写入），新版本应回传合法枚举
+    if ('source' in v && v.source != null) assert.ok(ALLOWED.has(v.source), `${id}.source 非法：${v.source}`)
   }
   // 有模型的渠道必须 ok
   for (const [id, v] of Object.entries(by)) {

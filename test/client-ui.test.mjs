@@ -204,6 +204,32 @@ const FIX = {
   },
 }
 
+// 登录 flow 映射（与 src/pools/channels/login/flow-map.js 对齐；codearts 已真机验证）
+const FLOW_OF = {
+  codearts: 'browser', buddy: 'browser', workbuddy: 'browser', lobsterai: 'browser',
+  trae: 'browser', accio: 'browser', gemini: 'browser', officeace: 'browser',
+  qoder: 'device', qodercn: 'device', cline: 'device', minimax: 'device',
+  minimaxintl: 'device', zcode: 'device',
+  loomy: 'qr', raccoon: 'qr',
+  qiniu: 'paste', opencode: 'paste',
+}
+FIX.loginStatus = {
+  ok: true,
+  total: 18,
+  verified: ['codearts'],
+  unverified: Object.keys(FLOW_OF).filter((id) => id !== 'codearts'),
+  channels: FIX.channels.channels.map((c) => ({
+    id: c.id,
+    provider: c.id,
+    label: c.label,
+    flow: FLOW_OF[c.id] || 'paste',
+    loginVerified: c.id === 'codearts',
+    note: c.id === 'codearts' ? 'AK/SK 永久授权，已真机验证' : (c.label + '：登录端点待取证'),
+    refreshable: c.id !== 'loomy',
+  })),
+  note: 'loginVerified=false 表示登录器端点未真机验证，UI 必须显示「未验证」徽标',
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 迷你 React：够 render/click/input/paste/tab/卸载
 // ─────────────────────────────────────────────────────────────────────────────
@@ -469,6 +495,12 @@ function makeBackend(overrides = {}) {
     channels: clone(FIX.channels.channels),
     channelModels: clone(FIX.channelsModels),
     probe: clone(FIX.state.probe),
+    loginSessions: {},
+    pollCountdown: 2,          // 前 N-1 次 poll 返回 waiting，第 N 次 ok
+    loginStartFails: {},       // provider -> error 字符串（模拟端点未取证）
+    loginTestFails: {},        // key -> error 字符串
+    loginRefreshFails: {},     // key -> error 字符串
+    bulkDelayOk: true,
     scopeFiles: [],
     legacyRejectColon: false, // true ⇒ 模拟旧后端 capture 拒绝 AK:SK
     fail: {},
@@ -502,6 +534,17 @@ function makeBackend(overrides = {}) {
             effective: { config: {}, layers: { global: Object.keys(db.runtimeConfig).length, preset: 0, session: 0 }, ids: {} },
             hint: FIX.scope.hint,
           },
+        }
+        case '/cs-myfree/login/status': return { body: clone(FIX.loginStatus) }
+        case '/cs-myfree/login/poll': {
+          const sid = new URL('http://x' + url).searchParams.get('sessionId')
+          const s2 = db.loginSessions[sid]
+          if (!s2) return { body: { ok: false, state: 'error', error: '会话不存在或已过期', hint: '', maskedAccount: null } }
+          s2.polls = (s2.polls || 0) + 1
+          if (s2.polls < db.pollCountdown) return { body: { ok: false, state: 'waiting', hint: '等待你在浏览器完成授权…', maskedAccount: null, error: null } }
+          s2.state = 'ok'
+          s2.maskedAccount = s2.maskedAccount || 'HPUA…7NLO'
+          return { body: { ok: true, state: 'ok', hint: '已收到授权，正在换取凭证…', maskedAccount: s2.maskedAccount, error: null } }
         }
         case '/cs-myfree/ledger': return { body: clone(FIX.ledger) }
         case '/cs-myfree/cash': return { body: FIX.cash }
@@ -577,6 +620,45 @@ function makeBackend(overrides = {}) {
       }
       case '/cs-myfree/channels/models':
         return { body: { ok: true, refreshed: 1, total: db.channelModels.total, models: db.channelModels.models } }
+      case '/cs-myfree/login/start': {
+        const provider = String(req.body?.provider || '')
+        const st = FIX.loginStatus.channels.find((x) => x.id === provider) || {}
+        if (db.loginStartFails[provider]) return { body: { ok: false, error: db.loginStartFails[provider] } }
+        const sessionId = 'sess-' + provider + '-' + Math.random().toString(36).slice(2, 6)
+        const flow = st.flow || 'paste'
+        const initial = { ok: true, sessionId, flow, interval: 2, instructions: ['按提示完成授权', '回到本页等待'],
+          loginVerified: st.loginVerified, loginNote: st.note, callbackUrl: 'http://150.158.175.241/cs-myfree/login/callback' }
+        if (flow === 'browser') initial.url = 'https://example.com/oauth/authorize?client_id=demo&state=xyz'
+        if (flow === 'device') { initial.userCode = 'ABCD-1234'; initial.verificationUri = 'https://example.com/device' }
+        if (flow === 'qr') { initial.qr = 'loomy://qr/abc123'; initial.shortLink = 'https://example.com/s/abc123' }
+        db.loginSessions[sessionId] = { provider, flow, polls: 0, state: 'waiting' }
+        return { body: initial }
+      }
+      case '/cs-myfree/login/cancel': {
+        const sid = req.body?.sessionId
+        if (db.loginSessions[sid]) delete db.loginSessions[sid]
+        return { body: { ok: true, cancelled: true, sessionId: sid, hint: '已取消（会话即销毁）' } }
+      }
+      case '/cs-myfree/login/test': {
+        const b = req.body || {}
+        const key = b.id || b.provider
+        if (db.loginTestFails[key]) return { body: { ok: false, provider: b.provider || null, model: null, ms: 3, error: db.loginTestFails[key], kind: 'AUTH' } }
+        return { body: { ok: true, provider: b.provider || key, model: 'deepseek-v4-pro', ms: 123, at: Date.now(), hint: '上游返回了 choice，链路通' } }
+      }
+      case '/cs-myfree/login/refresh': {
+        const b = req.body || {}
+        const key = b.id || b.provider
+        if (db.loginRefreshFails[key]) return { body: { ok: false, provider: b.provider || null, error: db.loginRefreshFails[key], reloginRequired: true } }
+        return { body: { ok: true, provider: b.provider || key, note: '已续期', maskedAccount: 'HPUA…7NLO', expiresAt: Date.now() + 3600_000 } }
+      }
+      case '/cs-myfree/accounts/remove': {
+        const id = req.body?.id
+        for (const ch2 of db.channels) {
+          const idx = (ch2.accounts || []).findIndex((a) => a.id === id)
+          if (idx >= 0) { ch2.accounts.splice(idx, 1); ch2.loggedIn = ch2.accounts.length > 0; return { body: { ok: true, id, remaining: db.channels.reduce((n, x) => n + (x.accounts || []).length, 0) } } }
+        }
+        return { body: { ok: false, error: '账号不存在' } }
+      }
       case '/cs-myfree/probe': {
         db.probe = { at: Date.now(), results: [{ id: 'kilo', ok: true, ms: 100, sample: 'pong' }, { id: 'ovh', ok: false, ms: 20000, error: 'timeout' }], anyOk: true, okCount: 1 }
         return { body: { ok: true, ...db.probe } }
@@ -588,9 +670,19 @@ function makeBackend(overrides = {}) {
   return { db, backend }
 }
 
+async function waitFor(c, pred, { timeout = 9000, label = '' } = {}) {
+  const start = Date.now()
+  while (Date.now() - start < timeout) {
+    await c.flush()
+    if (pred()) return true
+    await sleep(60)
+  }
+  throw new Error('等待超时' + (label ? '：' + label : '') + '\n实际：' + c.text().slice(-900))
+}
+
 const PANELS = [
   { tab: '总览', must: ['一眼看懂当前状态', '2 条候选', '1/18 家已登录', '免密源 3 个（Kilo 免费池 / OVH 免费视觉 / Pollinations）', '默认降级链 2 条：kilo → ovh', '默认全关（不会自动花钱）'] },
-  { tab: '供给源', must: ['探测免密源', '免密源（无需登录）', '账号渠道（18 家', '✅ 已登录 2', '需代理', '去官网'] },
+  { tab: '供给源', must: ['探测免密源', '全部测试', '全部续期', '免密源（无需登录）', '账号渠道（18 家 · 已登录 1 家', '已验证', '未验证', '需代理', '去官网', '一键登录'] },
   { tab: '模型目录', must: ['免密源默认模型', 'kilo-auto/free', 'Qwen3.5-397B-A17B', '✅ 860ms', '❌ timeout', '已登录渠道的模型（4 个）', 'codearts · 4 个', 'codearts/deepseek-v4.1-flash', '来源：内置清单', 'text 输入模态'] },
   { tab: '降级链 ★', must: ['内置链2 条', '覆盖层1 条', '生效链2 条', '生效链来源', '内置 2 + 覆盖 1 ⇒ 合并 2 条', '+ 加一条', '保存覆盖层', '清空草稿', '页面这份链 = 运行时实际选路'] },
   { tab: '钉选', must: ['生效链里 tier 最小的就是当前首选', '★ kilo / kilo-auto/free', 'ovh / Qwen3.5-397B-A17B'] },
@@ -632,7 +724,7 @@ for (const p of PANELS) {
 test('每个面板的按钮/开关都注册了回调（不走纯文本假按钮）', async () => {
   const expectButtons = {
     '总览': ['刷新'],
-    '供给源': ['探测免密源', '再加一个', '登录'],
+    '供给源': ['探测免密源', '全部测试', '全部续期', '再加一个', '一键登录'],
     '模型目录': ['刷新', '重新拉取渠道模型'],
     '降级链 ★': ['+ 加一条', '保存覆盖层', '清空草稿'],
     '钉选': [],
@@ -769,47 +861,30 @@ test('余额 chip：显示金额、点击刷新、失败不吹牛', async () => 
 // ─────────────────────────────────────────────────────────────────────────────
 // ② 真人流程 1-8
 // ─────────────────────────────────────────────────────────────────────────────
-test('流程① 登录渠道：登录指引可见 → AK/SK 可保存 → 账号数与模型目录立刻更新', async () => {
+test('流程① 渠道一键登录：browser 向导 → 自动轮询 → 成功显示掩码 → 立即测试连通', async () => {
   const be = makeBackend()
   const c = await mount({ backend: be.backend })
   try {
     await c.start()
     await c.openTab('供给源')
+    // codearts 已登录 ⇒ 头部按钮是「再加一个」
     await c.click('再加一个')
-    assert.ok(c.text().includes('登录指引：浏览器授权登录'), '必须展示后端 guideTitle')
-    assert.ok(c.text().includes('需要粘贴：授权码 / code'), '必须展示后端 field')
-    assert.ok(c.text().includes('1. 点下面「打开登录页」按钮'), '必须展示后端 guideSteps')
+    // 点击即调 /login/start（browser flow），并自动开始轮询
+    const startReq = be.db.log.find((x) => x.url === '/cs-myfree/login/start')
+    assert.ok(startReq, '点一键登录应调用 /login/start')
+    await waitFor(c, () => c.text().includes('等待你在浏览器'), { label: '等待授权状态' })
+    assert.ok(c.text().includes('打开登录页'), 'browser 流必须有「打开登录页」按钮：' + c.text().slice(-600))
 
-    const saveBtn = () => c.exactText('保存').find((n) => typeof n.props.onClick === 'function')
-    assert.equal(saveBtn().props.disabled, true, '没填凭证时保存必须禁用')
+    // 轮询到 ok
+    await waitFor(c, () => c.text().includes('✅ 登录成功'), { label: '轮询成功' })
+    assert.ok(c.text().includes('HPUA'), '成功后必须显示掩码账号（不能是凭据原文）')
+    assert.ok(c.text().includes('立即测试连通'), '成功后应出现「立即测试连通」')
 
-    const fill = async (ak, sk) => {
-      await c.change(c.nodes().find((n) => n.type === 'input' && /AK/.test(n.props.placeholder || '')), ak)
-      await c.change(c.nodes().find((n) => n.type === 'input' && /SK/.test(n.props.placeholder || '')), sk)
-    }
-    await fill('AKID1234567890', 'SKsecret0987654321')
-    assert.equal(saveBtn().props.disabled, false, '填齐后保存应可用')
-    await c.click(saveBtn())
-    assert.ok(c.text().includes('✅ 已保存，正在拉取可用模型'), '保存成功要显示后端 hint：' + c.text().slice(-400))
-    assert.ok(c.text().includes('✅ 已登录 3'), '账号数应刷新为 3：' + c.text().slice(-600))
-
-    // 旧后端会拒绝 AK:SK —— UI 必须诚实报错并给替代方案
-    be.db.legacyRejectColon = true
-    await fill('AKID1234567890', 'SKsecret0987654321')
-    await c.click(saveBtn())
-    assert.ok(c.text().includes('这不像一个有效令牌'), c.text().slice(-400))
-    assert.ok(c.text().includes('粘贴令牌'), '应给可执行的替代方案')
-    be.db.legacyRejectColon = false
-
-    // 粘贴回调链接 → 自动识别 → 自动保存
-    await c.click('粘贴令牌 · 一步')
-    await c.paste(c.nodes().find((n) => n.type === 'input' && /粘贴/.test(n.props.placeholder || '')), 'https://x.com/cb?code=abc123def456ghi789')
-    assert.ok(c.text().includes('✅ 已保存，正在拉取可用模型'), c.text().slice(-500))
-    assert.ok(c.text().includes('✅ 已登录 4'), '再次保存后账号数应为 4')
-
-    await c.openTab('模型目录')
-    assert.ok(c.text().includes('codearts/deepseek-v4.1-flash-new'), '登录后新模型必须立刻出现在模型目录')
-    assert.ok(c.text().includes('codearts · 5 个'), '渠道模型计数应刷新：' + c.text().slice(-800))
+    await c.click('立即测试连通')
+    await waitFor(c, () => /连通 \d+ms/.test(c.text()), { label: '测试连通结果' })
+    const testReq = be.db.log.find((x) => x.url === '/cs-myfree/login/test')
+    assert.ok(testReq, '应调用 /login/test')
+    assert.equal('credential' in (testReq.body || {}), false, '测试请求不允许带凭据原文')
   } finally { c.unmount() }
 })
 

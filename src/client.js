@@ -20,6 +20,316 @@ window.__ModuleLoader__.load({
     const API = '/cs-myfree'
     const CASH_PATH = '/cs-myfree/cash'
 
+    // ── 极简二维码编码器（byte 模式 / 纠错 M / 版本 1-10 / 零依赖）──
+    //
+    // 为什么内联：零第三方依赖红线，而扫码登录必须显示**可扫的二维码**。
+    // 实现与 Python qrcode 参考实现逐模块对比过（4 组文本 × 8 个 mask 全一致），
+    // 见 test/client-login.test.mjs 的固定快照用例。
+    const QR_RS = {
+      1: [[26, 16]],
+      2: [[44, 28]],
+      3: [[70, 44]],
+      4: [[50, 32], [50, 32]],
+      5: [[67, 43], [67, 43]],
+      6: [[43, 27], [43, 27], [43, 27], [43, 27]],
+      7: [[49, 31], [49, 31], [49, 31], [49, 31]],
+      8: [[60, 38], [60, 38], [61, 39], [61, 39]],
+      9: [[58, 36], [58, 36], [58, 36], [59, 37], [59, 37]],
+      10: [[69, 43], [69, 43], [69, 43], [69, 43], [70, 44]],
+    }
+    const QR_ALIGN = { 1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34], 7: [6, 22, 38], 8: [6, 24, 42], 9: [6, 26, 46], 10: [6, 28, 50] }
+
+    const QR_EXP = new Array(512)
+    const QR_LOG = new Array(256)
+    ;(() => {
+      let x = 1
+      for (let i = 0; i < 255; i++) {
+        QR_EXP[i] = x
+        QR_LOG[x] = i
+        x <<= 1
+        if (x & 0x100) x ^= 0x11d
+      }
+      for (let i = 255; i < 512; i++) QR_EXP[i] = QR_EXP[i - 255]
+    })()
+
+    function gfMul(a, b) {
+      if (a === 0 || b === 0) return 0
+      return QR_EXP[QR_LOG[a] + QR_LOG[b]]
+    }
+
+    function rsPoly(n) {
+      let poly = [1]
+      for (let i = 0; i < n; i++) {
+        const next = new Array(poly.length + 1).fill(0)
+        for (let j = 0; j < poly.length; j++) {
+          next[j] ^= poly[j]
+          next[j + 1] ^= gfMul(poly[j], QR_EXP[i])
+        }
+        poly = next
+      }
+      return poly
+    }
+
+    function rsEcc(data, ecLen) {
+      const gen = rsPoly(ecLen)
+      const rem = new Array(ecLen).fill(0)
+      for (const d of data) {
+        const factor = d ^ rem[0]
+        rem.shift(); rem.push(0)
+        if (factor !== 0) for (let i = 0; i < ecLen; i++) rem[i] ^= gfMul(gen[i + 1], factor)
+      }
+      return rem
+    }
+
+    function utf8Bytes(str) {
+      if (typeof TextEncoder !== 'undefined') return Array.from(new TextEncoder().encode(str))
+      const out = []
+      for (const ch of String(str)) {
+        let c = ch.codePointAt(0)
+        if (c < 0x80) out.push(c)
+        else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f))
+        else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f))
+        else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f))
+      }
+      return out
+    }
+
+    function dataCodewords(version) {
+      return QR_RS[version].reduce((n, b) => n + b[1], 0)
+    }
+
+    function pushBits(bits, value, len) {
+      for (let i = len - 1; i >= 0; i--) bits.push((value >>> i) & 1)
+    }
+
+    function pickVersion(text) {
+      const len = utf8Bytes(text).length
+      for (let v = 1; v <= 10; v++) {
+        const header = 4 + (v >= 10 ? 16 : 8)
+        const bits = header + len * 8
+        if (bits <= dataCodewords(v) * 8) return v
+      }
+      throw new Error('二维码内容过长（超过版本 10 容量）')
+    }
+
+    function encodeBytes(text, version) {
+      const bytes = utf8Bytes(text)
+      const total = dataCodewords(version)
+      const bits = []
+      pushBits(bits, 0b0100, 4)
+      pushBits(bits, bytes.length, version >= 10 ? 16 : 8)
+      for (const b of bytes) pushBits(bits, b, 8)
+      if (bits.length > total * 8) throw new Error('容量不足')
+      pushBits(bits, 0, Math.min(4, total * 8 - bits.length))
+      while (bits.length % 8) bits.push(0)
+      const data = []
+      for (let i = 0; i < bits.length; i += 8) {
+        let v = 0
+        for (let j = 0; j < 8; j++) v = (v << 1) | bits[i + j]
+        data.push(v)
+      }
+      const pad = [0xec, 0x11]
+      let k = 0
+      while (data.length < total) data.push(pad[k++ % 2])
+      return data
+    }
+
+    function makeCodewords(data, version) {
+      const blocks = QR_RS[version]
+      const dataBytes = []
+      const eccBytes = []
+      let offset = 0
+      for (const [total, dlen] of blocks) {
+        const chunk = data.slice(offset, offset + dlen)
+        offset += dlen
+        dataBytes.push(chunk)
+        eccBytes.push(rsEcc(chunk, total - dlen))
+      }
+      const out = []
+      const maxD = Math.max(...dataBytes.map((b) => b.length))
+      for (let i = 0; i < maxD; i++) for (const b of dataBytes) if (i < b.length) out.push(b[i])
+      const maxE = Math.max(...eccBytes.map((b) => b.length))
+      for (let i = 0; i < maxE; i++) for (const b of eccBytes) if (i < b.length) out.push(b[i])
+      return out
+    }
+
+    function bchDigit(data) {
+      let digit = 0
+      while (data !== 0) { digit++; data >>>= 1 }
+      return digit
+    }
+    const G15 = 0x537
+    const G18 = 0x1f25
+    const G15_MASK = 0x5412
+    function bchTypeInfo(data) {
+      let d = data << 10
+      while (bchDigit(d) - bchDigit(G15) >= 0) d ^= G15 << (bchDigit(d) - bchDigit(G15))
+      return ((data << 10) | d) ^ G15_MASK
+    }
+    function bchTypeNumber(data) {
+      let d = data << 12
+      while (bchDigit(d) - bchDigit(G18) >= 0) d ^= G18 << (bchDigit(d) - bchDigit(G18))
+      return (data << 12) | d
+    }
+    function maskFn(pattern, i, j) {
+      switch (pattern) {
+        case 0: return (i + j) % 2 === 0
+        case 1: return i % 2 === 0
+        case 2: return j % 3 === 0
+        case 3: return (i + j) % 3 === 0
+        case 4: return (Math.floor(i / 2) + Math.floor(j / 3)) % 2 === 0
+        case 5: return (i * j) % 2 + (i * j) % 3 === 0
+        case 6: return ((i * j) % 2 + (i * j) % 3) % 2 === 0
+        case 7: return ((i * j) % 3 + (i + j) % 2) % 2 === 0
+        default: return false
+      }
+    }
+
+    function buildMatrix(version, codewords, mask) {
+      const size = version * 4 + 17
+      const m = Array.from({ length: size }, () => new Array(size).fill(null))
+
+      const finder = (row, col) => {
+        for (let r = -1; r <= 7; r++) {
+          for (let c = -1; c <= 7; c++) {
+            const rr = row + r
+            const cc = col + c
+            if (rr < 0 || rr >= size || cc < 0 || cc >= size) continue
+            m[rr][cc] = (r >= 0 && r <= 6 && (c === 0 || c === 6)) ||
+              (c >= 0 && c <= 6 && (r === 0 || r === 6)) ||
+              (r >= 2 && r <= 4 && c >= 2 && c <= 4)
+          }
+        }
+      }
+      finder(0, 0)
+      finder(size - 7, 0)
+      finder(0, size - 7)
+
+      // timing
+      for (let r = 8; r < size - 8; r++) if (m[r][6] === null) m[r][6] = r % 2 === 0
+      for (let c = 8; c < size - 8; c++) if (m[6][c] === null) m[6][c] = c % 2 === 0
+
+      // alignment
+      const pos = QR_ALIGN[version]
+      for (const row of pos) {
+        for (const col of pos) {
+          if (m[row][col] !== null) continue
+          for (let r = -2; r <= 2; r++) {
+            for (let c = -2; c <= 2; c++) {
+              m[row + r][col + c] = r === -2 || r === 2 || c === -2 || c === 2 || (r === 0 && c === 0)
+            }
+          }
+        }
+      }
+
+      // 预留格式信息区（先填值占位，避免数据覆盖；最终再覆盖正确值）
+      const typeInfo = bchTypeInfo((0 << 3) | mask) // 0 = M
+      for (let i = 0; i < 15; i++) {
+        const mod = ((typeInfo >> i) & 1) === 1
+        if (i < 6) m[i][8] = mod
+        else if (i < 8) m[i + 1][8] = mod
+        else m[size - 15 + i][8] = mod
+      }
+      for (let i = 0; i < 15; i++) {
+        const mod = ((typeInfo >> i) & 1) === 1
+        if (i < 8) m[8][size - i - 1] = mod
+        else if (i < 9) m[8][15 - i - 1 + 1] = mod
+        else m[8][15 - i - 1] = mod
+      }
+      m[size - 8][8] = true
+      if (version >= 7) {
+        const bits = bchTypeNumber(version)
+        for (let i = 0; i < 18; i++) {
+          const mod = ((bits >> i) & 1) === 1
+          m[Math.floor(i / 3)][i % 3 + size - 8 - 3] = mod
+          m[i % 3 + size - 8 - 3][Math.floor(i / 3)] = mod
+        }
+      }
+
+      // 数据放置
+      let inc = -1
+      let row = size - 1
+      let bitIndex = 7
+      let byteIndex = 0
+      for (let col = size - 1; col > 0; col -= 2) {
+        if (col === 6) col--
+        for (;;) {
+          for (let c = 0; c < 2; c++) {
+            if (m[row][col - c] === null) {
+              let dark = false
+              if (byteIndex < codewords.length) dark = ((codewords[byteIndex] >>> bitIndex) & 1) === 1
+              if (maskFn(mask, row, col - c)) dark = !dark
+              m[row][col - c] = dark
+              bitIndex--
+              if (bitIndex === -1) { byteIndex++; bitIndex = 7 }
+            }
+          }
+          row += inc
+          if (row < 0 || row >= size) { row -= inc; inc = -inc; break }
+        }
+      }
+      return m
+    }
+
+    function penalty(m, size) {
+      let lost = 0
+      for (let row = 0; row < size; row++) {
+        for (let col = 0; col < size; col++) {
+          let same = 0
+          const dark = m[row][col]
+          for (let r = -1; r <= 1; r++) {
+            if (row + r < 0 || row + r >= size) continue
+            for (let c = -1; c <= 1; c++) {
+              if (col + c < 0 || col + c >= size) continue
+              if (r === 0 && c === 0) continue
+              if (dark === m[row + r][col + c]) same++
+            }
+          }
+          if (same > 5) lost += 3 + same - 5
+        }
+      }
+      for (let row = 0; row < size - 1; row++) {
+        for (let col = 0; col < size - 1; col++) {
+          let count = 0
+          if (m[row][col]) count++
+          if (m[row + 1][col]) count++
+          if (m[row][col + 1]) count++
+          if (m[row + 1][col + 1]) count++
+          if (count === 0 || count === 4) lost += 3
+        }
+      }
+      for (let row = 0; row < size; row++) {
+        for (let col = 0; col < size - 6; col++) {
+          if (m[row][col] && !m[row][col + 1] && m[row][col + 2] && m[row][col + 3] && m[row][col + 4] && !m[row][col + 5] && m[row][col + 6]) lost += 40
+        }
+      }
+      for (let col = 0; col < size; col++) {
+        for (let row = 0; row < size - 6; row++) {
+          if (m[row][col] && !m[row + 1][col] && m[row + 2][col] && m[row + 3][col] && m[row + 4][col] && !m[row + 5][col] && m[row + 6][col]) lost += 40
+        }
+      }
+      let darkCount = 0
+      for (let r = 0; r < size; r++) for (let c = 0; c < size; c++) if (m[r][c]) darkCount++
+      const ratio = Math.abs((100 * darkCount) / (size * size) - 50) / 5
+      lost += Math.floor(ratio) * 10
+      return lost
+    }
+
+    function qrMatrix(text, opts = {}) {
+      const version = opts.version || pickVersion(text)
+      const data = encodeBytes(text, version)
+      const codewords = makeCodewords(data, version)
+      const masks = opts.mask != null ? [opts.mask] : [0, 1, 2, 3, 4, 5, 6, 7]
+      let best = null
+      let bestScore = Infinity
+      for (const mask of masks) {
+        const m = buildMatrix(version, codewords, mask)
+        const score = penalty(m, version * 4 + 17)
+        if (score < bestScore) { bestScore = score; best = { version, size: version * 4 + 17, mask, modules: m } }
+      }
+      return best
+    }
+
     const ZONES = [
       { id: 'W0', key: 'overview', label: '总览' },
       { id: 'W1', key: 'sources', label: '供给源' },
@@ -49,6 +359,24 @@ window.__ModuleLoader__.load({
       tab: (on) => ({ cursor: 'pointer', padding: '3px 10px', borderRadius: '5px', fontSize: '12px', fontWeight: on ? 600 : 400, background: on ? 'rgba(128,128,128,0.18)' : 'transparent', border: '1px solid ' + (on ? 'rgba(128,128,128,0.4)' : 'transparent') }),
       btn: (primary) => ({ cursor: 'pointer', fontSize: '12px', padding: '3px 12px', borderRadius: '5px', border: '1px solid rgba(128,128,128,0.4)', background: primary ? 'rgba(64,160,96,0.18)' : 'transparent', color: 'inherit', fontWeight: primary ? 600 : 400 }),
       mono: { fontFamily: 'ui-monospace, monospace', fontSize: '11px' },
+      badge: (kind) => ({
+        display: 'inline-block', marginLeft: '8px', padding: '0 6px', borderRadius: '4px',
+        fontSize: '10px', lineHeight: '16px', fontWeight: 600, verticalAlign: 'middle', whiteSpace: 'nowrap',
+        background: kind === 'warn' ? 'rgba(220,160,40,0.20)' : kind === 'good' ? 'rgba(64,160,96,0.16)' : 'rgba(128,128,128,0.16)',
+        color: kind === 'warn' ? 'var(--dsw-alias-state-warn-primary)' : kind === 'good' ? 'var(--dsw-alias-state-success-primary)' : 'inherit',
+      }),
+      codeBlock: {
+        margin: '6px 0', padding: '8px', borderRadius: '6px', background: 'rgba(128,128,128,0.10)',
+        fontFamily: 'ui-monospace, monospace', fontSize: '12px', whiteSpace: 'pre-wrap',
+        wordBreak: 'break-all', maxWidth: '100%', boxSizing: 'border-box',
+      },
+      bigCode: {
+        fontSize: '20px', fontWeight: 700, letterSpacing: '1px', fontFamily: 'ui-monospace, monospace',
+        wordBreak: 'break-all', padding: '8px 10px', borderRadius: '6px',
+        background: 'rgba(64,160,96,0.10)', border: '1px dashed rgba(128,128,128,0.4)', display: 'inline-block', maxWidth: '100%', boxSizing: 'border-box',
+      },
+      skeleton: { height: '16px', borderRadius: '4px', background: 'rgba(128,128,128,0.15)', margin: '8px 0' },
+      link: { color: 'var(--dsw-alias-brand-primary)', cursor: 'pointer', textDecoration: 'underline', wordBreak: 'break-all', fontSize: '12px' },
       dim: { opacity: 0.65, fontSize: '11px' },
       good: { color: 'var(--dsw-alias-state-success-primary)' },
       warn: { color: 'var(--dsw-alias-state-warn-primary)' },
@@ -73,6 +401,34 @@ window.__ModuleLoader__.load({
     }
 
     /** 找出「提交的配置」与「运行时回读的配置」不一致的字段路径（最多 6 条） */
+    /** 复制纯文本（兼容非 https 页面：navigator.clipboard 会被浏览器禁用） */
+    function legacyCopyText(str) {
+      try {
+        const doc = typeof document !== 'undefined' ? document : null
+        if (!doc) return { ok: false, text: '复制失败：当前环境没有剪贴板 API，请手动选中文本复制' }
+        const ta = doc.createElement('textarea')
+        ta.value = str
+        doc.body.appendChild(ta)
+        ta.select()
+        const ok = doc.execCommand && doc.execCommand('copy')
+        doc.body.removeChild(ta)
+        return ok ? { ok: true, text: '✅ 已复制到剪贴板（兼容模式）' } : { ok: false, text: '复制失败：请手动选中文本复制' }
+      } catch (e) {
+        return { ok: false, text: '复制失败：' + String((e && e.message) || e) + '（请手动选中文本复制）' }
+      }
+    }
+    function copyPlainText(str) {
+      try {
+        if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+          return navigator.clipboard.writeText(str).then(
+            () => ({ ok: true, text: '✅ 已复制到剪贴板' }),
+            () => legacyCopyText(str),
+          )
+        }
+      } catch (_) { /* 走降级 */ }
+      return Promise.resolve(legacyCopyText(str))
+    }
+
     function findMismatch(sent, cur, path = '', out = []) {
       if (out.length >= 6) return out
       if (sent === null || typeof sent !== 'object') {
@@ -284,187 +640,483 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ── 渠道登录卡片（傻瓜式：优先一步，粘贴即保存）──
-    // 每家渠道的推荐登录方式（与后端 login-mode.js 保持一致）
-    const AK_SK_SET = ['qiniu','officeace','codearts','zcode','minimax','minimaxintl','accio','qoder','qodercn']
-    function recommendModeOf(ch) {
-      if (AK_SK_SET.indexOf(ch.id) >= 0) return 'aksk'
-      if (ch.login === 'paste-key' || ch.login === 'none') return 'token'
-      return 'oauth'
+    // ── 渠道登录向导（5 种 flow：browser / device / qr / paste / aksk）──
+    //
+    // 设计依据：用户投诉「点去官网拿不到授权」。
+    // 根因：把 redirect 写成 127.0.0.1（用户浏览器在另一台机器）＋ 让用户手工复制授权码。
+    // 现在：browser/device/qr 全部走后端状态机（公网回调 + 轮询），UI 只展示状态；
+    //       paste/aksk 保留一步粘贴（后端解析原始文本，前端不再持有/回显凭据原文）。
+    const FLOW_META = {
+      browser: { label: '浏览器授权', tip: '点「打开登录页」，在浏览器完成授权后会自动回来' },
+      device: { label: '设备码', tip: '打开验证页，输入设备码确认' },
+      qr: { label: '扫码登录', tip: '用手机扫码确认' },
+      paste: { label: '粘贴 API Key', tip: '官方只提供 API Key：粘贴即可（支持整段回调链接自动识别）' },
+      aksk: { label: 'AK / SK', tip: '在官网「访问密钥」创建一对，一次配置永久有效' },
+    }
+    // 轮询间隔：默认 1.5s；测试可注入 window.__CS_MYFREE_POLL_MS 加速（生产不受影响）
+    const LOGIN_POLL_MS = (typeof window !== 'undefined' && Number(window.__CS_MYFREE_POLL_MS) > 0)
+      ? Number(window.__CS_MYFREE_POLL_MS)
+      : 1500
+    const flowMeta = (flow) => FLOW_META[flow] || { label: flow || '登录', tip: '' }
+
+    /** 把 QR 内容渲染成 SVG（单个 path：v10 也只有一个 DOM 节点，窄屏不溢出） */
+    function QrCode(props) {
+      let qr = null
+      try {
+        qr = qrMatrix(String(props.text || ''))
+      } catch (e) {
+        return h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '二维码生成失败：' + String((e && e.message) || e) + '（可复制下方内容用手机打开）')
+      }
+      const size = qr.size
+      const px = Number(props.size) > 0 ? Number(props.size) : 168
+      const path = []
+      for (let r = 0; r < size; r++) {
+        for (let c = 0; c < size; c++) if (qr.modules[r][c]) path.push('M' + c + ' ' + r + 'h1v1h-1z')
+      }
+      return h('svg', {
+        width: px, height: px, viewBox: '0 0 ' + size + ' ' + size,
+        shapeRendering: 'crispEdges', role: 'img', 'aria-label': '登录二维码',
+        style: { display: 'block', background: '#fff', borderRadius: '6px', padding: '4px', maxWidth: '100%', boxSizing: 'border-box' },
+      },
+        h('rect', { width: size, height: size, fill: '#fff' }),
+        h('path', { d: path.join(''), fill: '#000' }),
+      )
     }
 
-    function ChannelLogin(props) {
-      const ch = props.channel
+    function Badge(props) {
+      return h('span', { style: S.badge(props.kind || 'dim'), title: props.title || '' }, props.children)
+    }
+
+    /**
+     * 一个渠道的登录卡片：
+     *  · 头部：渠道名 + 登录状态 + 已验证/未验证徽标 + flow 类型 + 一键登录/再加一个
+     *  · 账号列表：掩码 + 测试 / 续期 / 删除（二次确认）
+     *  · 展开后：按 flow 渲染向导；轮询到 ok 显示掩码 + 立即测试连通
+     */
+    function ChannelCard(props) {
+      const ch = props.channel || {}
+      const st = props.status || {}
+      const flow = (st && st.flow) || ch.flow || 'paste'
+      const verified = ch.loginVerified === true || st.loginVerified === true
+      const loginNote = ch.loginNote || st.note || ''
+      const refreshable = st.refreshable !== false
+      const accs = Array.isArray(ch.accounts) ? ch.accounts : []
+
       const [open, setOpen] = react.useState(false)
-      const rec = recommendModeOf(ch)
-      const [mode, setMode] = react.useState(rec)
-      const [raw, setRaw] = react.useState('')
+      const [sess, setSess] = react.useState(null)          // /login/start 的会话
+      const [pasteText, setPasteText] = react.useState('')
       const [ak, setAk] = react.useState('')
       const [sk, setSk] = react.useState('')
-      const [msg, setMsg] = react.useState(null)
       const [busy, setBusy] = react.useState(false)
-      const [autoSaved, setAutoSaved] = react.useState(false)
-      const inputRef = react.useRef(null)
-      const saveTimer = react.useRef(null)
+      const [msg, setMsg] = react.useState(null)            // {ok,text,error}
+      const [accMsg, setAccMsg] = react.useState(null)      // {key,ok,text}
+      const [accBusy, setAccBusy] = react.useState(null)    // 'test:<key>' / 'refresh:<key>' / 'del:<id>'
+      const [confirmDel, setConfirmDel] = react.useState(null)
+      const [fallback, setFallback] = react.useState(false)
+      const aliveRef = react.useRef(true)
+      react.useEffect(() => () => { aliveRef.current = false }, [])
 
-      // 打开时自动聚焦输入框（省一次点击）
+      const openUrl = (url) => {
+        try {
+          if (typeof window !== 'undefined' && typeof window.open === 'function') window.open(String(url), '_blank', 'noopener')
+        } catch (_) { /* 弹窗被拦截时，页面里仍有可点的链接/按钮 */ }
+      }
+
+      // ── 轮询：只在 waiting 时跑，1.5s 一次；到 ok/error/expired/cancelled 自动停 ──
+      const sessStatus = sess && sess.status
+      const sessId = sess && sess.sessionId
+      const sessPolls = sess && sess.polls
       react.useEffect(() => {
-        if (open && inputRef.current && inputRef.current.focus) {
-          setTimeout(() => { try { inputRef.current.focus() } catch (_) {} }, 80)
-        }
-      }, [open, mode])
+        if (!sess || sess.status !== 'waiting' || !sess.sessionId) return
+        let alive = true
+        const timer = setTimeout(() => {
+          if (!alive) return
+          api('/login/poll?sessionId=' + encodeURIComponent(sess.sessionId))
+            .then((r) => {
+              if (!alive) return
+              const code = String(r.state || (r.ok ? 'ok' : 'error'))
+              const done = code === 'ok' || code === 'success'
+              const failed = !done && (code === 'error' || code === 'expired' || code === 'cancelled')
+              setSess((prev) => {
+                if (!prev || prev.sessionId !== sess.sessionId) return prev
+                return Object.assign({}, prev, {
+                  status: done ? 'ok' : (failed ? 'error' : 'waiting'),
+                  hint: r.hint || prev.hint,
+                  maskedAccount: r.maskedAccount || prev.maskedAccount,
+                  error: failed ? (r.error || r.hint || '登录失败') : null,
+                  polls: (prev.polls || 0) + 1,
+                })
+              })
+              if (done && props.onChanged) props.onChanged()
+            })
+            .catch((e) => {
+              if (!alive) return
+              setSess((prev) => (prev ? Object.assign({}, prev, { status: 'error', error: String((e && e.message) || e), polls: (prev.polls || 0) + 1 }) : prev))
+            })
+        }, LOGIN_POLL_MS)
+        return () => { alive = false; clearTimeout(timer) }
+      }, [sessStatus, sessId, sessPolls])
 
-      // 本地只做「有没有填」的判断；真正识别交给后端 /channels/parse
-      const parsed = react.useMemo(() => {
-        if (mode === 'aksk') {
-          const a = ak.trim(), s = sk.trim()
-          if (!a && !s) return { ok: false, error: '先填 AK 和 SK' }
-          if (!a) return { ok: false, error: '还差 AK' }
-          if (!s) return { ok: false, error: '还差 SK' }
-          return { ok: true, credential: a + ':' + s, preview: 'AK/SK 已填齐' }
-        }
-        const s = String(raw || '').trim()
-        if (!s) return { ok: false, error: '把链接或令牌粘贴进来' }
-        // 本地不再猜测，交给后端校验（粘贴时自动触发）
-        return { ok: false, error: '粘贴后会自动识别并保存' }
-      }, [raw, mode, ak, sk])
+      const startLogin = () => {
+        setBusy(true); setMsg(null); setSess(null); setFallback(false)
+        api('/login/start', { method: 'POST', body: JSON.stringify({ provider: ch.id }) })
+          .then((r) => {
+            if (!r.ok) {
+              setMsg({ ok: false, error: r.error || '发起登录失败，可点「重试」或改用「粘贴凭据」' })
+              setFallback(true)
+              return
+            }
+            const f = r.flow || flow
+            const manual = f === 'paste' || f === 'aksk'
+            const next = {
+              sessionId: r.sessionId,
+              flow: f,
+              url: r.url || null,
+              qr: r.qr || null,
+              shortLink: r.shortLink || null,
+              userCode: r.userCode || null,
+              verificationUri: r.verificationUri || null,
+              interval: Number(r.interval) > 0 ? Number(r.interval) : 5,
+              instructions: Array.isArray(r.instructions) ? r.instructions : [],
+              loginVerified: r.loginVerified,
+              loginNote: r.loginNote,
+              pollingOnly: r.pollingOnly === true,
+              status: manual ? 'manual' : 'waiting',
+              hint: '',
+              maskedAccount: null,
+              error: null,
+              polls: 0,
+            }
+            setSess(next)
+            // 浏览器流：尝试自动打开登录页（被弹窗拦截时用户可点按钮）
+            if (!manual && next.url && next.flow === 'browser') openUrl(next.url)
+          })
+          .catch((e) => { setMsg({ ok: false, error: String((e && e.message) || e) }); setFallback(true) })
+          .then(() => setBusy(false))
+      }
 
-      const doSave = (cred) => {
-        setBusy(true); setMsg(null)
-        api('/channels/save', { method: 'POST', body: JSON.stringify({ provider: ch.id, credential: cred }) })
+      const cancelLogin = () => {
+        const sid = sess && sess.sessionId
+        setSess(null)
+        setMsg({ ok: true, text: '已取消登录' })
+        if (!sid) return
+        api('/login/cancel', { method: 'POST', body: JSON.stringify({ sessionId: sid }) }).catch(() => {})
+      }
+
+      const setAcc = (key, ok, text) => setAccMsg({ key, ok, text })
+
+      const runTest = (payload, key) => {
+        setAccBusy('test:' + key)
+        setAccMsg(null)
+        api('/login/test', { method: 'POST', body: JSON.stringify(payload) })
+          .then((r) => {
+            if (r.ok) setAcc(key, true, '✅ 连通 ' + (r.ms || 0) + 'ms · ' + (r.model || ''))
+            else setAcc(key, false, '❌ ' + (r.error || '失败') + (r.kind ? '（' + r.kind + '）' : ''))
+          })
+          .catch((e) => setAcc(key, false, '❌ ' + String((e && e.message) || e)))
+          .then(() => setAccBusy(null))
+      }
+
+      const runRefresh = (payload, key) => {
+        setAccBusy('refresh:' + key)
+        setAccMsg(null)
+        api('/login/refresh', { method: 'POST', body: JSON.stringify(payload) })
           .then((r) => {
             if (r.ok) {
-              setMsg({ ok: true, text: (r.hint ? '✅ ' + r.hint : '✅ 已保存') + '（模型会出现在「模型目录」页，可点刷新）' })
-              setRaw(''); setAk(''); setSk('')
+              setAcc(key, true, '✅ ' + (r.note || '已续期') + (r.maskedAccount ? ' · ' + r.maskedAccount : ''))
               props.onChanged && props.onChanged()
             } else {
-              // 后端已支持 AK:SK；若仍报「有效令牌」类错误，给出替代方案（不假装成功）
-              const shapeErr = mode === 'aksk' && /有效令牌|令牌形态/.test(String(r.error || ''))
-              const hint = shapeErr ? '。AK/SK 形态被拒绝时，可先用上面的「粘贴令牌」方式登录，或用渠道自己的 API Key' : ''
-              setMsg({ ok: false, error: (r.error || '保存失败') + hint })
+              setAcc(key, false, '❌ ' + (r.error || '续期失败') + (r.reloginRequired ? '（该渠道需人工重新登录）' : ''))
             }
           })
-          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
-          .then(() => { setBusy(false); setAutoSaved(false) })
+          .catch((e) => setAcc(key, false, '❌ ' + String((e && e.message) || e)))
+          .then(() => setAccBusy(null))
       }
 
-      // 🔑 粘贴 → 交给**后端**统一校验（不再前端自己猜，避免规则不一致）
-      const onPaste = (e) => {
-        let text = ''
-        try {
-          text = (e.clipboardData || window.clipboardData).getData('text') || ''
-        } catch (_) { return }
-        if (!text.trim()) return
-        setRaw(text)
-        setAutoSaved(false)
-        // 后端判定：只有真的识别出凭证才自动保存
-        api('/channels/parse', { method: 'POST', body: JSON.stringify({ text }) })
+      const removeAccount = (id) => {
+        setAccBusy('del:' + id)
+        api('/accounts/remove', { method: 'POST', body: JSON.stringify({ id }) })
           .then((r) => {
-            if (r.ok) {
-              setMsg({ ok: true, text: '✅ ' + (r.preview || '已识别') + '，正在保存…' })
-              doSave(r.credential)     // 识别成功才自动保存
+            setConfirmDel(null)
+            if (r.ok === false) {
+              setAcc(id, false, '❌ ' + (r.error || '删除失败'))
+              setMsg({ ok: false, error: '删除失败：' + (r.error || '未知原因') })
             } else {
-              setMsg({ ok: false, error: r.error || '这段内容里没有有效令牌' })
+              setAcc(id, true, '✅ 已删除')
+              setMsg({ ok: true, text: '✅ 已删除该账号（剩余 ' + (r.remaining != null ? r.remaining : '?') + ' 个账号）' })
+              props.onChanged && props.onChanged()
             }
           })
-          .catch((err) => setMsg({ ok: false, error: String((err && err.message) || err) }))
+          .catch((e) => setAcc(id, false, '❌ ' + String((e && e.message) || e)))
+          .then(() => setAccBusy(null))
       }
 
-      const del = (id) => {
-        api('/channels/remove', { method: 'POST', body: JSON.stringify({ id }) })
+      // 粘贴凭据：先让后端判定（不回凭据原文），再提交**原始文本**由后端解析
+      const savePaste = (text) => {
+        const value = String(text == null ? pasteText : text).trim()
+        if (!value) { setMsg({ ok: false, error: '先粘贴 API Key、回调链接或令牌' }); return }
+        setBusy(true); setMsg(null)
+        api('/channels/parse', { method: 'POST', body: JSON.stringify({ text: value }) })
+          .then((p) => {
+            if (!p.ok) {
+              setMsg({ ok: false, error: p.error || '这段内容里没有可识别的凭据（普通网址不算）' })
+              return null
+            }
+            setMsg({ ok: true, text: '识别成功：' + (p.preview || '（已识别）') + '，正在保存…' })
+            return api('/channels/save', { method: 'POST', body: JSON.stringify({ provider: ch.id, text: value }) })
+          })
           .then((r) => {
-            if (r && r.ok === false) setMsg({ ok: false, error: r.error || '删除失败' })
-            else setMsg({ ok: true, text: '✅ 已删除该账号' })
+            if (!r) return
+            if (!r.ok) { setMsg({ ok: false, error: r.error || '保存失败' }); return }
+            setPasteText('')
+            setMsg({ ok: true, text: (r.hint || '✅ 已保存') + '（模型会出现在「模型目录」页）' })
             props.onChanged && props.onChanged()
           })
           .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => setBusy(false))
       }
 
-      const accs = ch.accounts || []
-      const MODES = [
-        { id: 'aksk', label: 'AK / SK 永久授权', badge: '一步' },
-        { id: 'token', label: '粘贴令牌', badge: '一步' },
-        { id: 'oauth', label: '登录后自动识别', badge: '两步' },
-      ]
+      const saveAksk = () => {
+        const a = ak.trim(), s = sk.trim()
+        if (!a && !s) { setMsg({ ok: false, error: '先填 AK 和 SK' }); return }
+        if (!a) { setMsg({ ok: false, error: '还差 AK' }); return }
+        if (!s) { setMsg({ ok: false, error: '还差 SK' }); return }
+        setBusy(true); setMsg(null)
+        api('/channels/save', { method: 'POST', body: JSON.stringify({ provider: ch.id, ak: a, sk: s }) })
+          .then((r) => {
+            if (!r.ok) { setMsg({ ok: false, error: r.error || '保存失败' }); return }
+            setAk(''); setSk('')
+            setMsg({ ok: true, text: (r.hint || '✅ AK/SK 已保存') + '（永久有效；模型会出现在「模型目录」）' })
+            props.onChanged && props.onChanged()
+          })
+          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => setBusy(false))
+      }
 
-      return h('div', { style: Object.assign({}, S.card, { marginBottom: '8px' }) },
+      const onPaste = (e) => {
+        let text = ''
+        try { text = (e.clipboardData || window.clipboardData).getData('text') || '' } catch (_) { return }
+        if (!text.trim()) return
+        setPasteText(text)
+        savePaste(text)     // 粘贴即识别并保存（普通网址会被后端明确拒绝）
+      }
+
+      const pasteBox = (hint) => h('div', null,
+        h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) }, hint),
+        h('input', {
+          style: S.input,
+          value: pasteText,
+          placeholder: '在这里按 Ctrl+V 粘贴' + (ch.field ? '（' + ch.field + '）' : '（API Key / 整段回调链接 / 令牌）'),
+          onPaste: onPaste,
+          onChange: (e) => setPasteText(e.target.value),
+        }),
+        h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
+          h('button', { style: S.btn(true), onClick: () => savePaste(), disabled: busy || !pasteText.trim() }, busy ? '保存中…' : '保存'),
+          h('button', { style: S.btn(false), onClick: () => { setPasteText(''); setMsg(null) } }, '清空')))
+
+      const akskBox = () => h('div', null,
+        h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
+          '在官网控制台「访问密钥 / API 密钥」创建一对，粘贴到下面两个框。配一次永久有效，不用再登录。'),
+        h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), value: ak, placeholder: 'AK（Access Key / AccessKeyId）', onChange: (e) => setAk(e.target.value) }),
+        h('input', { style: S.input, value: sk, placeholder: 'SK（Secret Key / AccessKeySecret）', onChange: (e) => setSk(e.target.value) }),
+        h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
+          h('button', { style: S.btn(true), onClick: saveAksk, disabled: busy }, busy ? '保存中…' : '保存 AK/SK'),
+          h('button', { style: S.btn(false), onClick: () => { setAk(''); setSk(''); setMsg(null) } }, '清空')))
+
+      // 会话向导（browser / device / qr 三种）
+      const renderSession = () => {
+        const stt = sess.status
+        const line = (text, kind) => text ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, kind === 'good' ? S.good : kind === 'warn' ? S.warn : kind === 'bad' ? S.bad : null) }, text) : null
+        const flowView = sess.flow === 'browser'
+          ? h('div', null,
+              h('div', { style: S.dim }, sess.pollingOnly
+                ? '① 点「打开登录页」完成授权　② 回到本页等待自动检测（本渠道无回调，纯轮询）'
+                : '① 点「打开登录页」完成授权　② 回到本页等自动完成（不用再手工复制授权码）'),
+              sess.url
+                ? h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap', alignItems: 'center' } },
+                    h('button', { style: S.btn(true), onClick: () => openUrl(sess.url) }, '打开登录页'),
+                    h('span', { style: Object.assign({}, S.dim, { wordBreak: 'break-all', minWidth: 0 }) }, sess.url))
+                : line('后端没有返回授权地址（该渠道登录端点可能未取证）⇒ 请用下方「粘贴凭据」备用方式', 'warn'))
+          : sess.flow === 'device'
+            ? h('div', null,
+                sess.userCode
+                  ? h('div', { style: Object.assign({}, S.bigCode, { margin: '8px 0' }) }, sess.userCode)
+                  : line('后端没有返回设备码（该渠道登录端点可能未取证）', 'warn'),
+                sess.verificationUri
+                  ? h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
+                      h('button', { style: S.btn(false), onClick: () => openUrl(sess.verificationUri) }, '打开验证页'),
+                      h('span', { style: Object.assign({}, S.dim, { wordBreak: 'break-all' }) }, sess.verificationUri))
+                  : null,
+                line('打开验证页输入上面的设备码；本页自动轮询（约 ' + (sess.interval || 5) + ' 秒/次）'))
+            : sess.flow === 'qr'
+              ? h('div', null,
+                  sess.qr
+                    ? h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'flex-start', marginTop: '8px' } },
+                        h(QrCode, { text: String(sess.qr), size: 168 }),
+                        h('div', { style: { minWidth: 0, flex: '1 1 200px' } },
+                          h('div', { style: S.dim }, '用手机扫码完成登录（二维码可扫，不是文本）'),
+                          sess.shortLink
+                            ? h('div', { style: Object.assign({}, S.link, { marginTop: '6px' }) }, sess.shortLink)
+                            : null,
+                          h('div', { style: Object.assign({ marginTop: '6px', wordBreak: 'break-all' }, S.dim) },
+                            '内容：' + String(sess.qr)),
+                          h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
+                            sess.shortLink
+                              ? h('button', { style: S.btn(false), onClick: () => openUrl(sess.shortLink) }, '打开短链')
+                              : null,
+                            h('button', {
+                              style: S.btn(false),
+                              onClick: () => {
+                                copyPlainText(String(sess.qr)).then((r) => setMsg({ ok: r.ok, text: r.text }))
+                              },
+                            }, '复制二维码内容'))))
+                    : line('后端没有返回二维码内容（该渠道登录端点可能未取证）⇒ 可用下方「粘贴凭据」备用方式', 'warn'),
+                  line('扫码后在手机上确认；本页会自动轮询登录结果'))
+              : null
+
+        return h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' } },
+          (sess.instructions || []).length
+            ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, (sess.instructions || []).map((x, i) => h('div', { key: i }, (i + 1) + '. ' + x)))
+            : null,
+          flowView,
+          line(
+            stt === 'waiting'
+              ? (sess.pollingOnly
+                  ? '已打开登录页，正在等待授权…（本渠道无回调，纯轮询；已查 ' + (sess.polls || 0) + ' 次）'
+                  : '⏳ 等待你在浏览器 / 手机端完成授权…（已轮询 ' + (sess.polls || 0) + ' 次）')
+              : stt === 'ok' ? '✅ 登录成功' + (sess.maskedAccount ? '：' + sess.maskedAccount : '')
+                : stt === 'error' ? '❌ ' + (sess.error || '登录失败')
+                  : stt === 'manual' ? '' : '',
+            stt === 'ok' ? 'good' : stt === 'error' ? 'bad' : null),
+          stt === 'ok'
+            ? h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
+                h('button', { style: S.btn(true), onClick: () => runTest({ provider: ch.id }, 'provider'), disabled: accBusy === 'test:provider' }, accBusy === 'test:provider' ? '测试中…' : '立即测试连通'),
+                h('button', { style: S.btn(false), onClick: () => setSess(null) }, '完成'))
+            : null,
+          stt === 'waiting'
+            ? h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
+                h('button', { style: S.btn(false), onClick: cancelLogin }, '取消登录'))
+            : null,
+          stt === 'error'
+            ? h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
+                h('button', { style: S.btn(false), onClick: startLogin }, '重试'),
+                h('button', { style: S.btn(false), onClick: () => setSess(null) }, '关闭'))
+            : null,
+          accMsg && accMsg.key === 'provider'
+            ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, accMsg.ok ? S.good : S.warn) }, accMsg.text)
+            : null)
+      }
+
+      const wizard = () => {
+        if (sess) {
+          // 后端可能把 paste/aksk 也回成会话（manual）：这类没有可轮询的东西，直接给表单
+          if (sess.flow === 'paste') return pasteBox('把 API Key / 回调链接 / 令牌粘贴到这里（后端会识别并保存）。')
+          if (sess.flow === 'aksk') return akskBox()
+          return h('div', null,
+            renderSession(),
+            (flow !== 'paste' && flow !== 'aksk' && (fallback || sess.status === 'error'))
+              ? h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' } },
+                  h('div', { style: Object.assign({ fontWeight: 600, marginBottom: '6px' }, S.dim) }, '备用：直接粘贴凭据 / 回调链接'),
+                  pasteBox('如果一键登录拿不到授权，可从浏览器地址栏复制带 ?code= 的链接，或渠道的 API Key 粘贴到这里。'))
+              : null)
+        }
+        if (flow === 'paste') {
+          return h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' } },
+            pasteBox('官方只提供 API Key。粘贴后立刻校验并保存（支持整段回调链接自动识别）。'))
+        }
+        if (flow === 'aksk') {
+          return h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' } },
+            akskBox())
+        }
+        // browser / device / qr：一键开始（自动打开 + 自动轮询）
+        return h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' } },
+          h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, flowMeta(flow).tip),
+          (ch.guideSteps || []).length
+            ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+                (ch.guideSteps || []).map((x, i) => h('div', { key: i }, (i + 1) + '. ' + x)))
+            : null,
+          h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+            h('button', { style: S.btn(true), onClick: startLogin, disabled: busy }, busy ? '发起中…' : '开始一键登录'),
+            h('button', { style: S.btn(false), onClick: () => setFallback(!fallback) }, fallback ? '收起粘贴框' : '拿不到授权？直接粘贴')),
+          fallback
+            ? h('div', { style: { marginTop: '10px' } },
+                h('div', { style: Object.assign({ fontWeight: 600, marginBottom: '6px' }, S.dim) }, '备用：直接粘贴凭据'),
+                pasteBox('从浏览器地址栏复制带 ?code= 的整段链接，或渠道的 API Key 粘贴到这里。'))
+            : null)
+      }
+
+      const msgView = msg
+        ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, msg.ok ? S.good : S.warn) }, msg.text || msg.error)
+        : null
+
+      return h('div', {
+        'data-channel': ch.id,
+        'data-flow': flow,
+        'data-verified': verified ? '1' : '0',
+        style: Object.assign({}, S.card, { marginBottom: '8px', maxWidth: '100%', boxSizing: 'border-box' }),
+      },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' } },
-          h('div', null,
-            h('span', { style: { fontWeight: 600 } }, ch.label),
-            ch.loggedIn ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.good) }, '✅ 已登录 ' + accs.length) : null,
+          h('div', { style: { minWidth: 0, flex: '1 1 240px' } },
+            h('span', { style: { fontWeight: 600 } }, ch.label || ch.id),
+            ch.loggedIn
+              ? h(Badge, { kind: 'good' }, '已登录 ' + accs.length)
+              : h(Badge, { kind: 'dim' }, '未登录'),
+            verified
+              ? h(Badge, { kind: 'good', title: loginNote }, '已验证')
+              : h(Badge, { kind: 'warn', title: loginNote || '该渠道登录端点尚未真机验证' }, '未验证'),
+            h(Badge, { kind: 'dim', title: flowMeta(flow).tip }, flowMeta(flow).label),
             ch.checkin ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) }, '· 可签到') : null,
             ch.proxyRequired ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim, S.warn) }, '· 需代理') : null),
-          h('div', { style: { display: 'flex', gap: '6px' } },
-            ch.loginUrl ? h('a', {
-              href: ch.loginUrl, target: '_blank', rel: 'noreferrer',
-              style: Object.assign({}, S.btn(false), { textDecoration: 'none', color: 'inherit' }),
-            }, '去官网') : null,
-            h('span', { style: S.btn(ch.loggedIn ? false : true), onClick: () => setOpen(!open) },
-              open ? '收起' : (ch.loggedIn ? '再加一个' : '登录')))),
+          h('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } },
+            ch.loginUrl
+              ? h('a', { href: ch.loginUrl, target: '_blank', rel: 'noreferrer', style: Object.assign({}, S.btn(false), { textDecoration: 'none', color: 'inherit' }) }, '去官网')
+              : null,
+            h('span', {
+              style: S.btn(!ch.loggedIn),
+              onClick: () => {
+                const nextOpen = !open
+                // 收起时若还有等待中的会话，顺手取消（避免后端会话占着 5 分钟）
+                if (!nextOpen && sess && sess.status === 'waiting' && sess.sessionId) {
+                  api('/login/cancel', { method: 'POST', body: JSON.stringify({ sessionId: sess.sessionId }) }).catch(() => {})
+                }
+                setOpen(nextOpen); setMsg(null); setAccMsg(null); setSess(null); setFallback(false)
+                // 非粘贴类 flow：点「一键登录」直接发起（省一次点击）；粘贴类展开表单
+                if (nextOpen && flow !== 'paste' && flow !== 'aksk') startLogin()
+              },
+            }, open ? '收起' : (ch.loggedIn ? '再加一个' : '一键登录')))),
+        loginNote
+          ? h('div', { style: Object.assign({ marginTop: '4px', wordBreak: 'break-all' }, S.dim, verified ? null : S.warn) },
+              (verified ? '' : '⚠️ 未验证：' ) + loginNote)
+          : null,
 
-        accs.map((a) => h('div', { key: a.id, style: Object.assign({}, S.row, { marginTop: '6px' }) },
-          h('span', null, a.label + ' ' + (a.masked || '')),
-          h('span', { style: Object.assign({ cursor: 'pointer' }, S.dim, S.bad), onClick: () => del(a.id) }, '删除'))),
+        accs.map((a) => {
+          const key = a.id
+          return h('div', { key, style: Object.assign({}, S.row, { marginTop: '6px', flexWrap: 'wrap', gap: '6px' }) },
+            h('span', { style: { minWidth: 0, wordBreak: 'break-all', flex: '1 1 180px' } },
+              (a.label || ch.label) + '  ' + (a.masked || ''),
+              a.kind ? h('span', { style: Object.assign({ marginLeft: '6px' }, S.dim) }, '· ' + a.kind) : null),
+            h('span', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' } },
+              h('span', { style: S.btn(false), onClick: () => runTest({ id: key }, key) }, accBusy === 'test:' + key ? '测试中…' : '测试'),
+              h('span', {
+                style: Object.assign({}, S.btn(false), refreshable ? null : { opacity: 0.6 }),
+                title: refreshable ? '用 refresh_token 续期' : '该渠道无续期端点，需重新登录',
+                onClick: () => runRefresh({ id: key }, key),
+              }, accBusy === 'refresh:' + key ? '续期中…' : '续期'),
+              confirmDel === key
+                ? h('span', { style: { display: 'flex', gap: '4px', flexWrap: 'wrap' } },
+                    h('span', { style: Object.assign({}, S.btn(false), S.bad), onClick: () => removeAccount(key) }, accBusy === 'del:' + key ? '删除中…' : '确认删除'),
+                    h('span', { style: S.btn(false), onClick: () => setConfirmDel(null) }, '取消'))
+                : h('span', { style: Object.assign({ cursor: 'pointer', fontSize: '12px', padding: '3px 6px' }, S.dim, S.bad), onClick: () => setConfirmDel(key) }, '删除')),
+            accMsg && accMsg.key === key
+              ? h('div', { style: Object.assign({ width: '100%', marginTop: '4px', wordBreak: 'break-all' }, S.dim, accMsg.ok ? S.good : S.warn) }, accMsg.text)
+              : null)
+        }),
 
-        open ? h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' } },
-          // 后端给的登录指引（每家渠道步骤不同，之前完全没用上）
-          (ch.guideTitle || (Array.isArray(ch.guideSteps) && ch.guideSteps.length)) ? h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
-            ch.guideTitle ? h('div', { style: { fontWeight: 600 } }, '登录指引：' + ch.guideTitle) : null,
-            (ch.guideSteps || []).map((s, i) => h('div', { key: i }, (i + 1) + '. ' + s)),
-            ch.field ? h('div', { style: Object.assign({ marginTop: '4px' }, S.warn) }, '需要粘贴：' + ch.field) : null,
-            ch.note ? h('div', { style: { marginTop: '4px' } }, '说明：' + ch.note) : null) : null,
-          // 方式切换（默认选中推荐的那个）
-          h('div', { style: { display: 'flex', gap: '6px', marginBottom: '10px', flexWrap: 'wrap' } },
-            MODES.map((m) => h('span', {
-              key: m.id,
-              style: Object.assign({}, S.btn(mode === m.id), { fontSize: '11px' }),
-              onClick: () => { setMode(m.id); setMsg(null) },
-            }, m.label + ' · ' + m.badge))),
-
-          mode === 'aksk'
-            ? h('div', null,
-                h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
-                  '在官网控制台的「访问密钥 / API 密钥」里创建一对，粘贴到下面两个框。配一次永久有效，不用再登录。'),
-                h('input', {
-                  ref: inputRef,
-                  style: Object.assign({}, S.input, { marginBottom: '6px' }),
-                  value: ak, placeholder: 'AK（Access Key / AccessKeyId）',
-                  onChange: (e) => setAk(e.target.value),
-                }),
-                h('input', {
-                  style: S.input, value: sk, placeholder: 'SK（Secret Key / AccessKeySecret）',
-                  onChange: (e) => setSk(e.target.value),
-                }))
-            : h('div', null,
-                mode === 'oauth'
-                  ? h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
-                      '① 点上面「去官网」完成登录　② 回来把地址栏那一整串链接直接粘贴到下面 —— 粘贴的瞬间就自动保存了，不用点按钮。')
-                  : h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
-                      '把令牌直接粘贴到下面，粘贴瞬间自动保存。'),
-                h('input', {
-                  ref: inputRef,
-                  style: S.input, value: raw,
-                  placeholder: '在这里按 Ctrl+V 粘贴' + (ch.field ? '（' + ch.field + '）' : '（支持完整链接、JSON、或裸令牌）'),
-                  onPaste: onPaste,
-                  onChange: (e) => setRaw(e.target.value),
-                })),
-
-          // 实时反馈
-          h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, parsed.ok ? S.good : S.warn) },
-            busy ? '⏳ 正在保存…'
-              : autoSaved ? '✅ 已自动识别并保存'
-              : (parsed.ok ? '✅ ' + parsed.preview + '（点保存或直接粘贴自动存）' : '⏳ ' + parsed.error)),
-
-          ch.loginWarn ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '⚠️ ' + ch.loginWarn) : null,
-
-          h('div', { style: { display: 'flex', gap: '8px', marginTop: '10px' } },
-            h('button', { style: S.btn(true), onClick: () => parsed.ok && doSave(parsed.credential), disabled: busy || !parsed.ok },
-              busy ? '保存中…' : '保存'),
-            h('button', { style: S.btn(false), onClick: () => { setRaw(''); setAk(''); setSk(''); setMsg(null); setOpen(false) } }, '取消')),
-
-          h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
-            '🔒 凭证只存在你自己的电脑（~/.dsh/cs-myfree/accounts.json，仅本人可读），不上传任何服务器。'),
-          msg ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, msg.ok ? S.good : S.bad) }, msg.text || msg.error) : null) : null,
+        open ? wizard() : null,
+        // 结果消息不受展开状态影响：删除/测试/续期在收起态也要有反馈
+        msgView,
+        open ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
+          '🔒 凭证只存在本机 ~/.dsh/cs-myfree/accounts.json（0600），不上传任何服务器；页面只显示掩码。') : null,
       )
     }
 
@@ -472,10 +1124,21 @@ window.__ModuleLoader__.load({
     function SourcesZone() {
       const [s, reload] = useApi('/state')
       const [cs, reloadCh] = useApi('/channels')
+      const [ls, reloadLs] = useApi('/login/status')
       const [probing, setProbing] = react.useState(false)
       const [probe, setProbe] = react.useState(null)
+      const [bulk, setBulk] = react.useState(null)
+      const aliveRef = react.useRef(true)
+      react.useEffect(() => () => { aliveRef.current = false }, [])
+
       const d = s.data
       const chData = cs.data
+      const statusList = ls.data && Array.isArray(ls.data.channels) ? ls.data.channels : []
+      const statusById = {}
+      for (const x of statusList) statusById[x.id] = x
+      const channels = chData && Array.isArray(chData.channels) ? chData.channels : []
+      const loggedChannels = channels.filter((c) => c.loggedIn)
+      const verifiedCount = statusList.filter((x) => x.loginVerified === true).length
 
       const runProbe = () => {
         setProbing(true)
@@ -485,13 +1148,72 @@ window.__ModuleLoader__.load({
           .then(() => { setProbing(false); reload() })
       }
 
-      if (s.error) return h(Err, { error: s.error })
-      if (!d) return h(Loading, { on: s.loading })
+      // 全部测试 / 全部续期：逐个账号操作（串行，避免把宿主/上游打爆）
+      const bulkTargets = (kind) => {
+        const out = []
+        for (const c of loggedChannels) {
+          for (const a of (c.accounts || [])) {
+            const st = statusById[c.id] || {}
+            out.push({
+              provider: c.id, id: a.id, label: c.label, masked: a.masked,
+              skip: kind === 'refresh' && st.refreshable === false,
+              skipNote: '该渠道无续期端点，需重新登录',
+            })
+          }
+        }
+        return out
+      }
+      const runBulk = (kind) => {
+        const targets = bulkTargets(kind)
+        if (!targets.length) {
+          setBulk({ kind, total: 0, done: 0, results: [], finished: true })
+          return
+        }
+        setBulk({ kind, total: targets.length, done: 0, results: [], finished: false })
+        ;(async () => {
+          for (const t of targets) {
+            if (!aliveRef.current) return
+            let r
+            if (t.skip) {
+              r = { ok: false, error: t.skipNote }
+            } else {
+              try {
+                r = await api(kind === 'test' ? '/login/test' : '/login/refresh', { method: 'POST', body: JSON.stringify({ id: t.id, provider: t.provider }) })
+              } catch (e) {
+                r = { ok: false, error: String((e && e.message) || e) }
+              }
+            }
+            if (!aliveRef.current) return
+            setBulk((prev) => {
+              if (!prev) return prev
+              const done = (prev.done || 0) + 1
+              return Object.assign({}, prev, {
+                done,
+                finished: done >= prev.total,
+                results: prev.results.concat([{
+                  provider: t.provider, label: t.label, masked: t.masked,
+                  ok: r.ok === true, ms: r.ms, error: r.error || null, note: r.note || null,
+                }]),
+              })
+            })
+          }
+          if (aliveRef.current) { reloadCh(); reloadLs() }
+        })()
+      }
 
+      if (s.error) return h('div', null, h(Err, { error: s.error }), h('button', { style: S.btn(false), onClick: reload }, '重试'))
+      if (!d) return h('div', { style: S.card }, h('div', { style: S.skeleton }), h('div', { style: S.skeleton }), h('div', { style: S.skeleton }))
+
+      const bulkRunning = bulk && !bulk.finished
       return h('div', null,
-        h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '10px' } },
+        h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '10px' } },
           h('button', { style: S.btn(true), onClick: runProbe, disabled: probing }, probing ? '探测中…（真实请求）' : '探测免密源'),
-          h('span', { style: S.dim }, '会发起真实推理请求，约 2–20 秒')),
+          h('span', { style: S.dim }, '会发起真实推理请求，约 2–20 秒'),
+          h('button', { style: S.btn(false), onClick: () => runBulk('test'), disabled: bulkRunning, title: '对每个已登录账号发一条最小推理请求' },
+            '全部测试' + (bulk && bulk.kind === 'test' && !bulk.finished ? ' ' + bulk.done + '/' + bulk.total : '')),
+          h('button', { style: S.btn(false), onClick: () => runBulk('refresh'), disabled: bulkRunning, title: '对每个已登录账号续期（无续期端点的会如实标出）' },
+            '全部续期' + (bulk && bulk.kind === 'refresh' && !bulk.finished ? ' ' + bulk.done + '/' + bulk.total : ''))),
+
         probe ? h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '6px' } },
             probe.ok ? (probe.anyOk ? '✅ 探测完成' : '❌ 全部不可用') : '❌ 探测失败'),
@@ -500,20 +1222,36 @@ window.__ModuleLoader__.load({
             h('span', { style: Object.assign({ textAlign: 'right' }, S.dim) }, r.ok ? (r.ms + 'ms  "' + String(r.sample || '').slice(0, 30) + '"') : (r.error || '失败')))),
           probe.error ? h('div', { style: Object.assign({ marginTop: '6px' }, S.mono, S.bad) }, probe.error) : null) : null,
 
+        bulk ? h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } },
+            (bulk.kind === 'test' ? '全部测试' : '全部续期') + (bulk.finished ? '完成' : '进行中… ') + '（' + bulk.done + '/' + bulk.total + '）'),
+          bulk.total === 0 ? h('div', { style: S.dim }, '还没有已登录的账号 ⇒ 先在下面登录一个渠道') : null,
+          (bulk.results || []).map((r, i) => h('div', { key: i, style: S.row },
+            h('span', { style: { minWidth: 0, wordBreak: 'break-all' } }, (r.ok ? '✅ ' : '❌ ') + r.label + ' ' + (r.masked || '')),
+            h('span', { style: Object.assign({ textAlign: 'right' }, S.dim, r.ok ? null : S.warn) },
+              r.ok ? ((r.ms || 0) + 'ms' + (r.note ? ' · ' + r.note : '')) : (r.error || '失败')))),
+          (bulk.results || []).some((r) => r.ok === false)
+            ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '有失败项：先看行内错误；「未验证」渠道的端点可能未取证，登录器修好后重试。')
+            : null) : null,
+
         h('div', { style: { fontWeight: 600, margin: '4px 0 8px' } }, '免密源（无需登录）'),
         h('div', { style: S.grid }, (d.sources.keyless || []).map((k) => h('div', { key: k.id, style: S.tile },
           h('div', { style: { fontWeight: 600 } }, k.label),
           h('div', { style: S.dim }, k.note || '')))),
 
-        h('div', { style: { fontWeight: 600, margin: '16px 0 8px' } },
-          '账号渠道（' + (chData ? chData.total : d.sources.counts.channels) + ' 家 · 点「登录」用你自己的账号）'),
+        h('div', { style: { fontWeight: 600, margin: '16px 0 4px' } },
+          '账号渠道（' + (chData ? chData.total : d.sources.counts.channels) + ' 家 · 已登录 ' + loggedChannels.length + ' 家' +
+          (statusList.length ? ' · 已验证 ' + verifiedCount + '/' + statusList.length : '') + '）'),
         h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
-          '每个渠道都可以登录多个账号。凭证只存本机，不上传。'),
+          '「一键登录」按各渠道流程自动完成；未验证 = 后端登录端点尚未真机验证，可能失败，请以实际结果为准。凭证只存本机。'),
         cs.error ? h(Err, { error: '渠道列表读取失败：' + cs.error }) : null,
-        (chData && chData.channels ? chData.channels : []).map((c) => h(ChannelLogin, {
-          key: c.id, channel: c, onChanged: () => { reloadCh(); reload() },
-        })),
-        !chData && !cs.error ? h('div', { style: S.dim }, '渠道列表加载中…（若一直不出现，看「诊断」页）') : null,
+        ls.error ? h(Err, { error: '登录状态读取失败：' + ls.error }) : null,
+        (!chData && !cs.error)
+          ? h('div', null, h('div', { style: S.skeleton }), h('div', { style: S.skeleton }), h('div', { style: S.skeleton }))
+          : channels.map((c) => h(ChannelCard, {
+              key: c.id, channel: c, status: statusById[c.id] || null,
+              onChanged: () => { reloadCh(); reload(); reloadLs() },
+            })),
       )
     }
 
@@ -1346,6 +2084,9 @@ window.__ModuleLoader__.load({
     exports.CashChip = CashChip
     exports.ErrorBoundary = ErrorBoundary
     exports.Safe = Safe
+    exports.ChannelCard = ChannelCard
+    exports.QrCode = QrCode
+    exports.__qrMatrix = qrMatrix   // 测试用：与参考实现逐模块对拍
     return module.exports
   },
 })
