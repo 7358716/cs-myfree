@@ -157,6 +157,8 @@ export function redactText(input) {
     s = s.replace(/([?&](?:token|access_token|refresh_token|api[_-]?key|apikey|key|secret|password|securitytoken|security_token)=)[^&\s"']+/gi, '$1***')
     s = s.replace(/\b(Bearer|Basic|SDK-HMAC-SHA256)\s+[A-Za-z0-9._~+/=-]{8,}/g, '$1 ***')
     s = s.replace(/\b(sk|pk|AKID)[-_A-Za-z0-9]{8,}/g, '***')
+    // P2-05：裸 `token=…` / `code=…` / `ak=…` 形式（不在 URL 查询串语境里也要脱敏）
+    s = s.replace(/\b(token|access_token|refresh_token|auth_code|authorization_code|code|ak|sk|secret|api_?key|security_?token)\s*[=:]\s*["']?[A-Za-z0-9._~+/=-]{6,}["']?/gi, '$1=***')
   } catch { /* 保底不抛 */ }
   return s
 }

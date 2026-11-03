@@ -123,14 +123,15 @@ export function registerRoutes(webServer, opts = {}) {
             const out = await handler({ req, res, query: url.searchParams, body })
             if (out !== undefined) sendJson(res, 200, out)
           } catch (err) {
-            logger.warn(`${path} 处理失败：${err?.message ?? err}`)
+            // P2-04：日志必须脱敏（上游错误原文可能含 token/code）
+            logger.warn(`${path} 处理失败：${safeErrorText(err)}`)
             sendJson(res, 500, { ok: false, error: String(err?.message ?? err).slice(0, 200) })
           }
         },
       })
       registered++
     } catch (err) {
-      logger.warn(`注册 ${path} 失败：${err?.message ?? err}`)
+      logger.warn(`注册 ${path} 失败：${safeErrorText(err)}`)
     }
   }
 
@@ -226,7 +227,7 @@ export function registerRoutes(webServer, opts = {}) {
         applied = (await applyChain(v.entries)) !== false
         requiresRestart = !applied
       } catch (err) {
-        logger.warn?.(`覆盖层已保存但生效失败：${err?.message ?? err}`)
+        logger.warn?.(`覆盖层已保存但生效失败：${safeErrorText(err)}`)
         return { ok: false, errno: 'CHAIN_APPLY_FAILED', count: v.entries.length, applied: false, requiresRestart: true, error: String(err?.message ?? err).slice(0, 200) }
       }
     } else {
@@ -615,13 +616,33 @@ export function registerRoutes(webServer, opts = {}) {
   })
 
   // ── 登录 start ──
-  route('/login/start', async ({ body }) => {
+  /**
+   * 推导公网基址（OAuth 回调必须落在**用户浏览器可达**的地址上）。
+   *
+   * 🔴 P1-01 修复：`cfg.publicBase ?? trustedHosts[0]` 在云端部署下会失败
+   *    （生产 profile 没给插件配 trustedHosts ⇒ 退化成 http://127.0.0.1:0，
+   *    用户授权后浏览器跳到自己的机器，必然打不开）。
+   *    改为**优先用本次请求的 Host 头**——那正是用户浏览器实际访问的地址，
+   *    不需要任何配置；只有拿不到 Host 时才回落到配置。
+   */
+  const derivePublicBase = (req) => {
+    const host = String((req && req.headers && req.headers.host) || '').trim()
+    if (host) {
+      const proto = String((req.headers['x-forwarded-proto'] || '')).split(',')[0].trim()
+        || (req.socket && req.socket.encrypted ? 'https' : 'http')
+      // Host 可能是 localhost / 127.x（本机直连）——那种场景回调也能通，照用
+      return `${proto}://${host}`.replace(/:80$/, '')
+    }
+    return opts.publicBase ?? null
+  }
+
+  route('/login/start', async ({ req, body }) => {
     const provider = String(body?.provider ?? '').trim()
     if (!provider) return { ok: false, error: '缺少 provider' }
     if (!CHANNELS[provider]) return { ok: false, error: '未知渠道：' + provider }
     try {
       const s = await loginEngine.start(provider, CHANNELS[provider], {
-        publicBase: opts.publicBase ?? null,
+        publicBase: derivePublicBase(req) ?? opts.publicBase ?? null,
         callbackPath: `${PREFIX}/login/callback`,
       })
       const info = flowInfoOf(provider)
@@ -638,11 +659,12 @@ export function registerRoutes(webServer, opts = {}) {
         instructions: s.instructions ?? [],
         expiresAt: s.expiresAt ?? null,
         callbackUrl: s.callbackUrl ?? null,
+        pollingOnly: s.pollingOnly === true || (s.initial && s.initial.pollingOnly === true),
         loginVerified: info.loginVerified,
         loginNote: info.loginNote,
       }
     } catch (err) {
-      logger.warn?.(`login/start ${provider} 失败：${err?.message ?? err}`)
+      logger.warn?.(`login/start ${provider} 失败：${safeErrorText(err)}`)
       return { ok: false, error: safeErrorText(err) }
     }
   })
@@ -655,7 +677,7 @@ export function registerRoutes(webServer, opts = {}) {
     try {
       r = await loginEngine.poll(sessionId)
     } catch (err) {
-      logger.warn?.(`login/poll 失败：${err?.message ?? err}`)
+      logger.warn?.(`login/poll 失败：${safeErrorText(err)}`)
       return { ok: false, state: 'error', error: safeErrorText(err), hint: '', maskedAccount: null }
     }
     if (!r) return { ok: false, state: 'error', error: '会话不存在或已过期', hint: '', maskedAccount: null }
@@ -670,7 +692,7 @@ export function registerRoutes(webServer, opts = {}) {
         masked = (await persistCredential(session.provider, session, r.credential)) ?? masked
         session.persisted = true
       } catch (err) {
-        logger.warn?.(`login/poll 落盘失败：${err?.message ?? err}`)
+        logger.warn?.(`login/poll 落盘失败：${safeErrorText(err)}`)
         return { ok: false, state: 'error', hint: '', maskedAccount: null, error: '登录成功但保存失败：' + safeErrorText(err) }
       }
     }
@@ -963,7 +985,7 @@ export function registerRoutes(webServer, opts = {}) {
     })
     registered++
   } catch (err) {
-    logger.warn?.(`注册 ${CALLBACK_PATH} 失败：${err?.message ?? err}`)
+    logger.warn?.(`注册 ${CALLBACK_PATH} 失败：${safeErrorText(err)}`)
   }
 
   return registered

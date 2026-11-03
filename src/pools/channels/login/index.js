@@ -42,7 +42,9 @@ export async function startLogin(provider, ch, opts = {}) {
   const cbPath = opts.callbackPath ?? '/cs-myfree/login/callback'
   const callbackUrl = base ? `${base}${cbPath}` : `http://127.0.0.1:${opts.port ?? 0}${cbPath}`
   const callbackWithState = `${callbackUrl}?state=${oauthState}`
-  if (base) states.set(oauthState, { sessionId, expiresAt })
+  // P2-②：device/qr/paste 流没有回调，注册 state 只会泄漏（实测 1000 次 start 后 states=1000）
+  const isBrowserFlow = flow.type === 'browser'
+  if (isBrowserFlow) states.set(oauthState, { sessionId, expiresAt })
 
   // 部分渠道（如腾讯 CodeBuddy）的授权地址要**现场向厂商换 state** ⇒ starter 可能是 async
   const initial = (await flow.initial(provider, ch, { ...opts, callbackUrl: callbackWithState, publicBase: base, callbackPath: cbPath })) || {}
@@ -61,7 +63,7 @@ export async function startLogin(provider, ch, opts = {}) {
   if (session.flow === 'browser') {
     session.oauthState = oauthState
     session.callbackUrl = callbackUrl
-    if (!base) states.set(oauthState, { sessionId, expiresAt })
+    if (!states.has(oauthState)) states.set(oauthState, { sessionId, expiresAt })
   }
 
   sessions.set(sessionId, session)
@@ -77,6 +79,8 @@ export async function startLogin(provider, ch, opts = {}) {
     verificationUri: session.verificationUri ?? null,
     interval: session.interval ?? 5,
     instructions: session.instructions ?? [],
+    // 纯轮询渠道（腾讯 CodeBuddy / WorkBuddy）：没有回调，UI 文案要说「等待授权」
+    pollingOnly: session.pollingOnly === true,
     expiresAt,
   }
 }
@@ -84,7 +88,11 @@ export async function startLogin(provider, ch, opts = {}) {
 export function getSession(sessionId) {
   const s = sessions.get(sessionId)
   if (!s) return null
-  if (Date.now() > s.expiresAt && s.state === 'pending') s.state = 'expired'
+  // P2-③：pending 与 waiting 都要判过期，否则用户会对着「正在换取凭证…」永远转圈
+  if (Date.now() > s.expiresAt && (s.state === 'pending' || s.state === 'waiting')) {
+    s.state = 'expired'
+    s.hint = '登录超时（5 分钟），请重新发起'
+  }
   return s
 }
 
@@ -93,13 +101,19 @@ export function getSession(sessionId) {
  * 消费一次性 state，把 code 交给会话，之后由 poll 完成 token 交换。
  */
 export function handleCallback({ state, code }) {
-  const sid = states.get(String(state ?? ''))
+  const key = String(state ?? '')
+  const sid = states.get(key)
   if (!sid) return { ok: false, error: '登录会话已过期或无效，请回设置页重新发起' }
-  if (Date.now() > sid.expiresAt) { states.delete(String(state)); return { ok: false, error: '登录会话已过期' } }
-  states.delete(String(state)) // 一次性
+  if (Date.now() > sid.expiresAt) { states.delete(key); return { ok: false, error: '登录会话已过期' } }
   const s = sessions.get(sid.sessionId)
-  if (!s) return { ok: false, error: '登录会话不存在' }
-  if (!code) { s.state = 'error'; s.error = '厂商未返回授权码'; return { ok: false, error: s.error } }
+  if (!s) { states.delete(key); return { ok: false, error: '登录会话不存在' } }
+  // P2-①：无 code 说明用户取消了授权 ⇒ **不要**消费 state，允许用户重新点一次
+  if (!code) {
+    s.state = s.state === 'ok' ? 'ok' : 'pending'
+    s.hint = '未收到授权码（可能取消了授权），可以重新点「一键登录」'
+    return { ok: false, error: '厂商未返回授权码，请重试' }
+  }
+  states.delete(key) // 一次性（只有真正拿到 code 才消费）
   s.callbackCode = String(code)
   s.state = 'waiting'
   s.hint = '已收到授权，正在换取凭证…'
