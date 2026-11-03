@@ -100,7 +100,7 @@ export function getSession(sessionId) {
  * 浏览器 OAuth 回调入口（由 /login/callback 路由调用）。
  * 消费一次性 state，把 code 交给会话，之后由 poll 完成 token 交换。
  */
-export function handleCallback({ state, code }) {
+export function handleCallback({ state, code, params }) {
   const key = String(state ?? '')
   const sid = states.get(key)
   if (!sid) return { ok: false, error: '登录会话已过期或无效，请回设置页重新发起' }
@@ -115,6 +115,9 @@ export function handleCallback({ state, code }) {
   }
   states.delete(key) // 一次性（只有真正拿到 code 才消费）
   s.callbackCode = String(code)
+  // 各渠道回调参数名不统一（trae 用 refreshToken/userJwt、accio 用 code…）
+  // ⇒ 全量保存，由各登录器自己取（只在内存，绝不落盘/回显）
+  s.callbackParams = (params && typeof params === 'object') ? { ...params } : {}
   s.state = 'waiting'
   s.hint = '已收到授权，正在换取凭证…'
   return { ok: true }

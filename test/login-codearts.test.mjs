@@ -147,10 +147,10 @@ test('未验证渠道必须诚实标注（不能全 true）', async () => {
 })
 
 test('getFlow 对未取证渠道给诚实降级（不造假 userCode/url）', async () => {
-  // buddy/workbuddy 已有真实现（见 test/login-buddy.test.mjs），这里改用仍无实现的 trae
-  const f = getFlow('trae', CHANNELS.trae)
-  assert.equal(f.type, FLOW_TYPE.BROWSER)
-  const init = await f.initial('trae', CHANNELS.trae, {})
+  // trae 也已有真实现；改用仍无实现的 raccoon 做诚实降级示例
+  const f = getFlow('raccoon', CHANNELS.raccoon)
+  assert.equal(f.type, FLOW_TYPE.QR)
+  const init = await f.initial('raccoon', CHANNELS.raccoon, {})
   assert.equal(init.userCode ?? null, null, '不许编造设备码')
   assert.equal(init.url ?? null, null, '未取证渠道不许编造登录 URL')
   assert.ok(Array.isArray(init.instructions) && init.instructions.length > 0, '必须给操作说明')

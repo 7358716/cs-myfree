@@ -19,6 +19,8 @@ import { startQoder, pollQoder } from './qoder.js'
 import { startCline, pollCline } from './cline.js'
 import { startMinimax, pollMinimax } from './minimax.js'
 import { startOfficeAce, pollOfficeAce } from './officeace.js'
+import { startTrae, pollTrae } from './trae.js'
+import { startAccio, pollAccio } from './accio.js'
 import { startBuddy, pollBuddy } from './buddy.js'
 import { startWorkbuddy, pollWorkbuddy } from './workbuddy.js'
 import { startLoomy, pollLoomy } from './loomy.js'
@@ -65,8 +67,14 @@ export const FLOW_MAP = Object.freeze({
     loginVerified: false,
     loginNote: 'WorkBuddy 国际：轮询式登录，端点已真机对拍；完整 token 交换待用户浏览器登录验证',
   },
-  trae: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'TRAE 字节：端点待取证' },
-  accio: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'Accio 阿里：端点待取证' },
+  trae: {
+    type: FLOW_TYPE.BROWSER, start: startTrae, poll: pollTrae,
+    loginVerified: false, loginNote: 'TRAE 字节：17 参授权 + ExchangeToken（端点已对拍），待真机验证',
+  },
+  accio: {
+    type: FLOW_TYPE.BROWSER, start: startAccio, poll: pollAccio,
+    loginVerified: false, loginNote: 'Accio 阿里：PKCE + return_url 回调（端点已对拍），待真机验证',
+  },
   gemini: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'Gemini Code Assist：本机网络不可达' },
   officeace: {
     type: FLOW_TYPE.BROWSER, start: startOfficeAce, poll: pollOfficeAce,

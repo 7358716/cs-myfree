@@ -970,6 +970,9 @@ export function registerRoutes(webServer, opts = {}) {
         try { url = new URL(req.url ?? '/', 'http://localhost') } catch { url = null }
         const state = String(url?.searchParams.get('state') ?? '')
         const code = String(url?.searchParams.get('code') ?? url?.searchParams.get('authorization_code') ?? '')
+        // 各渠道回调参数名不同（trae: refreshToken/userJwt；accio: code…）
+        const params = {}
+        if (url) for (const [k, v] of url.searchParams.entries()) params[k] = v
         const html = (title, detail) => {
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
           res.end(`<!doctype html><meta charset="utf-8"><title>${title}</title>
@@ -978,7 +981,7 @@ export function registerRoutes(webServer, opts = {}) {
 <p style="margin-top:28px"><a href="${PREFIX}">返回设置页</a></p></body>`)
         }
         let r = null
-        try { r = typeof loginEngine.callback === 'function' ? await loginEngine.callback({ state, code }) : null } catch { r = null }
+        try { r = typeof loginEngine.callback === 'function' ? await loginEngine.callback({ state, code, params }) : null } catch { r = null }
         if (r && r.ok === false) return html('⚠️ 授权失败', String(r.error ?? '回调参数无效或会话已过期，请回设置页重试'))
         return html(code ? '✅ 授权已收到' : '⚠️ 未拿到授权码', '可以关闭本页，回到 DSH 设置页查看登录结果。')
       },

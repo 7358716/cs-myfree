@@ -666,7 +666,8 @@ test('诚实降级：所有「未取证且无实现」的渠道不编造 url/use
     const fallbackOnly = Object.entries(FLOW_MAP)
       .filter(([, e]) => e.loginVerified === false && typeof e.start !== 'function')
       .map(([id]) => id)
-    assert.ok(fallbackOnly.length >= 8, `未取证兜底渠道过少：${fallbackOnly.length}`)
+    // 至少要有兜底渠道；随着真实现逐个落地，这个数会减少（不是越多越好）
+    assert.ok(fallbackOnly.length >= 1, `未取证兜底渠道过少：${fallbackOnly.length}`)
     for (const provider of fallbackOnly) {
       const r = await request(s.port, '/cs-myfree/login/start', {
         method: 'POST', headers: withCookie(REAL_COOKIE), body: { provider },
