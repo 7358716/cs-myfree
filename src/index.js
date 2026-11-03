@@ -19,8 +19,10 @@ import { fuseResults, toHostSources } from './search/fuse.js'
 import { PARSERS } from './search/sources.js'
 import { readJson, atomicWrite, withDefaults, DEFAULTS } from './config/store.js'
 import { guardApply, makeLogger, safeInject, safeEffect, safeRegisterAdapter, safeRegisterSearch, detectHostVersion } from './compat.js'
-import { registerCashRoute, CASH_PATH } from './web/cash.js'
+import { registerCashRoute, CASH_PATH, queryCash } from './web/cash.js'
 import { judge, sendJson } from './web/guard.js'
+import { registerRoutes, PREFIX as API_PREFIX } from './web/routes.js'
+import { createState } from './web/state.js'
 
 const NAME = 'cs-myfree'
 const VERSION = '0.2.0'
@@ -135,19 +137,53 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
   }, `${NAME}: web`)
   if (!searchOk) log.debug('宿主无 inject：跳过搜索注册')
 
-  // ── 余额路由（左下角 chip 的数据源；外部未登录一律 403）──
-  const cashOk = safeInject(ctx, ['webServer'], (scoped) => {
-    const ws = scoped?.webServer ?? scoped?.get?.('webServer', false)
-    if (!ws) { log.debug('无 webServer：余额路由未注册'); return }
-    const registered = registerCashRoute(ws, ctx, {
+  // ── HTTP API（设置页的数据源；全部过 guard）──
+  const stateStore = createState(cfg.dshHome)
+  const routesOk = safeInject(ctx, ['webServer'], (scoped) => {
+    const ws = scoped?.webServer ?? (typeof scoped?.get === 'function' ? scoped.get('webServer', false) : null)
+    if (!ws) { log.debug('无 webServer：HTTP API 未注册'); return }
+
+    // 余额（独立路径，保持与本机 myfree 一致的手感）
+    const cashRegistered = registerCashRoute(ws, ctx, {
       trustedHosts: cfg.trustedHosts ?? [],
       logger: log,
       helpers: { judge, sendJson },
     })
-    if (registered) log.info(`余额路由已注册：${CASH_PATH}（仅回环/已登录可访问）`)
-    else log.warn('余额路由注册失败（功能不影响）')
-  }, `${NAME}: cash`)
-  if (!cashOk) log.debug('宿主无 inject：跳过余额路由')
+    if (cashRegistered) log.info(`余额路由：${CASH_PATH}`)
+
+    // 完整 API
+    let n = 0
+    try {
+      n = registerRoutes(ws, {
+        state: stateStore,
+        ctx,
+        version: VERSION,
+        trustedHosts: cfg.trustedHosts ?? [],
+        logger: log,
+        getChain: () => (cfg.chainBase ?? DEFAULT_CANDIDATES),
+        getConfig: () => cfg,
+        setConfig: async (next) => {
+          try {
+            const file = `${stateStore.dir}/config.json`
+            const r = await atomicWrite(file, next)
+            return r.ok === true
+          } catch { return false }
+        },
+        ledger: async () => {
+          try {
+            const { readJson } = await import('./config/store.js')
+            const r = await readJson(`${stateStore.dir}/ledger-summary.json`, { records: [], summary: [] })
+            return r.value ?? { records: [], summary: [] }
+          } catch { return { records: [], summary: [] } }
+        },
+      })
+    } catch (err) {
+      log.warn(`API 注册异常：${err?.message ?? err}`)
+    }
+    if (n > 0) log.info(`HTTP API 已注册 ${n} 条：${API_PREFIX}/*（仅回环或已登录可访问）`)
+    else log.warn('HTTP API 注册失败（设置页会显示无数据）')
+  }, `${NAME}: webServer`)
+  if (!routesOk) log.debug('宿主无 inject：跳过 HTTP API')
 
   log.info('启动完成')
 }, NAME)

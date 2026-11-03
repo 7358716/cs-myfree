@@ -85,7 +85,7 @@ test('apply 会注册 settings.section', () => {
   assert.equal(registered.length, 1)
   assert.equal(registered[0].desc.id, 'cs-myfree')
   assert.equal(typeof registered[0].desc.label, 'function', 'label 必须是函数')
-  assert.equal(registered[0].desc.label(), '免费模型')
+  assert.equal(registered[0].desc.label(), 'Myfree')
   assert.equal(typeof registered[0].Component, 'function', '第二个参数必须是组件')
 })
 
@@ -242,5 +242,5 @@ test('余额卡片与 chip 都导出了', () => {
   const mod = decl.factory((id) => (id === 'react' ? fakeReact : null))
   assert.equal(typeof mod.CashCard, 'function')
   assert.equal(typeof mod.CashChip, 'function')
-  assert.equal(typeof mod.CsMyfreeSection, 'function')
+  assert.equal(typeof mod.MyfreeSection, 'function')
 })
