@@ -23,12 +23,25 @@ export const ADAPTERS = Object.freeze({ kilo, ovh, pollinations })
 /** 各源的默认模型 */
 export const DEFAULT_MODEL = Object.freeze({
   kilo: 'kilo-auto/free',
-  ovh: 'Qwen3.5-9B',
+  ovh: 'Qwen3.5-397B-A17B',   // 实测最快（1.9s）；Qwen3.5-9B 冷启动曾 43s
   pollinations: 'openai',
 })
 
-/** 优先级（先试最稳的） */
-export const PRIORITY = Object.freeze(['kilo', 'ovh', 'pollinations'])
+/**
+ * 默认参与轮换的源（**按 2026-11-03 实测可用性排序**）
+ *
+ * ⚠️ pollinations 已移出：
+ *    `Free limit reached: 1 reply every 45 seconds per IP`
+ *    ⇒ 每 45 秒仅 1 次，连续对话必然 402。代码保留，用户可手动加回。
+ *
+ * OVH 保留但排在 kilo 之后：它冷启动可达 43s，容易触发宿主超时截断。
+ */
+export const PRIORITY = Object.freeze(['kilo', 'ovh'])
+// ⚠️ ovh 实测：简单问答 1.9s，但**长回答 60s 超时**（2026-11-03）
+//    故它只是「kilo 挂了才用」的最后备用
+
+/** 可选但**默认禁用**的源（代码保留，用户可在配置里显式启用） */
+export const OPTIONAL = Object.freeze(['pollinations'])
 
 /**
  * provider 别名 → 真实源 id。

@@ -94,10 +94,12 @@ export async function chatRequest(o) {
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
 
   try {
+    // extra 里的字段（如 max_tokens）合并进请求体
+    const body = Object.assign({ model, messages, stream }, o.extra || {})
     const res = await fetchImpl(baseUrl, {
       method: 'POST',
       headers: keylessHeaders(headers),
-      body: JSON.stringify({ model, messages, stream }),
+      body: JSON.stringify(body),
       signal: ctrl.signal,
     })
     if (!res.ok) {

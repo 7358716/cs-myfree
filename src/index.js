@@ -33,7 +33,7 @@ import { streamChat as channelStream } from './pools/channels/driver.js'
 import { CHANNELS } from './pools/channels/protocols.js'
 
 const NAME = 'cs-myfree'
-const VERSION = '1.6.1'
+const VERSION = '1.7.0'
 
 export const name = NAME
 export const version = VERSION

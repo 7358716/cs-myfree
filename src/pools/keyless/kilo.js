@@ -63,12 +63,14 @@ export function freeModels(models = []) {
 }
 
 /** 发起对话 */
-export async function chat({ model, messages, signal, stream = true, fetchImpl, timeoutMs } = {}) {
+export async function chat({ model, messages, signal, stream = true, fetchImpl, timeoutMs = 120_000 } = {}) {
   return chatRequest({
     baseUrl: `${KILO_BASE}/chat/completions`,
     model: model ?? 'kilo-auto/free',
     messages,
     signal, stream, fetchImpl, timeoutMs,
+    // 🔑 必须显式设 max_tokens：不设时厂商默认值很小，会导致回答被截断
+    extra: { max_tokens: 8192 },
   })
 }
 

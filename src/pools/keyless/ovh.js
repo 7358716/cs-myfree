@@ -17,11 +17,14 @@ export const OVH_BASE = 'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1'
 export const KEYLESS = true
 
 /** 默认模型链（质量降序，实测均可用） */
+/**
+ * 可用模型（实测速度，2026-11-03）
+ * ⚠️ 已移除 Qwen3.6-27B：实测 55 秒超时，不可用
+ */
 export const OVH_MODELS = Object.freeze([
-  { id: 'Qwen3.5-397B-A17B', vision: true, note: '质量最高' },
-  { id: 'Qwen2.5-VL-72B-Instruct', vision: true, note: '视觉实测答对' },
-  { id: 'Qwen3.6-27B', vision: true, note: '中等' },
-  { id: 'Qwen3.5-9B', vision: true, note: '最快' },
+  { id: 'Qwen3.5-397B-A17B', vision: true, ms: 1900, note: '实测最快（1.9s）' },
+  { id: 'Qwen2.5-VL-72B-Instruct', vision: true, ms: 2900, note: '视觉实测答对（2.9s）' },
+  { id: 'Qwen3.5-9B', vision: true, ms: 4200, note: '冷启动曾达 43s，慎用' },
 ])
 
 export async function listModels({ fetchImpl = globalThis.fetch, timeoutMs = 15_000 } = {}) {
@@ -38,12 +41,13 @@ export async function listModels({ fetchImpl = globalThis.fetch, timeoutMs = 15_
   } finally { clearTimeout(timer) }
 }
 
-export async function chat({ model, messages, signal, stream = false, fetchImpl, timeoutMs = 90_000 } = {}) {
+export async function chat({ model, messages, signal, stream = false, fetchImpl, timeoutMs = 120_000 } = {}) {
   return chatRequest({
     baseUrl: `${OVH_BASE}/chat/completions`,
-    model: model ?? 'Qwen3.5-9B',
+    model: model ?? 'Qwen3.5-397B-A17B',
     messages,
     signal, stream, fetchImpl, timeoutMs,
+    extra: { max_tokens: 8192 },
   })
 }
 

@@ -14,6 +14,7 @@ import { join, dirname } from 'node:path'
 import { readFile, writeFile, rename, mkdir, chmod, unlink } from 'node:fs/promises'
 import { CHANNELS, AUTH } from './protocols.js'
 import { buildAuthHeaders, joinUrl } from './driver.js'
+import { MODELS_PATH, builtinModelsOf, hasBuiltin } from './builtin-models.js'
 
 /** 模型 id 分隔符（用 `/` 更直观，用户能看出是哪个渠道的） */
 export const SEP = '/'
@@ -64,11 +65,24 @@ async function writeCache(dshHome, obj) {
  */
 export async function fetchChannelModels(channelId, cred, opts = {}) {
   const ch = CHANNELS[channelId]
-  if (!ch) return { ok: false, models: [], error: '未知渠道' }
-  if (!cred) return { ok: false, models: [], error: '未登录' }
+  if (!ch) return { ok: false, models: [], error: '未知渠道', source: 'none' }
+  if (!cred) return { ok: false, models: [], error: '未登录', source: 'none' }
 
-  const { fetchImpl = globalThis.fetch, timeoutMs = 15_000 } = opts
-  const url = joinUrl(ch.baseUrl, ch.modelsPath ?? '/v1/models')
+  const { fetchImpl = globalThis.fetch, timeoutMs = 15_000, allowBuiltin = true } = opts
+  const modelsPath = MODELS_PATH[channelId]
+
+  // 该渠道根本不提供 models 端点 ⇒ 直接用内置清单（不发无用的请求）
+  if (modelsPath === null) {
+    const builtin = builtinModelsOf(channelId)
+    return {
+      ok: builtin.length > 0,
+      models: builtin,
+      source: 'builtin',
+      error: builtin.length === 0 ? '该渠道不提供模型清单，且没有内置兜底' : null,
+    }
+  }
+
+  const url = joinUrl(ch.badUrl ?? ch.baseUrl, modelsPath ?? '/v1/models')
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
 
@@ -81,15 +95,34 @@ export async function fetchChannelModels(channelId, cred, opts = {}) {
       },
       signal: ctrl.signal,
     })
-    if (!res.ok) return { ok: false, models: [], error: `HTTP ${res.status}` }
+    if (!res.ok) {
+      // 🔑 关键：拉失败**回落到内置清单**，而不是让用户看到空列表
+      const builtin = allowBuiltin ? builtinModelsOf(channelId) : []
+      return {
+        ok: builtin.length > 0,
+        models: builtin,
+        source: builtin.length > 0 ? 'builtin-after-http-error' : 'none',
+        error: `HTTP ${res.status}`,
+      }
+    }
     const body = await res.json()
     const arr = body?.data ?? body?.models ?? body ?? []
     const models = (Array.isArray(arr) ? arr : [])
       .map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name ?? m?.id ?? '') }))
       .filter((m) => m.id)
-    return { ok: true, models }
+    if (models.length === 0) {
+      const builtin = allowBuiltin ? builtinModelsOf(channelId) : []
+      return { ok: builtin.length > 0, models: builtin, source: 'builtin-empty-remote', error: null }
+    }
+    return { ok: true, models, source: 'remote', error: null }
   } catch (err) {
-    return { ok: false, models: [], error: String(err?.message ?? err).slice(0, 100) }
+    const builtin = allowBuiltin ? builtinModelsOf(channelId) : []
+    return {
+      ok: builtin.length > 0,
+      models: builtin,
+      source: builtin.length > 0 ? 'builtin-after-network-error' : 'none',
+      error: String(err?.message ?? err).slice(0, 100),
+    }
   } finally {
     clearTimeout(timer)
   }
