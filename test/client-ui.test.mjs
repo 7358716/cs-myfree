@@ -946,45 +946,50 @@ test('流程① 渠道一键登录：browser 向导 → 自动轮询 → 成功�
   } finally { c.unmount() }
 })
 
-test('流程② 改降级链：加一条→保存→重载保持→上移→删除→诚实报告生效状态', async () => {
+test('流程② 改降级链：内置条目可见可删（禁用）→ 加一条 → 保存 → 重载保持 → 诚实报告', async () => {
   const be = makeBackend()
   const c = await mount({ backend: be.backend })
   try {
     await c.start()
     await c.openTab('降级链 ★')
+
+    // 🔴 初始：覆盖层 1 条(kilo) + 内置里未被覆盖的 1 条(ovh) ⇒ 2 行可见
+    assert.equal(c.selects().length, 6, '初始应显示 2 行（共 6 个下拉）')
+    // 内置条目必须可见（否则用户「删不掉」——这是用户实测的原始 bug）
+    assert.ok(c.text().includes('Qwen3.5-397B-A17B'), '内置的 ovh 必须作为一行显示')
+    assert.ok(c.text().includes('kilo-auto/free'), '覆盖层的 kilo 必须显示')
+
+    // 加一条新行
     await c.click('+ 加一条')
-    // 降级链已改成下拉选择（provider / model / tier），不再是手输输入框
+    assert.equal(c.selects().length, 9, '3 行 × 3 下拉')
+
+    // 把新增行改成 codearts + 模型 + T2
     let sels = c.selects()
-    assert.equal(sels.length, 6, '两行 × 3 下拉（provider/model/tier）')
-    await c.change(sels[3], 'ovh')                    // 第 2 行 provider
-    // 换 provider 后 model 自动选该 provider 第一项，这里再显式选目标模型
+    await c.change(sels[6], 'codearts')
     sels = c.selects()
-    await c.change(sels[4], 'Qwen3.5-397B-A17B')      // 第 2 行 model
+    await c.change(sels[7], 'deepseek-v4.1-flash')
     sels = c.selects()
-    await c.change(sels[5], '2')                      // 第 2 行 tier
+    await c.change(sels[8], '2')
     await c.click('保存覆盖层')
-    const strip = (list) => list.map((e) => ({ provider: e.provider, model: e.model, tier: e.tier }))
-    assert.deepEqual(strip(be.db.overrides), [
-      { provider: 'kilo', model: 'kilo-auto/free', tier: 1 },
-      { provider: 'ovh', model: 'Qwen3.5-397B-A17B', tier: 2 },
-    ], '保存应把草稿整表写入（留空过滤）：' + JSON.stringify(be.db.overrides))
     assert.ok(c.text().includes('✅ 已保存并立即生效'), c.text().slice(-400))
 
-    // 重载后草稿 = 磁盘覆盖层（刷新保持）
-    assert.equal(c.selects().length, 6, '保存并 reload 后应仍有 2 行（每行 3 个下拉）')
-    assert.ok(c.text().includes('覆盖层2 条'), c.text().slice(-400))
+    // 覆盖层应含 3 条：kilo(覆盖) + ovh(内置显式化) + codearts(新增)
+    const provs = be.db.overrides.map((e) => e.provider)
+    assert.ok(provs.includes('codearts'), '新增的 codearts 必须写入')
+    assert.ok(provs.includes('ovh'), '内置的 ovh 也必须作为覆盖条目保存（否则编辑会丢）')
 
-    // 上移第 2 行并保存
-    const ups = c.nodes().filter((n) => n.props && n.props.title === '上移')
-    await c.click(ups[1])
-    await c.click('保存覆盖层')
-    assert.equal(be.db.overrides[0].provider, 'ovh', '上移后应排到第一：' + JSON.stringify(be.db.overrides))
-
-    // 删除第 1 行并保存
-    const dels = c.nodes().filter((n) => n.props && n.props.title === '删除')
+    // 删除内置的 kilo 那一行（第 1 行）⇒ 必须写成 disabled 规则（否则它会回来）
+    const dels = c.nodes().filter((n) => n.props && n.props.title && String(n.props.title).includes('移除'))
+    assert.ok(dels.length >= 2, '两行都是内置链条目，都应有「移除」按钮（写 disabled）')
     await c.click(dels[0])
     await c.click('保存覆盖层')
-    assert.equal(be.db.overrides.length, 1, JSON.stringify(be.db.overrides))
+    const disabled = (be.db.overrides || []).filter((e) => e.disabled === true)
+    assert.ok(disabled.length >= 1, '删掉内置条目必须留下 disabled 规则：' + JSON.stringify(be.db.overrides))
+    assert.equal(disabled[0].provider, 'kilo', '删掉的是第 1 行（kilo）')
+
+    // 重载后 3 行（kilo 已禁用但作为规则保留 + ovh + codearts），每行 3 下拉
+    const afterReload = c.selects().length
+    assert.equal(afterReload, 9, '重载后应仍显示 3 行（每行 3 下拉）：实际 ' + afterReload)
 
     // 旧后端 applied=false ⇒ 必须提示需重启，不能假装已生效
     be.db.chainApplied = false

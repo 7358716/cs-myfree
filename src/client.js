@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const react = require('react')
     const h = react.createElement
 
-    const VERSION = '1.9.12'
+    const VERSION = '1.9.13'
     const API = '/cs-myfree'
     const CASH_PATH = '/cs-myfree/cash'
 
@@ -1463,7 +1463,19 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = react.useState(null)
       const [busy, setBusy] = react.useState(false)
 
-      react.useEffect(() => { if (s.data) setDraft((s.data.overrides || []).slice()) }, [s.data])
+      react.useEffect(() => {
+        if (!s.data) return
+        const ov = Array.isArray(s.data.overrides) ? s.data.overrides.slice() : []
+        const builtin = Array.isArray(s.data.builtin) ? s.data.builtin : []
+        const key = (e) => e.provider + '\u0000' + e.model
+        const ovKeys = new Set(ov.map(key))
+        // 🔴 内置链里「没有被覆盖、也没有被禁用」的条目也要显示成行 ——
+        //    否则用户看不到 kilo/ovh，自然「无法删除」（用户实测反馈）。
+        const builtinRows = builtin
+          .filter((e) => e && e.provider && e.model && !ovKeys.has(key(e)))
+          .map((e) => ({ provider: e.provider, model: e.model, tier: e.tier ?? 1, _fromBuiltin: true }))
+        setDraft(ov.concat(builtinRows))
+      }, [s.data])
 
       if (s.error) return h(Err, { error: s.error })
       if (!s.data) return h(Loading, { on: s.loading })
@@ -1505,15 +1517,33 @@ window.__ModuleLoader__.load({
       })
       const save = () => {
         setBusy(true); setMsg(null)
-        // 保留 disabled 条目（它们是「剔除规则」，provider/model 必须有、tier 可缺省）
+        // 组装 payload：
+        //  · disabled 条目 ⇒ { provider, model, disabled:true }（剔除规则）
+        //  · 普通条目     ⇒ { provider, model, tier }
+        //  · 原本来自内置链、但用户把这行删掉 ⇒ 也要写 disabled（否则内置条目会回来）
+        const builtin = Array.isArray(d.builtin) ? d.builtin : []
+        const builtinKeys = new Set(builtin.map((e) => e.provider + '\u0000' + e.model))
+        const draftKeys = new Set(draft.filter((e) => e.provider && e.model).map((e) => e.provider + '\u0000' + e.model))
         const payload = draft.filter((e) => e.provider && e.model).map((e) => (
           e.disabled ? { provider: e.provider, model: e.model, disabled: true }
             : { provider: e.provider, model: e.model, tier: e.tier }
         ))
+        for (const b of builtin) {
+          const k = b.provider + '\u0000' + b.model
+          if (builtinKeys.has(k) && !draftKeys.has(k)) {
+            payload.push({ provider: b.provider, model: b.model, disabled: true })
+          }
+        }
         api('/chain', { method: 'POST', body: JSON.stringify({ chain: payload }) })
           .then((r) => { setMsg(r); reload() })
           .catch((e) => setMsg({ ok: false, errors: [String((e && e.message) || e)] }))
           .then(() => setBusy(false))
+      }
+
+      /** 这条是否来自内置链（内置条目只能「禁用」，不能物理删除） */
+      const isBuiltinEntry = (e) => {
+        const builtin = Array.isArray(d.builtin) ? d.builtin : []
+        return builtin.some((b) => b.provider === e.provider && b.model === e.model)
       }
 
       /** 一行：provider 下拉 + model 下拉 + tier 下拉 + 上移/下移/删除 */
@@ -1561,7 +1591,11 @@ window.__ModuleLoader__.load({
           }, e.disabled ? '已禁用' : '禁用'),
           h('span', { style: S.btn(false), onClick: () => move(i, -1), title: '上移' }, '↑'),
           h('span', { style: S.btn(false), onClick: () => move(i, 1), title: '下移' }, '↓'),
-          h('span', { style: S.btn(false), onClick: () => del(i), title: '删除' }, '✕'))
+          h('span', {
+            style: S.btn(false),
+            onClick: () => del(i),
+            title: isBuiltinEntry(e) ? '从链里移除（内置条目会记为「禁用」）' : '删除这条覆盖',
+          }, '✕'))
       }
 
       return h('div', null,
