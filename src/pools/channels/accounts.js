@@ -8,7 +8,11 @@
  *   · 每个人登录的是**自己的**账号；别人的插件实例拿不到你的
  *
  * 存储结构（只存登录态，不存账号密码）：
- *   { accounts: { [id]: { provider, label, credential, addedAt, expiresAt } } }
+ *   { accounts: { [id]: { provider, label, credential, ak?, sk?, securityToken?, addedAt, expiresAt } } }
+ *
+ * 🔴 AK/SK 渠道（codearts 等签名型）需要 **AK+SK（+securityToken）三元组**，
+ *    单个字符串装不下。历史数据曾把 AK、SK 各存成一条账号（两条记录），
+ *    这里提供 `pairAkSkEntries()` 一次性配对归一 + `secretOf()` 统一取用。
  *
  * @module cs-myfree/pools/channels/accounts
  */
@@ -55,16 +59,20 @@ export function createAccountStore(dshHome) {
   return {
     async list() {
       const d = await readAll(dshHome)
-      return Object.entries(d.accounts).map(([id, a]) => ({
-        id,
-        provider: a.provider,
-        label: a.label || a.provider,
-        hasCredential: Boolean(a.credential),
-        // 只回掩码，绝不回原文
-        masked: a.credential ? maskCredential(a.credential) : null,
-        addedAt: a.addedAt ?? null,
-        expiresAt: a.expiresAt ?? null,
-      }))
+      return Object.entries(d.accounts).map(([id, a]) => {
+        const isAkSk = Boolean(a.ak && a.sk)
+        return {
+          id,
+          provider: a.provider,
+          label: a.label || a.provider,
+          kind: isAkSk ? 'aksk' : 'token',
+          hasCredential: isAkSk || Boolean(a.credential),
+          // 只回掩码，绝不回原文
+          masked: isAkSk ? `${maskCredential(a.ak)} / ${maskCredential(a.sk)}` : (a.credential ? maskCredential(a.credential) : null),
+          addedAt: a.addedAt ?? null,
+          expiresAt: a.expiresAt ?? null,
+        }
+      })
     },
 
     async get(id) {
@@ -76,23 +84,79 @@ export function createAccountStore(dshHome) {
     async credentialOf(provider) {
       const d = await readAll(dshHome)
       for (const a of Object.values(d.accounts)) {
-        if (a.provider === provider && a.credential) return a.credential
+        if (a.provider !== provider) continue
+        if (a.ak && a.sk) return `${a.ak}:${a.sk}`
+        if (a.credential) return a.credential
       }
       return null
     },
 
-    async save({ id, provider, label, credential, expiresAt }) {
+    /**
+     * 内部用：取**结构化凭据**（AK/SK 签名型渠道用）。
+     * 兼容老数据：单字符串 `AK:SK` 会拆开；同 provider 下「像 AK + 像 SK」的
+     * 两条历史记录会在内存里自动配对（不写盘，写盘走 normalizeAkSk）。
+     * @returns {Promise<{token?:string, ak?:string, sk?:string, securityToken?:string}|null>}
+     */
+    async secretOf(provider) {
+      const d = await readAll(dshHome)
+      const { merged } = pairAkSkEntries(d.accounts)
+      for (const a of Object.values(merged)) {
+        if (a.provider !== provider) continue
+        if (a.ak && a.sk) {
+          return { ak: a.ak, sk: a.sk, securityToken: a.securityToken, token: a.credential && !String(a.credential).includes(':') ? a.credential : undefined }
+        }
+        if (typeof a.credential === 'string' && a.credential.includes(':')) {
+          const [ak, sk] = a.credential.split(':')
+          if (ak && sk) return { ak, sk, securityToken: a.securityToken }
+        }
+        if (a.credential) return { token: a.credential }
+      }
+      return null
+    },
+
+    /**
+     * 一次性归一：把同 provider 下「AK 一条 + SK 一条」的历史账号合成一条（写盘）。
+     * @param {Set<string>} providers 需要 AK/SK 的渠道集合
+     * @returns {Promise<{changed:boolean, before:number, after:number}>}
+     */
+    async normalizeAkSk(providers = new Set()) {
+      try {
+        const d = await readAll(dshHome)
+        const before = Object.keys(d.accounts).length
+        const { merged, changed } = pairAkSkEntries(d.accounts, providers)
+        if (!changed) return { changed: false, before, after: before }
+        const ok = await writeAll(dshHome, { accounts: merged })
+        return { changed: ok, before, after: Object.keys(merged).length }
+      } catch {
+        return { changed: false, before: 0, after: 0 }
+      }
+    },
+
+    async save({ id, provider, label, credential, ak, sk, securityToken, expiresAt }) {
       const d = await readAll(dshHome)
       const key = id || `${provider}-${Date.now()}`
-      d.accounts[key] = {
+      let credAk = typeof ak === 'string' && ak.trim() ? ak.trim() : ''
+      let credSk = typeof sk === 'string' && sk.trim() ? sk.trim() : ''
+      // 兼容 UI 的 `AK:SK` 单字符串提交
+      if (!credAk && !credSk && typeof credential === 'string' && credential.includes(':')) {
+        const [a, b] = credential.split(':')
+        if (a && b) { credAk = a; credSk = b }
+      }
+      const entry = {
         provider,
         label: label || provider,
         credential: String(credential || ''),
         addedAt: Date.now(),
         expiresAt: expiresAt ?? null,
       }
+      if (credAk && credSk) {
+        entry.ak = credAk
+        entry.sk = credSk
+        if (typeof securityToken === 'string' && securityToken.trim()) entry.securityToken = securityToken.trim()
+      }
+      d.accounts[key] = entry
       const ok = await writeAll(dshHome, d)
-      return { ok, id: key }
+      return { ok, id: key, kind: credAk && credSk ? 'aksk' : 'token' }
     },
 
     async remove(id) {
@@ -114,4 +178,59 @@ export function maskCredential(s) {
   const v = String(s || '')
   if (v.length <= 10) return v ? '****' : ''
   return `${v.slice(0, 4)}…${v.slice(-4)}`
+}
+
+/**
+ * 纯函数：把「AK 一条 + SK 一条」的历史账号配对成一条（不改入参）。
+ *
+ * 判定依据（2026-11-03 实测）：华为云 AK 20 字符、SK 40 字符；
+ * 两条记录同 provider、都没有完整 ak+sk、长度差 ≥ 8 且都像密钥（无空白）。
+ * 只对 `providers` 指定的渠道生效（默认 codearts 这类签名型渠道），
+ * 避免把普通 token 渠道的两条账号误合。
+ *
+ * @param {Record<string, any>} accounts
+ * @param {Set<string>} [providers] 允许配对的渠道集合
+ * @returns {{merged:Record<string,any>, changed:boolean}}
+ */
+export function pairAkSkEntries(accounts = {}, providers = new Set()) {
+  const entries = accounts && typeof accounts === 'object' ? accounts : {}
+  const merged = {}
+  const byProvider = new Map()
+  for (const [id, a] of Object.entries(entries)) {
+    if (!a || typeof a !== 'object') { merged[id] = a; continue }
+    if (a.ak && a.sk) { merged[id] = a; continue }              // 已完整 ⇒ 原样保留
+    if (!byProvider.has(a.provider)) byProvider.set(a.provider, [])
+    byProvider.get(a.provider).push([id, a])
+  }
+
+  let changed = false
+  for (const [provider, list] of byProvider) {
+    const canPair = providers.size === 0 ? true : providers.has(provider)
+    const picked = list.filter(([, a]) => typeof a.credential === 'string' && a.credential !== '' && !/\s/.test(a.credential))
+    if (canPair && picked.length === 2) {
+      const [x, y] = picked
+      const lenX = String(x[1].credential).length
+      const lenY = String(y[1].credential).length
+      if (lenX !== lenY) {
+        const short = lenX < lenY ? x : y
+        const long = lenX < lenY ? y : x
+        if (String(short[1].credential).length >= 16 && String(long[1].credential).length >= 32) {
+          const id = `${provider}-aksk`
+          merged[id] = {
+            provider,
+            label: short[1].label || long[1].label || provider,
+            credential: '',
+            ak: String(short[1].credential),
+            sk: String(long[1].credential),
+            addedAt: Math.min(short[1].addedAt ?? Date.now(), long[1].addedAt ?? Date.now()),
+            expiresAt: short[1].expiresAt ?? long[1].expiresAt ?? null,
+          }
+          changed = true
+          continue
+        }
+      }
+    }
+    for (const [id, a] of list) merged[id] = a
+  }
+  return { merged, changed }
 }

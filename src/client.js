@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const react = require('react')
     const h = react.createElement
 
-    const VERSION = '1.7.0'
+    const VERSION = '1.8.0'
     const API = '/cs-myfree'
     const CASH_PATH = '/cs-myfree/cash'
 
@@ -62,9 +62,42 @@ window.__ModuleLoader__.load({
       return fetch(API + path, Object.assign({ credentials: 'same-origin', headers: { 'content-type': 'application/json' } }, opts || {}))
         .then(async (r) => {
           const text = await r.text().catch(() => '')
-          if (!r.ok) throw new Error('HTTP ' + r.status + (text ? ' — ' + text.slice(0, 160) : ''))
+          if (!r.ok) {
+            // 优先展示后端 JSON 里的 error 文案，而不是整段 JSON
+            let reason = ''
+            try { reason = String(JSON.parse(text)?.error || '') } catch (_) {}
+            throw new Error('HTTP ' + r.status + (reason ? ' — ' + reason.slice(0, 200) : (text ? ' — ' + text.slice(0, 160) : '')))
+          }
           try { return JSON.parse(text) } catch { throw new Error('响应不是 JSON：' + text.slice(0, 120)) }
         })
+    }
+
+    /** 找出「提交的配置」与「运行时回读的配置」不一致的字段路径（最多 6 条） */
+    function findMismatch(sent, cur, path = '', out = []) {
+      if (out.length >= 6) return out
+      if (sent === null || typeof sent !== 'object') {
+        if (!Object.is(sent, cur)) out.push(path || '(root)')
+        return out
+      }
+      if (Array.isArray(sent)) {
+        if (JSON.stringify(sent) !== JSON.stringify(cur)) out.push(path)
+        return out
+      }
+      for (const k of Object.keys(sent || {})) {
+        findMismatch(sent[k], cur == null ? undefined : cur[k], path ? path + '.' + k : k, out)
+      }
+      return out
+    }
+
+    /**
+     * 保存后的「是否真的生效」判断。
+     * 后端目前不保证回传 applied 字段：有就按后端说，没有就按诚实口径提示。
+     */
+    function applyVerdict(res) {
+      if (res && res.applied === true) return { ok: true, text: '✅ 已保存并立即生效' }
+      if (res && res.requiresRestart === true) return { ok: false, text: '✅ 已保存，需重启插件/宿主后生效' }
+      if (res && res.applied === false) return { ok: false, text: '⚠️ 已写入文件，但运行时未生效（需重启插件/宿主）' }
+      return { ok: null, text: '✅ 已写入文件；当前接口未报告是否热生效，若实际行为没变请重启插件/宿主' }
     }
 
     /** 数据加载 hook */
@@ -137,16 +170,18 @@ window.__ModuleLoader__.load({
             h('div', { style: { marginTop: '6px', fontSize: '11px', fontFamily: 'ui-monospace, monospace', opacity: 0.8 } },
               String((err && err.message) || err)),
             h('div', { style: { marginTop: '8px', fontSize: '11px', opacity: 0.65 } },
-              '可以把这段错误发我，我会修。点上面其它标签页仍可使用。'),
+              '可以把这段错误发我，我会修。'),
+            h('div', { style: { marginTop: '10px' } },
+              h('button', { style: S.btn(false), onClick: () => this.setState({ error: null }) }, '重试这个区域')),
           )
         }
         return this.props.children
       }
     }
 
-    /** 把任意区域包进边界 */
+    /** 把任意区域包进边界（key=当前分区：一个分区崩了不能连累其它分区） */
     function Safe(props) {
-      return h(ErrorBoundary, null, h(props.View))
+      return h(ErrorBoundary, { key: props.scope || 'zone' }, h(props.View))
     }
 
     // ── 余额卡片 ──
@@ -186,7 +221,7 @@ window.__ModuleLoader__.load({
           + (Array.isArray(ds.balances) && ds.balances.length
             ? '　赠送 ¥' + Number(ds.balances[0].granted).toFixed(2) + '　充值 ¥' + Number(ds.balances[0].topped).toFixed(2) : '')) : null,
         errs.length ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, S.warn) }, errs.map((e, i) => h('div', { key: i }, '· ' + e))) : null,
-        h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) }, '每 60 秒自动刷新 · 只读查询，不产生费用'),
+        h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) }, '只读查询，不产生费用 · 打开页面时自动查一次，点「刷新」立即重查'),
       )
     }
 
@@ -200,26 +235,45 @@ window.__ModuleLoader__.load({
       const chainLen = d && d.chain ? d.chain.effectiveCount : null
       const chTotal = c ? c.total : null
       const chLogged = c ? (c.channels || []).filter((x) => x.loggedIn).length : null
-      const keylessOk = d && d.probe ? d.probe.okCount + '/' + d.sources.counts.keyless : '未探测'
+      // ⚠️ /state 的 probe 只有 okCount，没有「探测了几个源」；不能拿免密源总数当分母（会显示 2/3）
+      //    探测范围只覆盖默认优先源（当前 Kilo/OVH），所以这里只报「可用几个」+ 说明
+      const keylessOk = d && d.probe ? d.probe.okCount + ' 个可用（探测范围：默认优先源）' : '未探测'
+      const paidEnabled = !!(d && d.config && d.config.paid && d.config.paid.enabled)
+      const chainProviders = d && d.chain && Array.isArray(d.chain.tiers)
+        ? Array.from(new Set(d.chain.tiers.reduce((all, t) => all.concat(t.providers || []), [])))
+        : []
 
+      // 状态行：ok=null 表示「未就绪/不适用」，别用 false 假装失败
       const status = (ok, label, detail) => h('div', { style: { display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid rgba(128,128,128,0.12)' } },
         h('span', null, (ok === true ? '✅ ' : ok === false ? '❌ ' : '⏸ ') + label),
         h('span', { style: S.dim }, detail))
 
+      const keylessList = d && d.sources && Array.isArray(d.sources.keyless) ? d.sources.keyless : []
+      const keylessLabels = keylessList.map((k) => k.label).join(' / ')
+
+      if (st.error && !d) {
+        return h('div', null,
+          h(Err, { error: '状态接口读取失败：' + st.error }),
+          h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
+            h('button', { style: S.btn(true), onClick: () => { reload(); reloadCh() } }, '重试')),
+          ch.error ? h(Err, { error: '渠道接口读取失败：' + ch.error }) : null)
+      }
+
       return h('div', null,
-        h(CashCard),
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '一眼看懂当前状态'),
-          status(chainLen > 0, '降级链', chainLen === null ? '加载中' : (chainLen + ' 条候选' + (chainLen === 0 ? '（空 ⇒ 必失败）' : ''))),
-          status(keylessOk !== '未探测' && d && d.probe && d.probe.anyOk, '免密源', keylessOk),
-          status(chLogged > 0, '渠道账号', chTotal === null ? '加载中' : (chLogged + '/' + chTotal + ' 家已登录')),
+          status(chainLen === null ? null : chainLen > 0, '降级链', chainLen === null ? '加载中' : (chainLen + ' 条候选' + (chainLen === 0 ? '（空 ⇒ 必失败）' : ''))),
+          status(d && d.probe ? !!d.probe.anyOk : null, '免密源', keylessOk),
+          status(chLogged === null ? null : chLogged > 0, '渠道账号', chTotal === null ? '加载中' : (chLogged + '/' + chTotal + ' 家已登录')),
           status(null, 'DeepSeek 余额', '见上方卡片'),
-          status(null, '付费闸门', '默认全关（不会自动花钱）')),
+          status(paidEnabled ? null : true, '付费闸门', paidEnabled ? '⚠️ 已开启（会花钱，注意限额）' : '默认全关（不会自动花钱）')),
 
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '现在能用什么'),
           h('div', { style: S.dim },
-            '· 免费模型：3 个免密源（Kilo / OVH / Pollinations），**不需要任何账号**'),
+            '· 免密源 ' + keylessList.length + ' 个' + (keylessLabels ? '（' + keylessLabels + '）' : '') + '，不需要任何账号'),
+          h('div', { style: S.dim },
+            '· 默认降级链 ' + (chainLen == null ? '…' : chainLen + ' 条') + (chainProviders.length ? '：' + chainProviders.join(' → ') : '') + '（未进链的源不会被自动调用）'),
           h('div', { style: S.dim },
             '· 你自己的账号：到「供给源」页点对应渠道的「登录」按钮'),
           h('div', { style: S.dim },
@@ -280,11 +334,14 @@ window.__ModuleLoader__.load({
         api('/channels/save', { method: 'POST', body: JSON.stringify({ provider: ch.id, credential: cred }) })
           .then((r) => {
             if (r.ok) {
-              setMsg({ ok: true, text: '✅ 已保存，可以用了' })
+              setMsg({ ok: true, text: (r.hint ? '✅ ' + r.hint : '✅ 已保存') + '（模型会出现在「模型目录」页，可点刷新）' })
               setRaw(''); setAk(''); setSk('')
               props.onChanged && props.onChanged()
             } else {
-              setMsg({ ok: false, error: r.error })
+              // 后端已支持 AK:SK；若仍报「有效令牌」类错误，给出替代方案（不假装成功）
+              const shapeErr = mode === 'aksk' && /有效令牌|令牌形态/.test(String(r.error || ''))
+              const hint = shapeErr ? '。AK/SK 形态被拒绝时，可先用上面的「粘贴令牌」方式登录，或用渠道自己的 API Key' : ''
+              setMsg({ ok: false, error: (r.error || '保存失败') + hint })
             }
           })
           .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
@@ -315,7 +372,12 @@ window.__ModuleLoader__.load({
 
       const del = (id) => {
         api('/channels/remove', { method: 'POST', body: JSON.stringify({ id }) })
-          .then(() => props.onChanged && props.onChanged()).catch(() => {})
+          .then((r) => {
+            if (r && r.ok === false) setMsg({ ok: false, error: r.error || '删除失败' })
+            else setMsg({ ok: true, text: '✅ 已删除该账号' })
+            props.onChanged && props.onChanged()
+          })
+          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
       }
 
       const accs = ch.accounts || []
@@ -345,6 +407,12 @@ window.__ModuleLoader__.load({
           h('span', { style: Object.assign({ cursor: 'pointer' }, S.dim, S.bad), onClick: () => del(a.id) }, '删除'))),
 
         open ? h('div', { style: { marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' } },
+          // 后端给的登录指引（每家渠道步骤不同，之前完全没用上）
+          (ch.guideTitle || (Array.isArray(ch.guideSteps) && ch.guideSteps.length)) ? h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
+            ch.guideTitle ? h('div', { style: { fontWeight: 600 } }, '登录指引：' + ch.guideTitle) : null,
+            (ch.guideSteps || []).map((s, i) => h('div', { key: i }, (i + 1) + '. ' + s)),
+            ch.field ? h('div', { style: Object.assign({ marginTop: '4px' }, S.warn) }, '需要粘贴：' + ch.field) : null,
+            ch.note ? h('div', { style: { marginTop: '4px' } }, '说明：' + ch.note) : null) : null,
           // 方式切换（默认选中推荐的那个）
           h('div', { style: { display: 'flex', gap: '6px', marginBottom: '10px', flexWrap: 'wrap' } },
             MODES.map((m) => h('span', {
@@ -356,7 +424,7 @@ window.__ModuleLoader__.load({
           mode === 'aksk'
             ? h('div', null,
                 h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
-                  '在官网控制台的「访问密钥 / API 密钥」里创建一对，粘贴到下面两个框。**配一次永久有效，不用再登录。**'),
+                  '在官网控制台的「访问密钥 / API 密钥」里创建一对，粘贴到下面两个框。配一次永久有效，不用再登录。'),
                 h('input', {
                   ref: inputRef,
                   style: Object.assign({}, S.input, { marginBottom: '6px' }),
@@ -370,13 +438,13 @@ window.__ModuleLoader__.load({
             : h('div', null,
                 mode === 'oauth'
                   ? h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
-                      '① 点上面「去官网」完成登录　② 回来把地址栏那一整串链接**直接粘贴**到下面 —— 粘贴的瞬间就自动保存了，不用点按钮。')
+                      '① 点上面「去官网」完成登录　② 回来把地址栏那一整串链接直接粘贴到下面 —— 粘贴的瞬间就自动保存了，不用点按钮。')
                   : h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
-                      '把令牌**直接粘贴**到下面，粘贴瞬间自动保存。'),
+                      '把令牌直接粘贴到下面，粘贴瞬间自动保存。'),
                 h('input', {
                   ref: inputRef,
                   style: S.input, value: raw,
-                  placeholder: '在这里按 Ctrl+V 粘贴（支持完整链接、JSON、或裸令牌）',
+                  placeholder: '在这里按 Ctrl+V 粘贴' + (ch.field ? '（' + ch.field + '）' : '（支持完整链接、JSON、或裸令牌）'),
                   onPaste: onPaste,
                   onChange: (e) => setRaw(e.target.value),
                 })),
@@ -441,26 +509,103 @@ window.__ModuleLoader__.load({
           '账号渠道（' + (chData ? chData.total : d.sources.counts.channels) + ' 家 · 点「登录」用你自己的账号）'),
         h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
           '每个渠道都可以登录多个账号。凭证只存本机，不上传。'),
+        cs.error ? h(Err, { error: '渠道列表读取失败：' + cs.error }) : null,
         (chData && chData.channels ? chData.channels : []).map((c) => h(ChannelLogin, {
-          key: c.id, channel: c, onChanged: reloadCh,
+          key: c.id, channel: c, onChanged: () => { reloadCh(); reload() },
         })),
-        !chData ? h('div', { style: S.dim }, '渠道列表加载中…（若一直不出现，看「诊断」页）') : null,
+        !chData && !cs.error ? h('div', { style: S.dim }, '渠道列表加载中…（若一直不出现，看「诊断」页）') : null,
       )
     }
 
     // ── W2 模型目录 ──
     function CatalogZone() {
       const [s, reload] = useApi('/models')
-      if (s.error) return h(Err, { error: s.error })
-      if (!s.data) return h(Loading, { on: s.loading })
+      const [cm, reloadCm] = useApi('/channels/models')
+      const [busy, setBusy] = react.useState(false)
+      const [msg, setMsg] = react.useState(null)
+
+      // 重新拉取渠道模型（真实请求各渠道的模型端点；后端失败会回落到内置清单）
+      const refreshChannelModels = () => {
+        setBusy(true); setMsg(null)
+        api('/channels/models', { method: 'POST', body: JSON.stringify({}) })
+          .then((r) => {
+            setMsg(r.ok ? { ok: true, text: '✅ 已重新拉取：' + (r.total || 0) + ' 个渠道模型' } : { ok: false, error: r.error || '拉取失败' })
+            reloadCm()
+          })
+          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => setBusy(false))
+      }
+
       const d = s.data
+      const cmData = cm.data || {}
+      const models = Array.isArray(cmData.models) ? cmData.models : []
+      const byChannel = cmData.byChannel || {}
+      const channelIds = Object.keys(byChannel)
+      const SOURCE_LABEL = {
+        remote: '远端拉取（/v1/models）',
+        builtin: '内置清单（该渠道无 models 端点）',
+        'builtin-after-http-error': '远端失败 ⇒ 内置清单兜底',
+        'builtin-empty-remote': '远端返回空 ⇒ 内置清单兜底',
+        none: '无来源',
+      }
+      const sourceLabel = (s) => SOURCE_LABEL[s] || (s ? String(s) : '未报告')
+      const defaultsOf = (id) => {
+        const m = d && d.defaultModels ? d.defaultModels : {}
+        return m[id] || m[String(id).replace(/-free$|-vision$/, '')] || '—'
+      }
+      // 按渠道分组（id 形如 <channel>/<model>）
+      const groups = {}
+      for (const m of models) {
+        const cid = m.channelId || String(m.id || '').split('/')[0] || '未知渠道'
+        if (!groups[cid]) groups[cid] = []
+        groups[cid].push(m)
+      }
+
       return h('div', null,
-        h('div', { style: S.dim }, d.note || ''),
-        h('button', { style: Object.assign({}, S.btn(false), { marginTop: '8px' }), onClick: reload }, '刷新'),
-        h('div', { style: { marginTop: '12px' } }, (d.sources || []).map((x) => h('div', { key: x.id, style: S.card },
-          h('div', { style: { fontWeight: 600 } }, x.label),
-          h(KV, { k: '默认模型', v: (d.defaultModels || {})[x.id] || '—', dim: true }),
-          h(KV, { k: '最近探测', v: x.probed ? (x.probed.ok ? '✅ ' + x.probed.ms + 'ms' : '❌ ' + (x.probed.error || '')) : '未探测', dim: true })))),
+        h('div', { style: S.dim }, (d && d.note) || '（模型目录说明未返回）'),
+        d && d.note ? h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) }, '渠道模型不在这份「免密源默认模型」清单里，见下方「已登录渠道的模型」。') : null,
+        h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
+          h('button', { style: S.btn(false), onClick: () => { reload(); reloadCm() } }, '刷新'),
+          h('button', { style: S.btn(true), onClick: refreshChannelModels, disabled: busy },
+            busy ? '拉取中…（真实请求渠道）' : '重新拉取渠道模型')),
+
+        msg ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, msg.ok ? S.good : S.bad) }, msg.text || msg.error) : null,
+        cm.error && cm.data === null ? h(Err, { error: '渠道模型读取失败：' + cm.error }) : null,
+        s.error && s.data === null ? h(Err, { error: '免密源目录读取失败：' + s.error }) : null,
+        s.data === null && s.loading ? h(Loading, { on: true }) : null,
+
+        h('div', { style: { fontWeight: 600, margin: '14px 0 8px' } }, '免密源默认模型'),
+        ((d && d.sources) || []).length === 0 && !s.loading
+          ? h('div', { style: S.dim }, '（后端没有返回任何免密源）')
+          : ((d && d.sources) || []).map((x) => h('div', { key: x.id, style: S.card },
+              h('div', { style: { fontWeight: 600 } }, x.label),
+              h(KV, { k: '默认模型', v: defaultsOf(x.id), dim: true }),
+              x.note ? h(KV, { k: '说明', v: x.note, dim: true }) : null,
+              h(KV, { k: '最近探测', v: x.probed ? (x.probed.ok ? '✅ ' + x.probed.ms + 'ms' : '❌ ' + (x.probed.error || '')) : '未探测', dim: true }))),
+
+        h('div', { style: { fontWeight: 600, margin: '16px 0 8px' } },
+          '已登录渠道的模型（' + (cmData.total != null ? cmData.total : models.length) + ' 个）'),
+        models.length === 0
+          ? h('div', { style: S.dim },
+              cm.loading ? '渠道模型加载中…'
+                : '（暂无渠道模型：到「供给源」登录渠道后会自动拉取；也可点上面的「重新拉取渠道模型」）')
+          : channelIds.map((cid) => h('div', { key: cid, style: S.card },
+              h('div', { style: { fontWeight: 600, marginBottom: '4px' } },
+                cid + ' · ' + (groups[cid] ? groups[cid].length : 0) + ' 个'),
+              byChannel[cid] && byChannel[cid].at
+                ? h('div', { style: S.dim }, '上次拉取：' + new Date(byChannel[cid].at).toLocaleString() + ' · 来源：' + sourceLabel(byChannel[cid].source))
+                : null,
+              byChannel[cid] && byChannel[cid].ok === false
+                ? h('div', { style: Object.assign({}, S.dim, S.warn) }, '⚠️ 上次拉取失败：' + (byChannel[cid].error || '未知原因') + '（已回落到内置清单）')
+                : null,
+              (groups[cid] || []).map((m) => h('div', { key: m.id, style: S.row },
+                h('span', null, m.name || m.id + (m.source ? '（' + sourceLabel(m.source) + '）' : '')),
+                h('span', { style: S.mono }, m.id + (Array.isArray(m.inputModalities) ? '  [' + m.inputModalities.join(',') + ']' : '')))))),
+
+        h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, S.warn) },
+          '⚠️ 上面所有模型当前都只声明了 text 输入模态 ⇒ 聊天输入框不支持发图片（后端声明待修）。'),
+        h('div', { style: Object.assign({ marginTop: '12px' }, S.dim) },
+          '渠道模型 id 形如「渠道/模型」，登录成功后立即可用；来源（远端/内置兜底）由后端按渠道回传。'),
       )
     }
 
@@ -495,19 +640,26 @@ window.__ModuleLoader__.load({
 
       return h('div', null,
         h('div', { style: S.card },
-          h(KV, { k: '内置链', v: d.builtin.length + ' 条' }),
-          h(KV, { k: '覆盖层', v: (d.overrides || []).length + ' 条' }),
-          h(KV, { k: '生效链', v: (d.effective || []).length + ' 条' }),
+          h(KV, { k: '内置链', v: (Array.isArray(d.builtin) ? d.builtin.length : 0) + ' 条' }),
+          h(KV, { k: '覆盖层', v: (Array.isArray(d.overrides) ? d.overrides : []).length + ' 条' }),
+          h(KV, { k: '生效链', v: (Array.isArray(d.effective) ? d.effective : []).length + ' 条' }),
+          h(KV, { k: '生效链来源', v: '内置 ' + (Array.isArray(d.builtin) ? d.builtin.length : 0) + ' + 覆盖 ' + (Array.isArray(d.overrides) ? d.overrides : []).length + ' ⇒ 合并 ' + (Array.isArray(d.effective) ? d.effective.length : 0) + ' 条' }),
           (d.tiers || []).length ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
-            d.tiers.map((t) => 'T' + t.tier + ':' + t.count).join('  ')) : null),
+            d.tiers.map((t) => 'T' + t.tier + ':' + t.count).join('  ')) : null,
+          // 诚实标注「页面显示的链」与「运行时实际选路」是否同源
+          d.applied === true
+            ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.good) }, '✅ 页面这份链 = 运行时实际选路（同源）')
+            : d.applied === false
+              ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '⚠️ 页面这份链与运行时不一致：保存后需重启插件/宿主才生效')
+              : h('div', { style: Object.assign({ marginTop: '6px' }, S.dim) }, '（后端未报告该链是否已应用到运行时）')),
 
         h('div', { style: { fontWeight: 600, margin: '14px 0 8px' } }, '覆盖层（钉选 / 替换 / 增删 / 排序）'),
         h('div', { style: S.dim }, '同 provider+model ⇒ 替换内置条目的 tier；新的 ⇒ 追加到该层末尾。留空的条目保存时会被忽略。'),
 
-        draft.length === 0 ? h('div', { style: Object.assign({ margin: '10px 0' }, S.dim) }, '（空 —— 当前完全使用内置链）') : null,
+        draft.length === 0 ? h('div', { style: Object.assign({ margin: '10px 0' }, S.dim) }, '（空 —— 保存后完全使用内置链）') : null,
         draft.map((e, i) => h('div', { key: i, style: Object.assign({}, S.tile, { marginBottom: '6px', display: 'flex', gap: '6px', alignItems: 'center' }) },
           h('span', { style: Object.assign({}, S.mono, S.dim) }, '#' + (i + 1)),
-          h('input', { style: S.input, placeholder: 'provider（如 kilo-free）', value: e.provider, onChange: (ev) => set(i, 'provider', ev.target.value) }),
+          h('input', { style: S.input, placeholder: 'provider（如 kilo）', value: e.provider, onChange: (ev) => set(i, 'provider', ev.target.value) }),
           h('input', { style: S.input, placeholder: 'model（如 kilo-auto/free）', value: e.model, onChange: (ev) => set(i, 'model', ev.target.value) }),
           h('input', { style: Object.assign({}, S.input, { width: '56px' }), type: 'number', min: 1, max: 5, value: e.tier, onChange: (ev) => set(i, 'tier', Number(ev.target.value) || 1) }),
           h('span', { style: S.btn(false), onClick: () => move(i, -1), title: '上移' }, '↑'),
@@ -521,7 +673,17 @@ window.__ModuleLoader__.load({
 
         msg ? h('div', { style: Object.assign({ marginTop: '10px' }, S.card,
           { borderColor: msg.ok ? 'rgba(64,160,96,0.5)' : 'rgba(200,80,80,0.5)' }) },
-          h('div', { style: { fontWeight: 600 } }, msg.ok ? '✅ 已保存' : '❌ 保存失败'),
+          h('div', { style: { fontWeight: 600 } }, msg.ok
+            ? (msg.applied === true ? '✅ 已保存并立即生效'
+              : msg.requiresRestart === true ? '✅ 已保存，需重启生效'
+                : msg.applied === false ? '⚠️ 已写入文件，但运行时未生效'
+                  : '✅ 已写入覆盖层文件（是否热生效后端未报告）')
+            : '❌ 保存失败'),
+          msg.ok && msg.applied !== true
+            ? h('div', { style: Object.assign({}, S.dim, S.warn) }, (msg.applied === false || msg.requiresRestart === true)
+                ? '需要重启插件（或宿主）后，实际选路才会用这份新链。'
+                : '若保存后实际选路没变，请重启插件/宿主；把这条现象反馈给维护者。')
+            : null,
           (msg.errors || []).map((x, i) => h('div', { key: i, style: Object.assign({}, S.dim, S.warn) }, '· ' + x))) : null,
       )
     }
@@ -549,12 +711,11 @@ window.__ModuleLoader__.load({
       if (!s.data) return h(Loading, { on: s.loading })
       const d = s.data
       return h('div', null,
-        h(CashCard),
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '免密源状态'),
           d.probe ? h('div', null,
             h(KV, { k: '最近探测', v: new Date(d.probe.at).toLocaleString() }),
-            h(KV, { k: '可用', v: d.probe.okCount + '/' + d.sources.counts.keyless + (d.probe.anyOk ? ' ✅' : ' ❌') }))
+            h(KV, { k: '可用', v: d.probe.okCount + ' 个（只探测默认优先源 Kilo/OVH）' + (d.probe.anyOk ? ' ✅' : ' ❌') }))
             : h('div', { style: S.dim }, '尚未探测 ⇒ 去「供给源」点探测')),
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '签到与续期'),
@@ -592,8 +753,30 @@ window.__ModuleLoader__.load({
 
       const save = () => {
         setBusy(true); setMsg(null)
-        api('/config', { method: 'POST', body: JSON.stringify(cfg) })
-          .then((r) => setMsg(r.ok ? { ok: true } : { ok: false, error: r.error || (r.errors || []).join('；') }))
+        const sent = cfg
+        api('/config', { method: 'POST', body: JSON.stringify(sent) })
+          .then(async (r) => {
+            if (!r.ok) {
+              setMsg({ ok: false, error: r.error || (r.errors || []).join('；') || '保存失败' })
+              return
+            }
+            // 关键：保存后**回读**运行时配置。后端只写文件不更新内存时，这里能抓到不一致
+            let cur = null
+            try { cur = (await api('/config')).config } catch (_) { /* 回读失败 ⇒ 按未确认处理 */ }
+            const mismatch = cur ? findMismatch(sent, cur) : []
+            if (cur && mismatch.length) {
+              setMsg({
+                ok: true,
+                warn: '配置已写入文件，但运行时仍是旧值（回读不一致：' + mismatch.join('、') + '）⇒ 需重启插件/宿主后才生效',
+                mismatch,
+              })
+            } else if (cur) {
+              setMsg({ ok: true, text: '✅ 已保存并生效' })
+            } else {
+              setMsg({ ok: true, warn: '配置已写入文件，但无法回读确认是否生效 ⇒ 若实际行为没变请重启插件/宿主' })
+            }
+            props.onSaved && props.onSaved()
+          })
           .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
           .then(() => setBusy(false))
       }
@@ -647,16 +830,19 @@ window.__ModuleLoader__.load({
         h('div', { style: { display: 'flex', gap: '8px', marginTop: '12px' } },
           h('button', { style: S.btn(true), onClick: save, disabled: busy }, busy ? '保存中…' : '保存'),
           h('button', { style: S.btn(false), onClick: () => { setCfg(null); setMsg(null); setTick((n) => n + 1) } }, '重新加载')),
-        msg ? h('div', { style: Object.assign({ marginTop: '10px' }, S.card, { borderColor: msg.ok ? 'rgba(64,160,96,0.5)' : 'rgba(200,80,80,0.5)' }) },
-          h('div', { style: { fontWeight: 600 } }, msg.ok ? '✅ 已保存' : '❌ 保存失败'),
+        msg ? h('div', { style: Object.assign({ marginTop: '10px' }, S.card, { borderColor: msg.warn ? 'rgba(200,160,60,0.6)' : (msg.ok ? 'rgba(64,160,96,0.5)' : 'rgba(200,80,80,0.5)') }) },
+          h('div', { style: { fontWeight: 600 } }, msg.ok ? (msg.warn ? '⚠️ 已写盘，但未确认生效' : '✅ 已保存') : '❌ 保存失败'),
+          msg.text ? h('div', { style: Object.assign({}, S.dim, S.good) }, msg.text) : null,
+          msg.warn ? h('div', { style: Object.assign({}, S.dim, S.warn) }, msg.warn) : null,
           msg.error ? h('div', { style: Object.assign({}, S.dim, S.warn) }, msg.error) : null) : null,
       )
     }
 
     // ── W6 保护策略（可编辑）──
     function PolicyZone() {
+      const [rk, setRk] = react.useState(0)
       return h('div', null,
-        h(ConfigSummary, { items: [
+        h(ConfigSummary, { key: 'summary-' + rk, items: [
           { path: ['vision', 'mode'], label: '识图档位' },
           { path: ['search', 'budgetMs'], label: '搜索预算', fmt: (v) => v + ' ms' },
           { path: ['search', 'sources'], label: '搜索源' },
@@ -664,18 +850,21 @@ window.__ModuleLoader__.load({
         ] }),
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '8px' } }, '保护策略'),
+          h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim, S.warn) },
+            '⚠️ 图片输入说明：当前降级链上的模型都只声明了 text 模态（inputModalities: [text]），宿主不会把图片发给本模型 ⇒ 聊天输入框不能发图。下面的「识图档位」只影响已进入插件的图片预处理，不改变这个限制（后端声明待修）。'),
           h(ConfigEditor, { fields: [
             { path: ['search', 'budgetMs'], label: '搜索总预算 (ms)', type: 'number', hint: '单次搜索最多等多久；超时按已返回的部分结果用' },
             { path: ['search', 'sources'], label: '搜索源', type: 'list', hint: '逗号分隔。可选：bing-rss, bing-html, sogou, mwmbl' },
             { path: ['vision', 'mode'], label: '识图档位', type: 'text', hint: 'off（默认不出网）| local | free-cloud | paid-cloud' },
-            { path: ['sources', 'disabled'], label: '禁用源', type: 'list', hint: '逗号分隔的源 id，如 kilo-free' },
-          ] })),
+            { path: ['sources', 'disabled'], label: '禁用源', type: 'list', hint: '逗号分隔的源 id，如 kilo（注意不是旧别名 kilo-free）' },
+          ], onSaved: () => setRk((n) => n + 1) })),
       )
     }
 
     /** 配置状态一览（一眼看到所有值，而不只是按钮） */
     function ConfigSummary(props) {
       const [s] = useApi('/config')
+      if (s.error && !s.data) return h(Err, { error: '配置读取失败：' + s.error })
       if (!s.data) return h('div', { style: S.dim }, '加载中…')
       const c = s.data.config || {}
       const items = props.items || []
@@ -695,8 +884,9 @@ window.__ModuleLoader__.load({
 
     // ── W7 预算付费（可编辑）──
     function BudgetZone() {
+      const [rk, setRk] = react.useState(0)
       return h('div', null,
-        h(ConfigSummary, { items: [
+        h(ConfigSummary, { key: 'summary-' + rk, items: [
           { path: ['paid', 'enabled'], label: '① 付费源' },
           { path: ['paid', 'allowAutoCall'], label: '付费是否可自动调用' },
           { path: ['paid', 'confirmEachTurn'], label: '② 逐次人工确认' },
@@ -707,7 +897,7 @@ window.__ModuleLoader__.load({
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '8px' } }, '五道闸门'),
           h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
-            '原则：deny-by-default，价格未知即拒。限额为 0 等同于**禁止付费**。'),
+            '原则：deny-by-default，价格未知即拒。限额为 0 等同于禁止付费。'),
           h(ConfigEditor, { fields: [
             { path: ['paid', 'enabled'], label: '① 启用付费源', type: 'bool', hint: '关 = 付费模型永远不会被调用' },
             { path: ['paid', 'allowAutoCall'], label: '是否允许自动调用付费', type: 'bool', hint: '关 = 每次都要人工确认' },
@@ -715,7 +905,7 @@ window.__ModuleLoader__.load({
             { path: ['budget', 'perCallCNY'], label: '④ 单次限额 (¥)', type: 'number' },
             { path: ['budget', 'dailyCNY'], label: '⑤ 日限额 (¥)', type: 'number' },
             { path: ['budget', 'monthlyCNY'], label: '⑤ 月限额 (¥)', type: 'number' },
-          ] })),
+          ], onSaved: () => setRk((n) => n + 1) })),
       )
     }
 
@@ -723,11 +913,13 @@ window.__ModuleLoader__.load({
     function SaverZone() {
       return h('div', { style: S.card },
         h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, 'RTK 工具输出压缩'),
-        h(KV, { k: '状态', v: '已内置（自动生效）' }),
+        h(KV, { k: '模块状态', v: '已内置（src/saver/rtk.js，导出 compressToolOutput）' }),
+        h(KV, { k: '是否自动生效', v: '取决于宿主是否调用（当前插件未主动挂接工具输出管道）' }),
         h(KV, { k: '压缩对象', v: '仅工具输出（git diff/status/log、grep、find、构建日志）' }),
         h(KV, { k: '错误结果', v: '永不压缩（藏起来模型会重试同一调用）' }),
         h(KV, { k: '替换规则', v: '必须非空且严格更小，否则原样返回' }),
-        h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) }, '节省统计在「可观测」里看。'))
+        h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
+          '⚠️ 诚实说明：本页只展示模块能力；若你的宿主版本没有把工具输出交给它，实际不会省 Token。节省统计在「可观测」里看真正发生的调用。'))
     }
 
     // ── W9 可观测（真实账本）──
@@ -775,19 +967,87 @@ window.__ModuleLoader__.load({
 
     // ── W10 导入导出 ──
     function IoZone() {
-      const [s] = useApi('/chain')
-      const [copied, setCopied] = react.useState(false)
+      const [s, reload] = useApi('/chain')
+      const [copied, setCopied] = react.useState(null)       // null | {ok,text}
+      const [text, setText] = react.useState('')
+      const [impMsg, setImpMsg] = react.useState(null)
+      const [busy, setBusy] = react.useState(false)
       const json = s.data ? JSON.stringify({ chain: s.data.overrides || [] }, null, 2) : ''
-      const copy = () => {
-        try { navigator.clipboard.writeText(json); setCopied(true); setTimeout(() => setCopied(false), 1500) } catch (_) {}
+      const loadErr = s.error && !s.data ? s.error : null
+
+      const copyText = (str) => {
+        // 剪贴板 API 在非 https / 非 localhost 页面会被浏览器禁用 ⇒ 需要降级方案
+        try {
+          if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(str).then(
+              () => ({ ok: true, text: '✅ 已复制到剪贴板' }),
+              () => legacyCopy(str),
+            )
+          }
+        } catch (_) { /* 走降级 */ }
+        return Promise.resolve(legacyCopy(str))
       }
-      return h('div', null, h('div', { style: S.card },
-        h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '导出链覆盖层'),
-        h('div', { style: S.dim }, '只导出覆盖层（不含任何凭据/密钥）。'),
-        h('pre', { style: Object.assign({ marginTop: '8px' }, S.pre) }, json || '（空）'),
-        h('button', { style: S.btn(false), onClick: copy }, copied ? '✅ 已复制' : '复制 JSON'),
-        h('div', { style: Object.assign({ marginTop: '12px' }, S.dim) },
-          '导入：把 JSON 粘到「降级链」页逐条添加，或后续版本提供导入框。')))
+      const legacyCopy = (str) => {
+        try {
+          const doc = typeof document !== 'undefined' ? document : null
+          if (!doc) return { ok: false, text: '复制失败：当前环境没有剪贴板 API，请手动选中下方文本复制' }
+          const ta = doc.createElement('textarea')
+          ta.value = str
+          doc.body.appendChild(ta)
+          ta.select()
+          const ok = doc.execCommand && doc.execCommand('copy')
+          doc.body.removeChild(ta)
+          return ok ? { ok: true, text: '✅ 已复制到剪贴板（兼容模式）' } : { ok: false, text: '复制失败：请手动选中下方文本复制' }
+        } catch (e) {
+          return { ok: false, text: '复制失败：' + String((e && e.message) || e) + '（请手动选中文本复制）' }
+        }
+      }
+      const copy = () => {
+        copyText(json).then((r) => { setCopied(r); setTimeout(() => setCopied(null), 2500) })
+      }
+
+      const doImport = () => {
+        let obj
+        try { obj = JSON.parse(text) } catch (e) { setImpMsg({ ok: false, error: 'JSON 解析失败：' + String((e && e.message) || e) }); return }
+        const list = Array.isArray(obj) ? obj : (obj && Array.isArray(obj.chain) ? obj.chain : null)
+        if (!list) { setImpMsg({ ok: false, error: '格式不对：需要 {"chain":[...]} 或直接是数组' }); return }
+        const bad = list.filter((e) => !e || typeof e.provider !== 'string' || typeof e.model !== 'string' || !e.provider.trim() || !e.model.trim())
+        if (bad.length) { setImpMsg({ ok: false, error: '有 ' + bad.length + ' 条缺 provider/model，未提交（第 ' + list.findIndex((e) => bad.includes(e)) + 1 + ' 条起）' }); return }
+        setBusy(true); setImpMsg(null)
+        api('/chain', { method: 'POST', body: JSON.stringify({ chain: list }) })
+          .then((r) => {
+            if (!r.ok) { setImpMsg({ ok: false, error: (r.errors || []).join('；') || r.error || '导入失败' }); return }
+            const v = applyVerdict(r)
+            setImpMsg({ ok: true, text: '已导入 ' + (r.count != null ? r.count : list.length) + ' 条。' + v.text })
+            setText('')
+            reload()
+          })
+          .catch((e) => setImpMsg({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => setBusy(false))
+      }
+
+      return h('div', null,
+        loadErr ? h(Err, { error: '链路读取失败：' + loadErr }) : null,
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '导出链覆盖层'),
+          h('div', { style: S.dim }, '只导出覆盖层（不含任何凭据/密钥）。'),
+          h('pre', { style: Object.assign({ marginTop: '8px' }, S.pre) }, json || '（空）'),
+          h('button', { style: S.btn(false), onClick: copy }, '复制 JSON'),
+          copied ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, copied.ok ? S.good : S.warn) }, copied.text) : null),
+
+        h('div', { style: Object.assign({}, S.card, { marginTop: '12px' }) },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '导入链覆盖层'),
+          h('div', { style: S.dim }, '粘贴 {"chain":[{"provider":"kilo","model":"kilo-auto/free","tier":1}]} 或直接粘贴数组；提交后整表覆盖（先清空再写入）。'),
+          h('textarea', {
+            style: Object.assign({}, S.input, { marginTop: '8px', minHeight: '90px', fontFamily: 'ui-monospace, monospace' }),
+            value: text, placeholder: '在这里粘贴导出的 JSON',
+            onChange: (e) => setText(e.target.value),
+          }),
+          h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
+            h('button', { style: S.btn(true), onClick: doImport, disabled: busy || !text.trim() }, busy ? '导入中…' : '导入并覆盖'),
+            h('button', { style: S.btn(false), onClick: () => { setText(''); setImpMsg(null) } }, '清空')),
+          impMsg ? h('div', { style: Object.assign({ marginTop: '8px' }, S.dim, impMsg.ok ? S.good : S.warn) }, impMsg.text || impMsg.error) : null),
+      )
     }
 
     // ── W11 作用域（普通人视角：卡片选择 + 表单编辑，不用写 JSON）──
@@ -797,11 +1057,19 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = react.useState(null)
       const [busy, setBusy] = react.useState(false)
       const [form, setForm] = react.useState(null)
+      const [idInput, setIdInput] = react.useState('')
+      const loadFormRef = react.useRef(null)
+
+      // 首次进入自动把「全局」现有配置填进表单（不用先点卡片）
+      react.useEffect(() => {
+        if (s.data && !form) loadFormRef.current && loadFormRef.current('global')
+      }, [s.data])
 
       if (s.error) return h('div', null, h(Err, { error: s.error }), h('button', { style: S.btn(false), onClick: reload }, '重试'))
 
       const d = s.data || {}
       const layers = (d.effective && d.effective.layers) || {}
+      const existingFiles = Array.isArray(d.files) ? d.files : []
 
       const CARDS = [
         { key: 'global', title: '全局', sub: '对所有对话生效', count: layers.global, tip: '最常用。改这里 = 全部生效' },
@@ -813,11 +1081,15 @@ window.__ModuleLoader__.load({
       const loadForm = (scope) => {
         setPick(scope); setMsg(null)
         if (scope === 'global') {
-          api('/config').then((r) => setForm(r.config || {})).catch(() => setForm({}))
+          api('/config').then((r) => setForm(r.config || {})).catch((e) => {
+            setForm({})
+            setMsg({ ok: false, error: '读取现有全局配置失败：' + String((e && e.message) || e) })
+          })
         } else {
-          setForm({})   // 预设/会话先给空表单
+          setForm({})   // 预设/会话：后端没有单作用域读取接口，只能给空表单
         }
       }
+      loadFormRef.current = loadForm
 
       // 简单的表单字段（覆盖最常改的几项，其余用折叠的「高级」）
       const FIELDS = [
@@ -846,16 +1118,36 @@ window.__ModuleLoader__.load({
 
       const save = () => {
         setBusy(true); setMsg(null)
+        const sent = form || {}
         if (pick === 'global') {
-          api('/config', { method: 'POST', body: JSON.stringify(form || {}) })
-            .then((r) => setMsg(r.ok ? { ok: true, text: '✅ 已保存，全局生效' } : { ok: false, error: r.error }))
+          api('/config', { method: 'POST', body: JSON.stringify(sent) })
+            .then(async (r) => {
+              if (!r.ok) { setMsg({ ok: false, error: r.error || '保存失败' }); return }
+              // 回读运行时配置，确认是否真的生效（后端不保证热更新）
+              let cur = null
+              try { cur = (await api('/config')).config } catch (_) { /* 回读失败按未确认处理 */ }
+              const mismatch = cur ? findMismatch(sent, cur) : []
+              if (cur && mismatch.length) {
+                setMsg({ ok: true, warn: '已写入全局配置文件，但运行时仍是旧值（' + mismatch.join('、') + '）⇒ 需重启插件/宿主后才生效' })
+              } else if (cur) {
+                setMsg({ ok: true, text: '✅ 已保存并生效' })
+              } else {
+                setMsg({ ok: true, warn: '已写入全局配置文件；无法回读确认是否生效，若行为没变请重启插件/宿主' })
+              }
+            })
             .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
             .then(() => { setBusy(false); reload() })
         } else {
-          const id = window.prompt(pick === 'preset' ? '请输入预设名（例如 dev-steward）' : '请输入会话 ID')
-          if (!id) { setBusy(false); return }
-          api('/scope', { method: 'POST', body: JSON.stringify({ scope: pick, id, config: form || {}, presetId: pick === 'preset' ? id : undefined, sessionId: pick === 'session' ? id : undefined }) })
-            .then((r) => setMsg(r.ok ? { ok: true, text: '✅ 已保存到「' + pick + '」作用域' } : { ok: false, error: r.error }))
+          const id = idInput.trim()
+          if (!id) {
+            setBusy(false)
+            setMsg({ ok: false, error: pick === 'preset' ? '先填预设名（如 dev-steward）' : '先填会话 ID' })
+            return
+          }
+          api('/scope', { method: 'POST', body: JSON.stringify({ scope: pick, id, config: sent, presetId: pick === 'preset' ? id : undefined, sessionId: pick === 'session' ? id : undefined }) })
+            .then((r) => setMsg(r.ok
+              ? { ok: true, warn: '已写入「' + pick + '」作用域文件；后端只回报写盘成功，运行时是否热生效需重启插件/宿主后确认' }
+              : { ok: false, error: r.error || '写入失败' }))
             .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
             .then(() => { setBusy(false); reload() })
         }
@@ -864,6 +1156,11 @@ window.__ModuleLoader__.load({
       return h('div', null,
         h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '这些设置要在哪个范围内生效？'),
         h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) }, '点一张卡片选择。不知道选哪个就选「全局」。'),
+
+        h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
+          d.hint ? h('div', null, d.hint) : null,
+          h('div', { style: { marginTop: '4px' } },
+            '已有作用域文件：' + (existingFiles.length ? existingFiles.map((f) => f.name).join('、') : '（无）'))),
 
         h('div', { style: { display: 'flex', gap: '8px', marginBottom: '14px' } },
           CARDS.map((c) => h('div', {
@@ -877,12 +1174,22 @@ window.__ModuleLoader__.load({
           },
             h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, c.title),
             h('div', { style: S.dim }, c.sub),
-            h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) }, '已设 ' + (c.count ?? 0) + ' 项'),
+            h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) }, '已设 ' + (c.count ?? 0) + ' 个顶层键'),
             h('div', { style: Object.assign({ marginTop: '4px' }, S.dim, { fontStyle: 'italic' }) }, c.tip))) ),
 
         form
           ? h('div', { style: S.card },
               h('div', { style: { fontWeight: 600, marginBottom: '10px' } }, '「' + CARDS.find((c) => c.key === pick).title + '」范围的设置'),
+              pick !== 'global' ? h('div', { style: { marginBottom: '14px' } },
+                h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, pick === 'preset' ? '预设名' : '会话 ID'),
+                h('input', {
+                  style: Object.assign({}, S.input, { width: '280px', marginBottom: '4px' }),
+                  value: idInput,
+                  placeholder: pick === 'preset' ? '如 dev-steward' : '会话 ID',
+                  onChange: (e) => setIdInput(e.target.value),
+                }),
+                h('div', { style: Object.assign({}, S.dim, S.warn) },
+                  '后端没有「读取单个作用域已存值」的接口 ⇒ 这里显示空表单，保存只会写入你改过的字段；保存后需重启插件/宿主才确认生效。')) : null,
               FIELDS.map((f) => {
                 const v = getPath(form, f.path)
                 return h('div', { key: f.path.join('.'), style: { marginBottom: '14px' } },
@@ -921,10 +1228,11 @@ window.__ModuleLoader__.load({
               h('div', { style: { display: 'flex', gap: '8px' } },
                 h('button', { style: S.btn(true), onClick: save, disabled: busy }, busy ? '保存中…' : '保存'),
                 h('button', { style: S.btn(false), onClick: () => loadForm(pick) }, '撤销修改')),
-              msg ? h('div', { style: Object.assign({ marginTop: '10px' }, S.dim, msg.ok ? S.good : S.bad) }, msg.text || msg.error) : null,
+              msg ? h('div', { style: Object.assign({ marginTop: '10px' }, S.dim,
+                msg.ok && !msg.warn ? S.good : (msg.ok ? S.warn : S.bad)) }, msg.text || msg.warn || msg.error) : null,
               h('div', { style: Object.assign({ marginTop: '12px', paddingTop: '10px', borderTop: '1px solid rgba(128,128,128,0.2)' }, S.dim) },
                 '生效顺序：会话 > 预设 > 全局。同一项在多处设置时，范围小的赢。'))
-          : h('div', { style: S.dim }, '↑ 先选一个范围'),
+          : h('div', { style: S.dim }, '正在读取全局配置…（点上面卡片可切换范围）'),
       )
     }
 
@@ -964,12 +1272,13 @@ window.__ModuleLoader__.load({
       const View = ZONE_VIEWS[tab] || SourcesZone
       return h('div', { style: S.root },
         h('div', { style: S.h2 }, 'Myfree'),
-        h('div', { style: S.sub }, '免费模型提供方 · 零第三方依赖 · 3 个免密源装完即用'),
+        h('div', { style: S.sub }, '免费模型提供方 · 零第三方依赖 · 免密源开箱可用（默认链：Kilo / OVH；Pollinations 可选、默认未入链）'),
         h(CashCard),
         h('div', { style: S.tabs }, ZONES.map((z) => h('span', {
           key: z.id, style: S.tab(tab === z.key), onClick: () => setTab(z.key), title: z.id,
         }, z.label))),
-        h(Safe, { View: View }),
+        // key=tab：切分区时重建错误边界，避免一个分区崩了让所有分区一直显示错误页
+        h(Safe, { scope: tab, View: View }),
       )
     }
 

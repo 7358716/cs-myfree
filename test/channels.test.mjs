@@ -34,10 +34,13 @@ test('NONE 绝不设置 authorization（免密铁律）', () => {
   const h = buildAuthHeaders({ auth: AUTH.NONE }, { token: 'should-be-dropped' })
   assert.equal('authorization' in h, false)
 })
-test('CUSTOM_HEADER 支持 ak:sig 格式（Loomy）', () => {
-  const ch = channelById('loomy')
+test('CUSTOM_HEADER 支持 ak:sig 格式（通用能力）', () => {
+  const ch = { auth: AUTH.CUSTOM_HEADER, authHeaderFormat: 'account {ak}:{sig}' }
   const h = buildAuthHeaders(ch, { ak: 'AK', sig: 'SIG' })
   assert.equal(h.authorization, 'account AK:SIG')
+})
+test('Loomy chat 用 Bearer（HMAC 的 account ak:sig 只用于积分/账号端点）', () => {
+  assert.equal(channelById('loomy').auth, AUTH.BEARER)
 })
 test('无凭据时不构造空头', () => {
   assert.equal('authorization' in buildAuthHeaders({ auth: AUTH.BEARER }, {}), false)
@@ -132,4 +135,43 @@ test('有欠账时 2 小时后重试', () => {
   const t = new Date(2026, 10, 2, 15, 0, 0).getTime()
   const n = nextRunAt({ pending: 1, lastDate: '2026-11-02' }, { now: () => t })
   assert.equal(n, t + 2 * 3600 * 1000)
+})
+
+// ── codearts 并发会话上限（实测 HTTP 400 / TM.00001041，最易误判为参数错误）──
+test('识别上游并发会话超限（不能当 INVALID_REQUEST）', async () => {
+  const { isConcurrencyCapError } = await import('../src/pools/channels/driver.js')
+  assert.equal(isConcurrencyCapError('{"error_code":"TM.00001041","error_msg":"并发会话数已达上限(3个)"}'), true)
+  assert.equal(isConcurrencyCapError('{"error_code":"TM.00001001","error_msg":"参数model不合法"}'), false)
+  assert.equal(isConcurrencyCapError(''), false)
+})
+
+test('并发超限时自动重试一次（第二次成功）', async () => {
+  const { chat } = await import('../src/pools/channels/driver.js')
+  let n = 0
+  const fetchImpl = async () => {
+    n++
+    if (n === 1) {
+      return { ok: false, status: 400, text: async () => '{"error_code":"TM.00001041","error_msg":"并发会话数已达上限(3个)"}' }
+    }
+    return { ok: true, status: 200, body: 'x' }
+  }
+  const res = await chat({
+    channelId: 'codearts', ch: CHANNELS.codearts,
+    cred: { ak: 'ak', sk: 'sk' }, model: 'deepseek-v4.1-flash', messages: [],
+    fetchImpl, capRetryDelayMs: 0,
+  })
+  assert.equal(res.ok, true)
+  assert.equal(n, 2, '必须重试一次')
+})
+
+test('并发超限重试后仍失败 ⇒ 归类 RATE_LIMIT 并给人话', async () => {
+  const { chat } = await import('../src/pools/channels/driver.js')
+  const fetchImpl = async () => ({
+    ok: false, status: 400,
+    text: async () => '{"error_code":"TM.00001041","error_msg":"并发会话数已达上限(3个)"}',
+  })
+  await assert.rejects(
+    () => chat({ channelId: 'codearts', ch: CHANNELS.codearts, cred: { ak: 'a', sk: 's' }, model: 'm', messages: [], fetchImpl, capRetryDelayMs: 0 }),
+    (err) => err.code === 'RATE_LIMIT' && /并发会话/.test(err.message),
+  )
 })

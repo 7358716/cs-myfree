@@ -15,6 +15,7 @@
 
 import { readFile, writeFile, rename, mkdir, chmod, unlink, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { findSensitiveKey, stripSensitive } from './store.js'
 
 export const SCOPE = Object.freeze({ GLOBAL: 'global', PRESET: 'preset', SESSION: 'session' })
 
@@ -76,8 +77,20 @@ export async function readScope(dshHome, scope, id) {
   try { return await readJson(scopeFile(dshHome, scope, id), {}) } catch { return {} }
 }
 
-/** 写单个作用域 */
+/**
+ * 写单个作用域。
+ *
+ * 🔴 红线 #1/#2/#7：**任何凭据都不许写进配置文件**。
+ * 递归检查（防 `{"transportHeaders":{"authorization":"…"}}` 这类嵌套绕过），
+ * 命中直接抛错让 API 返回明确原因，而不是静默落盘。
+ */
 export async function writeScope(dshHome, scope, id, obj) {
+  const hit = findSensitiveKey(obj)
+  if (hit) {
+    const err = new Error(`禁止写入敏感字段：${hit}`)
+    err.code = 'SENSITIVE_FIELD'
+    throw err
+  }
   try { return await writeJson(scopeFile(dshHome, scope, id), obj) } catch { return false }
 }
 
@@ -87,11 +100,12 @@ export async function writeScope(dshHome, scope, id, obj) {
  */
 export async function effectiveConfig(o = {}) {
   const { dshHome, presetId, sessionId } = o
-  const global = await readScope(dshHome, SCOPE.GLOBAL)
-  const preset = presetId ? await readScope(dshHome, SCOPE.PRESET, presetId) : {}
-  const session = sessionId ? await readScope(dshHome, SCOPE.SESSION, sessionId) : {}
+  // 读路径也剔除敏感字段（磁盘上可能有历史脏数据，绝不能回给 UI）
+  const global = stripSensitive(await readScope(dshHome, SCOPE.GLOBAL))
+  const preset = presetId ? stripSensitive(await readScope(dshHome, SCOPE.PRESET, presetId)) : {}
+  const session = sessionId ? stripSensitive(await readScope(dshHome, SCOPE.SESSION, sessionId)) : {}
   return {
-    config: deepMerge(deepMerge(global, preset), session),
+    config: stripSensitive(deepMerge(deepMerge(global, preset), session)),
     layers: {
       global: Object.keys(global).length,
       preset: Object.keys(preset).length,

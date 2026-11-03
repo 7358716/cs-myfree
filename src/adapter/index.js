@@ -251,16 +251,19 @@ export function createAdapter(opts = {}) {
 
           // 记一笔（自有账本，失败不影响主流程）
           try {
-            let inTok = 0, outTok = 0
+            let inTok = 0, outTok = 0, cacheRead = 0
             for (const c of buffered) {
-              if (c.type === 'finish' && c.usage) {
-                inTok = Number(c.usage.inputTokens) || inTok
-                outTok = Number(c.usage.outputTokens) || outTok
-              }
+              // 独立 usage 增量（OpenAI 流末帧）与 finish.usage 两种形态都要认
+              const u = c.type === 'usage' ? c.usage
+                : (c.type === 'finish' && c.usage ? c.usage : null)
+              if (!u) continue
+              inTok = Number(u.inputTokens) || inTok
+              outTok = Number(u.outputTokens) || outTok
+              cacheRead = Number(u.cacheReadTokens) || cacheRead
             }
             onRecord({
               at: now(), provider: cand.provider, model: cand.model,
-              in: inTok, out: outTok, cost: 0, paid: false, ok: true,
+              in: inTok, out: outTok, cacheRead, cost: 0, paid: false, ok: true,
               ms: now() - (ladder.snapshot().startedAt || now()),
             })
           } catch { /* ignore */ }

@@ -142,12 +142,21 @@ test('🔴 装配级：AK:SK 可保存 / 配置热更新与重启一致 / 链保
       'GET /chain 与 adapter 实际链必须一致',
     )
 
-    // P0-1 AK:SK 保存（codearts 无 models 端点 ⇒ 不会发网络请求）
+    // P0-1 AK:SK 保存（用 buddy：无 models 端点 ⇒ 不会触发网络请求）
     const save = await call(h1, '/channels/save', {
       method: 'POST',
-      body: { provider: 'codearts', credential: 'AKIDtest123456:SKsecret7890123456' },
+      body: { provider: 'buddy', credential: 'AKIDtest123456:SKsecret7890123456' },
     })
     assert.equal(save.body.ok, true, 'AK:SK 形态必须被接受（P0-1）：' + JSON.stringify(save.body))
+    assert.equal(save.body.kind, 'aksk')
+    // 结构化字段提交（签名型渠道的正式形态）
+    const save2 = await call(h1, '/channels/save', {
+      method: 'POST',
+      body: { provider: 'buddy', ak: 'AKIDtest1234567890', sk: 'SKsecret1234567890123456789012345678901234' },
+    })
+    assert.equal(save2.body.ok, true)
+    const onlyAk = await call(h1, '/channels/save', { method: 'POST', body: { provider: 'buddy', ak: 'AKIDtest1234567890' } })
+    assert.equal(onlyAk.body.ok, false, '只有 AK 必须拒绝（说明还缺 SK）')
 
     // ── 第二次启动（模拟重启）：配置与链都必须从磁盘恢复 ──
     const h2 = makeHost()

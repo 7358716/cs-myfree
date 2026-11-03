@@ -21,20 +21,21 @@ import { shouldEgress, MODE } from './vision/bridge.js'
 import { preprocessImages, createDescribeCache } from './vision/pipeline.js'
 import { fuseResults, toHostSources } from './search/fuse.js'
 import { PARSERS } from './search/sources.js'
-import { readJson, atomicWrite, withDefaults, DEFAULTS } from './config/store.js'
+import { readJson, atomicWrite, withDefaults, DEFAULTS, stripSensitive } from './config/store.js'
 import { guardApply, makeLogger, safeInject, safeEffect, safeRegisterAdapter, safeRegisterSearch, detectHostVersion } from './compat.js'
 import { registerCashRoute, CASH_PATH, queryCash } from './web/cash.js'
 import { judge, sendJson } from './web/guard.js'
 import { registerRoutes, PREFIX as API_PREFIX } from './web/routes.js'
 import { appendRecord } from './audit/sources.js'
 import { createState } from './web/state.js'
+import { randomUUID } from 'node:crypto'
 import { createAccountStore } from './pools/channels/accounts.js'
 import { readCachedModels, channelModelsAsList, parseModelId, makeModelId, refreshAll } from './pools/channels/catalog.js'
 import { streamChat as channelStream } from './pools/channels/driver.js'
-import { CHANNELS } from './pools/channels/protocols.js'
+import { CHANNELS, AUTH } from './pools/channels/protocols.js'
 
 const NAME = 'cs-myfree'
-const VERSION = '1.7.0'
+const VERSION = '1.8.0'
 
 export const name = NAME
 export const version = VERSION
@@ -62,6 +63,19 @@ export function createFetchTransport({ baseUrl, headers = {}, now = () => Date.n
   }
 }
 
+/** OpenAI usage → 宿主 TokenUsage（字段名对齐 dsh-llm TokenUsage） */
+export function toUsage(u = {}) {
+  const out = {
+    inputTokens: Number(u.prompt_tokens ?? u.inputTokens ?? u.input_tokens) || 0,
+    outputTokens: Number(u.completion_tokens ?? u.outputTokens ?? u.output_tokens) || 0,
+  }
+  const total = Number(u.total_tokens ?? u.totalTokens)
+  if (Number.isFinite(total)) out.totalTokens = total
+  const cached = Number(u.prompt_tokens_details?.cached_tokens ?? u.cacheReadTokens ?? u.cached_tokens)
+  if (Number.isFinite(cached)) out.cacheReadTokens = cached
+  return out
+}
+
 /** 极简 SSE 解析（零依赖；不完整帧留到下次） */
 export async function* parseSse(body, now = () => Date.now()) {
   const decoder = new TextDecoder()
@@ -81,6 +95,8 @@ export async function* parseSse(body, now = () => Date.now()) {
         if (delta.reasoning_content) yield { type: 'reasoning-delta', text: delta.reasoning_content, at: now() }
         if (delta.content) yield { type: 'text-delta', text: delta.content, at: now() }
         if (delta.tool_calls) yield { type: 'tool-call-delta', calls: delta.tool_calls, at: now() }
+        // 用量：OpenAI 兼容端点在末帧带顶层 usage（choices 通常为空数组）
+        if (obj.usage) yield { type: 'usage', usage: toUsage(obj.usage), at: now() }
       } catch { /* 忽略心跳/注释行 */ }
     }
   }
@@ -245,7 +261,7 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
   //    （GET /config 也读不到磁盘值）⇒ 用户看到「保存成功，刷新又变回去」。
   const stateStore = createState(rawConfig?.dshHome)
   let persistedConfig = null
-  try { persistedConfig = stateStore.readConfigSync() } catch { /* 坏文件不影响启动 */ }
+  try { persistedConfig = stripSensitive(stateStore.readConfigSync()) } catch { /* 坏文件不影响启动 */ }
 
   let cfg
   try { cfg = withDefaults({ ...(persistedConfig ?? {}), ...(rawConfig ?? {}) }) }
@@ -313,8 +329,26 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     if (!parsed) throw Object.assign(new Error('无法解析渠道模型：' + model), { code: 'MODEL_NOT_FOUND' })
     const ch = CHANNELS[parsed.channelId]
     if (!ch) throw Object.assign(new Error('未知渠道：' + parsed.channelId), { code: 'MODEL_NOT_FOUND' })
-    const cred = await accountStore.credentialOf(parsed.channelId)
-    if (!cred) throw Object.assign(new Error(`渠道 ${parsed.channelId} 尚未登录`), { code: 'AUTH' })
+
+    // 🔑 结构化凭据：AK/SK 渠道要三元组，单字符串渠道要 token
+    const secret = typeof accountStore.secretOf === 'function' ? await accountStore.secretOf(parsed.channelId) : null
+    const legacy = secret ? null : await accountStore.credentialOf(parsed.channelId)
+    if (!secret && !legacy) throw Object.assign(new Error(`渠道 ${parsed.channelId} 尚未登录`), { code: 'AUTH' })
+    const cred = secret ?? { token: legacy, ak: String(legacy).split(':')[0], sig: String(legacy).split(':')[1] }
+
+    // 签名型渠道（codearts）：缺 SK 时给出可操作的错误，而不是发出去吃 401
+    const extraHeaders = {}
+    if (ch.auth === AUTH.SIGNED_HUAWEI) {
+      if (!cred.ak || !cred.sk) {
+        throw Object.assign(
+          new Error(`渠道 ${parsed.channelId} 需要 AK/SK（当前凭据不完整：请用 AK/SK 两步登录重新保存）`),
+          { code: 'AUTH' },
+        )
+      }
+      if (options?.sessionId) extraHeaders['Session-Id'] = String(options.sessionId)
+      extraHeaders['Chat-Id'] = randomUUID().replace(/-/g, '')
+      extraHeaders.lang = 'en'
+    }
 
     let prepared = messages
     try {
@@ -329,10 +363,12 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     return channelStream({
       channelId: parsed.channelId,
       ch,
-      cred: { token: cred, ak: cred.split(':')[0], sig: cred.split(':')[1] },
+      cred,
       model: parsed.modelId,
       messages: convertMessages(prepared, options),
       tools: convertTools(options?.tools),
+      extraHeaders,
+      sessionId: options?.sessionId,
       signal,
     })
   }
@@ -389,6 +425,15 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
 
   // ── 已登录渠道的模型（登录后自动出现在模型选择器里）──
   const accountStore = createAccountStore(cfg.dshHome)
+
+  // 一次性归一：历史数据把 AK、SK 各存成一条账号（codearts 等签名渠道）
+  // ⇒ 配对成一条（写盘），UI 才看到 1 个账号、发送才拿得到完整三元组。
+  const akSkProviders = new Set(
+    Object.entries(CHANNELS).filter(([, c]) => c.auth === AUTH.SIGNED_HUAWEI).map(([id]) => id),
+  )
+  accountStore.normalizeAkSk(akSkProviders)
+    .then((r) => { if (r.changed) log.info(`AK/SK 账号已配对归一：${r.before} → ${r.after} 条`) })
+    .catch(() => {})
   let channelModelCache = {}
 
   /** 重新从磁盘读模型缓存（登录/刷新后调用，让选择器立刻看到新模型） */
@@ -464,11 +509,20 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     const ws = scoped?.webServer ?? (typeof scoped?.get === 'function' ? scoped.get('webServer', false) : null)
     if (!ws) { log.debug('无 webServer：HTTP API 未注册'); return }
 
+    // 🔴 真实会话校验能力：委托宿主 connection（验 HMAC 签名 + 可信 Host + 会话）。
+    //    拿不到 ⇒ judge 会 fail-closed 拒绝非回环请求（绝不按 cookie 名前缀放行）。
+    const getConnection = () => {
+      try {
+        const c = typeof ctx?.get === 'function' ? ctx.get('connection', false) : null
+        return c && typeof c.requestRejection === 'function' ? c : null
+      } catch { return null }
+    }
+
     // 余额（独立路径，保持与本机 myfree 一致的手感）
     const cashRegistered = registerCashRoute(ws, ctx, {
       trustedHosts: cfg.trustedHosts ?? [],
       logger: log,
-      helpers: { judge, sendJson },
+      helpers: { judge: (req, o = {}) => judge(req, { ...o, getConnection }), sendJson },
     })
     if (cashRegistered) log.info(`余额路由：${CASH_PATH}`)
 
@@ -483,6 +537,7 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
         reloadChannelModels,   // 登录/刷新后让适配器立刻看到新模型
         accountStore,
         trustedHosts: cfg.trustedHosts ?? [],
+        getConnection,
         logger: log,
         // 🔴 页面展示的链 = adapter 实际生效的链（同一份内存数据，不是另一份推算）
         getChain: () => defaultChain,

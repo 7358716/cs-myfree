@@ -18,6 +18,7 @@ export const AUTH = Object.freeze({
   COOKIE: 'cookie',            // Cookie
   API_KEY: 'api-key',          // x-api-key 之类
   NONE: 'none',                // 免密
+  SIGNED_HUAWEI: 'signed-huawei', // 华为云 SDK-HMAC-SHA256（AK/SK/securityToken 签名）
 })
 
 /** 登录方式 */
@@ -46,8 +47,14 @@ export const CHANNELS = Object.freeze({
   codearts: {
     label: 'CodeArts（华为云）',
     family: 'openai',                       // 请求/响应形状
-    baseUrl: 'https://agentarts.cn-southwest-2.myhuaweicloud.com',
-    auth: AUTH.CUSTOM_HEADER,
+    // 🔴 旧值 agentarts.cn-southwest-2 是 officeace（华为 MaaS）的网关 ⇒ codearts 用它必然 404
+    baseUrl: 'https://snap-access.cn-north-4.myhuaweicloud.com',
+    chatPath: '/api/v2/chat/completions',
+    auth: AUTH.SIGNED_HUAWEI,               // SDK-HMAC-SHA256（AK/SK 签名，不是 Bearer）
+    agentType: 'PromptCenter',              // 模型清单端点要求的头
+    modelsExtraHeaders: { 'Agent-Type': 'PromptCenter', 'X-Language': 'zh-cn' }, // 只发送、不参与签名
+    maxOutputTokens: 65_536,                // 实测 131072 会被上游拒/空流
+    bodyExtra: { include: ['reasoning.encrypted_content'], reasoning_summary: 'auto', tool_stream: true },
     login: LOGIN.BROWSER_CALLBACK,
     refresh: REFRESH.AUTO,
     checkin: { supported: true, gain: '+1000/日' },
@@ -58,6 +65,7 @@ export const CHANNELS = Object.freeze({
     label: 'CodeBuddy（腾讯）',
     family: 'openai',
     baseUrl: 'https://api.lkeap.cloud.tencent.com/v1',
+    chatPath: '/chat/completions',          // baseUrl 已含 /v1，再拼默认值会变 /v1/v1（实测 404）
     auth: AUTH.BEARER,
     login: LOGIN.BROWSER_CALLBACK,
     refresh: REFRESH.AUTO,
@@ -68,7 +76,9 @@ export const CHANNELS = Object.freeze({
   workbuddy: {
     label: 'WorkBuddy（国际）',
     family: 'openai',
-    baseUrl: 'https://api.workbuddy.ai/v1',
+    // 🔴 旧值 api.workbuddy.ai 是 NXDOMAIN（实测 getent hosts 为空），真实入口如下
+    baseUrl: 'https://www.workbuddy.ai',
+    chatPath: '/v2/chat/completions',
     auth: AUTH.BEARER,
     login: LOGIN.BROWSER_CALLBACK,
     refresh: REFRESH.AUTO,
@@ -136,8 +146,9 @@ export const CHANNELS = Object.freeze({
     label: 'Loomy（讯飞）',
     family: 'openai',
     baseUrl: 'https://loomyad.xunfei.cn/api/v1',
-    auth: AUTH.CUSTOM_HEADER,               // Authorization: account ak:sig (HMAC-SHA1)
-    authHeaderFormat: 'account {ak}:{sig}',
+    chatPath: '/chat/completions',           // baseUrl 已含 /api/v1（否则 /api/v1/v1 实测 404）
+    // chat 端点只认 Bearer；HMAC-SHA1 的 `account ak:sig` 只用于积分/账号端点
+    auth: AUTH.BEARER,
     login: LOGIN.QR_WECHAT,
     loginFallback: LOGIN.SMS,
     refresh: REFRESH.MANUAL,                // 无续期端点，14 天人工重登
@@ -150,7 +161,9 @@ export const CHANNELS = Object.freeze({
   raccoon: {
     label: 'Raccoon（商汤）',
     family: 'openai',
-    baseUrl: 'https://api.raccoon.sensetime.com/v1',
+    // 🔴 旧值 api.raccoon.sensetime.com 是 NXDOMAIN，真实入口如下
+    baseUrl: 'https://xiaohuanxiong.com',
+    chatPath: '/api/web/llm/v2/chat/completions',
     auth: AUTH.BEARER,
     login: LOGIN.QR_WECHAT,
     loginFallback: LOGIN.SMS,
@@ -248,6 +261,7 @@ export const CHANNELS = Object.freeze({
     label: 'Qiniu（七牛）',
     family: 'openai',
     baseUrl: 'https://openai.qiniu.com/v1',
+    chatPath: '/chat/completions',           // baseUrl 已含 /v1（否则 /v1/v1 实测 404）
     auth: AUTH.BEARER,
     login: LOGIN.PASTE_KEY,
     refresh: REFRESH.NONE,

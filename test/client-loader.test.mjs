@@ -287,7 +287,11 @@ test('ErrorBoundary 渲染出错时显示错误信息而非抛穿', () => {
   assert.ok(json.includes('boom'), '必须显示原始错误信息')
 })
 
-test('主设置页必须把当前 Tab 包进 Safe', () => {
+test('主设置页必须把当前 Tab 包进 Safe，且带上 tab 作为 key（切分区重置错误边界）', () => {
   const src = readFileSync('src/client.js', 'utf8')
-  assert.match(src, /h\(Safe,\s*\{\s*View:\s*View\s*\}\)/, '视图必须被 Safe 包裹')
+  // v1.7.1：Safe 额外接收 scope（= 当前 tab），用于 key 重建 ErrorBoundary；
+  // 否则一个分区渲染崩了，错误边界状态会一直留着，其它分区也全变错误页。
+  assert.match(src, /h\(Safe,\s*\{[^}]*View:\s*View[^}]*\}\)/, '视图必须被 Safe 包裹')
+  assert.match(src, /h\(Safe,\s*\{[^}]*scope:\s*tab[^}]*\}\)/, 'Safe 必须带 scope=当前 tab')
+  assert.match(src, /h\(ErrorBoundary,\s*\{\s*key:\s*props\.scope/, 'ErrorBoundary 必须用 scope 做 key')
 })

@@ -91,12 +91,37 @@ test('🔴 外部地址 + 无 cookie ⇒ 拒绝（防他人访问）', () => {
   const req = { socket: { remoteAddress: '203.0.113.5' }, headers: { host: '150.158.175.241' } }
   assert.equal(judge(req, { trustedHosts: ['150.158.175.241'] }).ok, false)
 })
-test('外部地址 + cookie + 可信 Host ⇒ 放行', () => {
+test('🔴 外部地址 + 伪造 cookie ⇒ 拒绝（v1.7.1 认证绕过修复）', () => {
+  // 旧实现只看 cookie 名前缀就放行 ⇒ 任何人伪造 dsh-auth-xxx 即可读写插件。
+  // 现在必须由宿主 connection 验签；拿不到校验能力时 fail-closed。
   const req = {
     socket: { remoteAddress: '203.0.113.5' },
     headers: { host: '150.158.175.241', cookie: 'dsh-auth-xx=1' },
   }
-  assert.equal(judge(req, { trustedHosts: ['150.158.175.241'] }).ok, true)
+  const r = judge(req, { trustedHosts: ['150.158.175.241'] })
+  assert.equal(r.ok, false)
+  assert.equal(r.status, 403)
+})
+
+test('外部地址 + 宿主校验通过（真实会话）⇒ 放行', () => {
+  const req = {
+    socket: { remoteAddress: '203.0.113.5' },
+    headers: { host: '150.158.175.241', cookie: 'dsh-auth-xx=1' },
+  }
+  // 宿主 connection.requestRejection 返回假值（undefined/null/0）表示已通过
+  const conn = { requestRejection: () => undefined }
+  assert.equal(judge(req, { trustedHosts: ['150.158.175.241'], getConnection: () => conn }).ok, true)
+})
+
+test('外部地址 + 宿主校验失败 ⇒ 401', () => {
+  const req = {
+    socket: { remoteAddress: '203.0.113.5' },
+    headers: { host: '150.158.175.241', cookie: 'dsh-auth-xx=1' },
+  }
+  const conn = { requestRejection: () => 401 }
+  const r = judge(req, { trustedHosts: ['150.158.175.241'], getConnection: () => conn })
+  assert.equal(r.ok, false)
+  assert.equal(r.status, 401)
 })
 test('回环 + localhost ⇒ 放行', () => {
   const req = { socket: { remoteAddress: '127.0.0.1' }, headers: { host: 'localhost:3080' } }

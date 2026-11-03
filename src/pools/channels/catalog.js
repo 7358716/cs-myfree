@@ -13,7 +13,7 @@
 import { join, dirname } from 'node:path'
 import { readFile, writeFile, rename, mkdir, chmod, unlink } from 'node:fs/promises'
 import { CHANNELS, AUTH } from './protocols.js'
-import { buildAuthHeaders, joinUrl } from './driver.js'
+import { buildRequestHeaders, joinUrl } from './driver.js'
 import { MODELS_PATH, builtinModelsOf, hasBuiltin } from './builtin-models.js'
 
 /** 模型 id 分隔符（用 `/` 更直观，用户能看出是哪个渠道的） */
@@ -82,19 +82,36 @@ export async function fetchChannelModels(channelId, cred, opts = {}) {
     }
   }
 
-  const url = joinUrl(ch.badUrl ?? ch.baseUrl, modelsPath ?? '/v1/models')
+  const url = joinUrl(ch.baseUrl, modelsPath ?? '/v1/models')
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
 
+  // 凭据兼容两种形态：单字符串（老格式）/ 对象（AK/SK/securityToken）
+  const credObj = typeof cred === 'string'
+    ? (cred.includes(':') ? { token: cred, ak: cred.split(':')[0], sk: cred.split(':')[1] } : { token: cred })
+    : (cred ?? {})
+
   try {
-    const res = await fetchImpl(url, {
-      method: 'GET',
-      headers: {
+    let headers
+    try {
+      headers = buildRequestHeaders(ch, credObj, {
+        method: 'GET',
+        url,
+        body: '',
         accept: 'application/json',
-        ...buildAuthHeaders(ch, { token: cred, ak: cred.split(':')[0], sig: cred.split(':')[1] }),
-      },
-      signal: ctrl.signal,
-    })
+        extraUnsignedHeaders: ch.modelsExtraHeaders,
+      })
+    } catch (err) {
+      // 凭据不完整（如 codearts 缺 SK）⇒ 回落内置清单，不把插件打挂
+      const builtin = allowBuiltin ? builtinModelsOf(channelId) : []
+      return {
+        ok: builtin.length > 0,
+        models: builtin,
+        source: builtin.length > 0 ? 'builtin-after-auth-error' : 'none',
+        error: String(err?.message ?? err).slice(0, 120),
+      }
+    }
+    const res = await fetchImpl(url, { method: 'GET', headers, signal: ctrl.signal })
     if (!res.ok) {
       // 🔑 关键：拉失败**回落到内置清单**，而不是让用户看到空列表
       const builtin = allowBuiltin ? builtinModelsOf(channelId) : []
@@ -106,9 +123,13 @@ export async function fetchChannelModels(channelId, cred, opts = {}) {
       }
     }
     const body = await res.json()
-    const arr = body?.data ?? body?.models ?? body ?? []
+    // 兼容 OpenAI（data/models）、codearts（builtinModels）、其它（数组）
+    const arr = body?.data ?? body?.models ?? body?.builtinModels ?? body?.result?.models ?? body ?? []
     const models = (Array.isArray(arr) ? arr : [])
-      .map((m) => ({ id: String(m?.id ?? m?.name ?? ''), name: String(m?.name ?? m?.id ?? '') }))
+      .map((m) => ({
+        id: String(m?.id ?? m?.name ?? m?.model_id ?? m?.model_name ?? ''),
+        name: String(m?.name ?? m?.model_name ?? m?.id ?? m?.model_id ?? ''),
+      }))
       .filter((m) => m.id)
     if (models.length === 0) {
       const builtin = allowBuiltin ? builtinModelsOf(channelId) : []
@@ -143,8 +164,9 @@ export async function refreshAll(dshHome, accountStore, opts = {}) {
   const out = {}
   for (const [channelId, list] of byChannel) {
     // 用第一个账号的凭证拉清单
-    const first = list[0]
-    const cred = await accountStore.credentialOf(channelId)
+    const cred = typeof accountStore.secretOf === 'function'
+      ? await accountStore.secretOf(channelId)
+      : await accountStore.credentialOf(channelId)
     if (!cred) continue
     const r = await fetchChannelModels(channelId, cred, opts)
     out[channelId] = {

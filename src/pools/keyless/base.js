@@ -33,6 +33,23 @@ export function keylessHeaders(extra = {}) {
   return h
 }
 
+/**
+ * OpenAI usage → 宿主 TokenUsage。
+ * 上游末帧常是 `{"choices":[],"usage":{"prompt_tokens":…,"completion_tokens":…}}`，
+ * 旧实现只读 choices[0].delta ⇒ 账本用量恒为 0。
+ */
+export function toUsage(u = {}) {
+  const out = {
+    inputTokens: Number(u.prompt_tokens ?? u.inputTokens ?? u.input_tokens) || 0,
+    outputTokens: Number(u.completion_tokens ?? u.outputTokens ?? u.output_tokens) || 0,
+  }
+  const total = Number(u.total_tokens ?? u.totalTokens)
+  if (Number.isFinite(total)) out.totalTokens = total
+  const cached = Number(u.prompt_tokens_details?.cached_tokens ?? u.cacheReadTokens ?? u.cached_tokens)
+  if (Number.isFinite(cached)) out.cacheReadTokens = cached
+  return out
+}
+
 /** 统一的 SSE→chunk 解析（OpenAI 兼容格式，含 reasoning 字段） */
 export async function* parseOpenAiSse(body, now = () => Date.now()) {
   const decoder = new TextDecoder()
@@ -53,6 +70,8 @@ export async function* parseOpenAiSse(body, now = () => Date.now()) {
         if (reason) yield { type: 'reasoning-delta', text: reason, at: now() }
         if (delta.content) yield { type: 'text-delta', text: delta.content, at: now() }
         if (delta.tool_calls) yield { type: 'tool-call-delta', calls: delta.tool_calls, at: now() }
+        // 用量：OpenAI 流式末帧带顶层 usage（choices 为空数组），必须单独透传
+        if (obj?.usage) yield { type: 'usage', usage: toUsage(obj.usage), at: now() }
         const fin = obj?.choices?.[0]?.finish_reason
         if (fin) yield { type: 'finish', reason: { kind: fin === 'stop' ? 'stop' : fin }, at: now() }
       } catch { /* 忽略心跳 */ }
@@ -67,7 +86,8 @@ export function* fromCompletionJson(obj, now = () => Date.now()) {
   if (reason) yield { type: 'reasoning-delta', text: reason, at: now() }
   if (msg.content) yield { type: 'text-delta', text: msg.content, at: now() }
   if (msg.tool_calls) yield { type: 'tool-call', calls: msg.tool_calls, at: now() }
-  yield { type: 'finish', reason: { kind: 'stop' }, usage: obj?.usage ?? null, at: now() }
+  if (obj?.usage) yield { type: 'usage', usage: toUsage(obj.usage), at: now() }
+  yield { type: 'finish', reason: { kind: 'stop' }, usage: obj?.usage ? toUsage(obj.usage) : null, at: now() }
 }
 
 /**

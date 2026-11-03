@@ -10,6 +10,17 @@
  */
 
 import { AUTH } from './protocols.js'
+import { signHuaweiRequest } from './sign.js'
+import { toUsage } from '../keyless/base.js'
+
+/**
+ * 上游「并发会话数超限」判定（codearts 实测 HTTP 400 / TM.00001041）。
+ * 单独导出便于单测：这是「看起来像参数错误、实际是限流」的典型陷阱。
+ */
+export function isConcurrencyCapError(text) {
+  const s = String(text ?? '')
+  return /TM\.00001041/.test(s) || /并发会话数/.test(s) || /concurrent session/i.test(s)
+}
 
 /**
  * 构造鉴权头。
@@ -37,6 +48,9 @@ export function buildAuthHeaders(ch, cred = {}) {
     case AUTH.API_KEY:
       if (cred.token) h['x-api-key'] = cred.token
       break
+    case AUTH.SIGNED_HUAWEI:
+      // SDK-HMAC-SHA256 需要完整 URL + body 才能算签名 ⇒ 由 buildRequestHeaders 生成
+      break
     case AUTH.NONE:
     default:
       break   // 免密：**绝不设置** authorization
@@ -51,6 +65,44 @@ export function joinUrl(base, path) {
   const b = String(base ?? '').replace(/\/+$/, '')
   const p = String(path ?? '').replace(/^\/+/, '')
   return p ? `${b}/${p}` : b
+}
+
+/**
+ * 构造一次请求的**完整请求头**（含签名）。
+ *
+ * 对 SIGNED_HUAWEI（codearts）：用 AK/SK/securityToken 对 method+url+body 签名，
+ * 返回签名要求随请求发送的头 + Authorization；`extraUnsignedHeaders`
+ * （如模型清单的 Agent-Type / X-Language）只发送、不参与签名。
+ * 其余渠道等价于 `buildAuthHeaders` + 基础头。
+ *
+ * @param {object} ch 渠道协议
+ * @param {object} cred {token?, ak?, sk?, securityToken?, sig?}
+ * @param {{method?:string, url:string, body?:string, accept?:string, extraUnsignedHeaders?:object}} o
+ */
+export function buildRequestHeaders(ch, cred = {}, o = {}) {
+  const { method = 'POST', url, body = '', accept, extraUnsignedHeaders } = o
+  const h = {
+    'content-type': 'application/json',
+    ...(accept ? { accept } : {}),
+    'user-agent': 'Mozilla/5.0 (compatible; cs-myfree)',
+    ...buildAuthHeaders(ch, cred),
+  }
+  if (ch.auth === AUTH.SIGNED_HUAWEI) {
+    const signed = signHuaweiRequest({
+      ak: cred.ak,
+      sk: cred.sk,
+      securityToken: cred.securityToken,
+      method,
+      url,
+      body,
+    })
+    Object.assign(h, signed.headers)
+    h.authorization = signed.authorization
+  }
+  // 不参与签名、但要随请求发的头（codearts 模型清单要求 Agent-Type 等）
+  const extra = { ...(extraUnsignedHeaders ?? {}) }
+  for (const [k, v] of Object.entries(extra)) h[k] = v
+  return h
 }
 
 /**
@@ -73,12 +125,6 @@ export async function chat(o) {
   } = o
 
   const url = joinUrl(ch.baseUrl, ch.chatPath ?? '/v1/chat/completions')
-  const headers = {
-    'content-type': 'application/json',
-    accept: stream ? 'text/event-stream' : 'application/json',
-    'user-agent': 'Mozilla/5.0 (compatible; cs-myfree)',
-    ...buildAuthHeaders(ch, cred),
-  }
 
   const ctrl = new AbortController()
   const onAbort = () => ctrl.abort()
@@ -86,24 +132,53 @@ export async function chat(o) {
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
 
   try {
-    const body = { model, messages, stream }
+    // 渠道声明式 body 附加字段（codearts: include/reasoning_summary/tool_stream…）
+    const body = { model, messages, stream, ...(ch.bodyExtra ?? {}) }
+    // 会话级缓存键（codearts 不传则 cached_tokens 恒 0）
+    if (ch.auth === AUTH.SIGNED_HUAWEI && o.sessionId) body.prompt_cache_key = String(o.sessionId)
     // 宿主 tools → OpenAI tools（不传 = 模型无法调用工具）
     if (Array.isArray(tools) && tools.length > 0) { body.tools = tools; body.tool_choice = o.toolChoice ?? 'auto' }
-    if (Number.isFinite(o.maxTokens) && o.maxTokens > 0) body.max_tokens = Math.floor(o.maxTokens)
+    // 输出上限：渠道若声明 maxOutputTokens（codearts 65536）必须钳制，否则上游拒/空流
+    let maxTokens = Number.isFinite(o.maxTokens) && o.maxTokens > 0 ? Math.floor(o.maxTokens) : null
+    if (Number.isFinite(ch.maxOutputTokens) && ch.maxOutputTokens > 0) {
+      maxTokens = Math.min(maxTokens ?? ch.maxOutputTokens, ch.maxOutputTokens)
+    }
+    if (maxTokens !== null) body.max_tokens = maxTokens
     if (Number.isFinite(o.temperature)) body.temperature = o.temperature
     if (Array.isArray(o.stop) && o.stop.length > 0) body.stop = o.stop
+
+    const payload = JSON.stringify(body)
+    const headers = buildRequestHeaders(ch, cred, {
+      method: 'POST',
+      url,
+      body: payload,
+      accept: stream ? 'text/event-stream' : 'application/json',
+      extraUnsignedHeaders: o.extraHeaders,
+    })
 
     const res = await fetchImpl(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body),
+      body: payload,
       signal: ctrl.signal,
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
+      // codearts 有「并发会话数」上限（实测 3 个）。超限时上游回 HTTP 400
+      // TM.00001041「并发会话数已达上限」——这不是参数错误，重试一次通常就好；
+      // 归类为 RATE_LIMIT（可换号/退避），绝不能让上层误判成 INVALID_REQUEST。
+      if (isConcurrencyCapError(text) && !o._capRetried) {
+        const wait = Math.max(0, Number(o.capRetryDelayMs ?? 2500))
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait))
+        return chat({ ...o, _capRetried: true })
+      }
       const err = new Error(`${o.channelId} HTTP ${res.status}: ${text.slice(0, 300)}`)
       err.status = res.status
       err.channel = o.channelId
+      if (isConcurrencyCapError(text)) {
+        err.code = 'RATE_LIMIT'
+        err.message = `渠道 ${o.channelId} 并发会话已满（上游限制 3 个）：请稍后重试，或关闭其它窗口/会话`
+      }
       throw err
     }
     return res
@@ -133,6 +208,7 @@ export async function* parseSse(res, now = () => Date.now()) {
         if (reason) yield { type: 'reasoning-delta', text: reason, at: now() }
         if (d.content) yield { type: 'text-delta', text: d.content, at: now() }
         if (d.tool_calls) yield { type: 'tool-call-delta', calls: d.tool_calls, at: now() }
+        if (obj.usage) yield { type: 'usage', usage: toUsage(obj.usage), at: now() }
       } catch { /* 忽略 */ }
     }
   }

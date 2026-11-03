@@ -46,24 +46,50 @@ test('fetchChannelModels 未登录返回失败', async () => {
 
 /**
  * ⚠️ 定案理由（3 个旧用例为何改）：
- *   codearts 实测**没有** `/v1/models` 端点（builtin-models.js 的 MODELS_PATH.codearts = null，
- *   5 种候选路径全 404；参考实现 dsh-codearts-auth 也是从
- *   opengw gateway/config + snap-access /v1/model/builtin 拿模型，不是 OpenAI /v1/models）。
- *   ⇒ 走内置清单是**正确设计**，旧测试却拿 codearts 断言「远程形状」，
- *     所以是**测试过时**，不是实现错。
- *   远程形状/鉴权头改用真正有 models 端点的渠道（minimax，BEARER）验证；
- *   另加一条用例把 codearts 的「内置兜底」新设计钉死。
+ *   旧实现把 codearts 标成「无 models 端点、走内置清单」；2026-11-03 渠道调研实测：
+ *   codearts **有** `GET https://snap-access.cn-north-4.myhuaweicloud.com/v1/model/builtin`
+ *   （需 AK/SK 签名 + 头 `Agent-Type: PromptCenter`，返回 12 个模型）。
+ *   旧注释「5 种路径全 404」是查错了 host（当时用的是 officeace 网关）。
+ *   ⇒ 现在 codearts 走**远端拉取**，失败或缺 AK/SK 才回落内置清单。
+ *   远程形状/鉴权头仍用 minimax 覆盖（无签名、标准 Bearer）。
  */
-test('codearts 无 models 端点 ⇒ 用内置清单（source=builtin，可被选中）', async () => {
-  let called = false
-  const r = await fetchChannelModels('codearts', 'token123', {
-    fetchImpl: async () => { called = true; return { ok: true, json: async () => ({ data: [] }) } },
+test('codearts 缺 AK/SK ⇒ 回落内置清单且不抛（source=builtin-after-auth-error）', async () => {
+  const r = await fetchChannelModels('codearts', 'pk_test_token_only', {
+    fetchImpl: async () => { throw new Error('不该发出未签名的请求') },
   })
-  assert.equal(called, false, '已知没有 models 端点 ⇒ 不该发无用请求')
   assert.equal(r.ok, true)
-  assert.equal(r.source, 'builtin')
-  assert.ok(r.models.length >= 1)
-  assert.ok(r.models.some((m) => m.id === 'deepseek-v4-pro'), '内置清单必须含 deepseek-v4-pro')
+  assert.equal(r.source, 'builtin-after-auth-error')
+  assert.ok(r.models.length >= 10, 'codearts 内置清单应为远端实测的 12 条')
+  assert.ok(r.models.some((m) => m.id === 'GLM-5.2'))
+})
+
+test('🔴 codearts 模型清单：签名 GET + Agent-Type: PromptCenter（远端形状）', async () => {
+  let seen = null
+  const r = await fetchChannelModels('codearts', { ak: 'AKIDtest1234567890', sk: 'SKsecret1234567890123456789012345678901234' }, {
+    fetchImpl: async (url, init) => {
+      seen = { url, headers: init.headers, method: init.method }
+      return { ok: true, json: async () => ({ count: 2, builtinModels: [{ model_id: 'GLM-5.2', model_name: 'GLM 5.2' }, { model_id: 'kimi-k3' }] }) }
+    },
+  })
+  assert.equal(seen.method, 'GET')
+  assert.equal(seen.url, 'https://snap-access.cn-north-4.myhuaweicloud.com/v1/model/builtin')
+  assert.match(seen.headers.authorization, /^SDK-HMAC-SHA256 Access=AKIDtest1234567890,/)
+  assert.equal(seen.headers['Agent-Type'], 'PromptCenter', '模型清单必须带 Agent-Type')
+  assert.ok(seen.headers['x-sdk-date'])
+  // content-type 绝不能进 SignedHeaders（本机实测 401 的坑）
+  assert.equal(seen.headers.authorization.includes('content-type'), false)
+  assert.equal(r.ok, true)
+  assert.equal(r.source, 'remote')
+  assert.deepEqual(r.models.map((m) => m.id), ['GLM-5.2', 'kimi-k3'])
+})
+
+test('codearts 远端失败 ⇒ 回落内置清单（不返回空列表）', async () => {
+  const r = await fetchChannelModels('codearts', { ak: 'AKIDtest1234567890', sk: 'SKsecret1234567890123456789012345678901234' }, {
+    fetchImpl: async () => ({ ok: false, status: 401 }),
+  })
+  assert.equal(r.ok, true)
+  assert.equal(r.source, 'builtin-after-http-error')
+  assert.ok(r.models.length >= 10)
 })
 
 test('fetchChannelModels 能解析 OpenAI 形状（远端渠道 minimax）', async () => {

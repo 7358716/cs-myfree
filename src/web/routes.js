@@ -23,7 +23,7 @@ import { CHANNELS, checkinChannels, manualRefreshChannels, proxyRequiredChannels
 import { probeAll, PRIORITY, DEFAULT_MODEL, resolveSourceId } from '../pools/keyless/index.js'
 import { queryCash, CASH_PATH } from './cash.js'
 import { judge, sendJson } from './guard.js'
-import { withDefaults, DEFAULTS } from '../config/store.js'
+import { withDefaults, DEFAULTS, findSensitiveKey, stripSensitive } from '../config/store.js'
 import { planReload, RELOAD_SCOPE } from '../ops/feed.js'
 import { collectLedger } from '../audit/sources.js'
 import { createAccountStore } from '../pools/channels/accounts.js'
@@ -69,6 +69,7 @@ export function registerRoutes(webServer, opts = {}) {
     setConfig = async () => false,
     ledger = null,
     trustedHosts = [],
+    getConnection = null,          // () => 宿主 connection 服务（真实会话校验；拿不到则 fail-closed）
     logger = { info: () => {}, warn: () => {} },
     fetchImpl = globalThis.fetch,
     now = () => Date.now(),
@@ -101,8 +102,8 @@ export function registerRoutes(webServer, opts = {}) {
         kind: 'exact',
         path: `${PREFIX}${path}`,
         handler: async (req, res) => {
-          const verdict = judge(req, { trustedHosts })
-          if (!verdict.ok) return sendJson(res, 403, { ok: false, error: verdict.reason })
+          const verdict = judge(req, { trustedHosts, getConnection })
+          if (!verdict.ok) return sendJson(res, verdict.status ?? 403, { ok: false, error: verdict.reason })
           if (method !== 'ANY' && req.method !== method) {
             return sendJson(res, 405, { ok: false, error: 'method not allowed' })
           }
@@ -265,13 +266,13 @@ export function registerRoutes(webServer, opts = {}) {
 
   // ── 配置 ──
   route('/config', async ({ body }) => {
-    if (body === undefined) return { ok: true, config: withDefaults(getConfig()), defaults: DEFAULTS }
+    // 🔴 读路径也剔除敏感字段（历史脏数据不得回给 UI）
+    if (body === undefined) return { ok: true, config: stripSensitive(withDefaults(getConfig())), defaults: DEFAULTS }
     try {
       const merged = withDefaults({ ...getConfig(), ...body })
-      // 安全校验：不允许通过 API 写入任何凭据类字段
-      for (const k of Object.keys(merged)) {
-        if (/key|token|secret|password/i.test(k)) return { ok: false, error: `禁止通过 API 写敏感字段：${k}` }
-      }
+      // 安全校验：**递归**禁止任何凭据类字段（含嵌套 transportHeaders.authorization）
+      const hit = findSensitiveKey(merged)
+      if (hit) return { ok: false, error: `禁止通过 API 写敏感字段：${hit}` }
       const saved = await setConfig(merged)
       const plan = planReload({ changed: ['config.json'] })
       return { ok: saved !== false, config: merged, reload: plan }
@@ -346,18 +347,34 @@ export function registerRoutes(webServer, opts = {}) {
   route('/channels/save', async ({ body }) => {
     if (!body || !body.provider) return { ok: false, error: '缺少 provider' }
     if (!CHANNELS[body.provider]) return { ok: false, error: '未知渠道：' + body.provider }
-    const cred = String(body.credential || '').trim()
-    if (!cred) return { ok: false, error: '凭证不能为空' }
+    let cred = String(body.credential || '').trim()
+    // 🔑 新契约：前端可直接提交**用户原始粘贴文本**（body.text），由后端解析，
+    //    避免 /channels/parse 把凭据原文回给前端（红线 #4）。
+    if (!cred && typeof body.text === 'string' && body.text.trim()) {
+      const parsed = captureCredential(body.text)
+      if (!parsed.ok) return { ok: false, error: parsed.error }
+      cred = String(parsed.credential || '').trim()
+    }
+    // AK/SK 结构化提交（签名型渠道需要三元组，单字符串装不下）
+    const ak = typeof body.ak === 'string' ? body.ak.trim() : ''
+    const sk = typeof body.sk === 'string' ? body.sk.trim() : ''
+    const securityToken = typeof body.securityToken === 'string' ? body.securityToken.trim() : ''
+    if (!cred && !(ak && sk)) return { ok: false, error: '凭证不能为空（令牌，或 AK+SK 两项）' }
     // 🔴 后端也做一次形态校验（防前端绕过 / 防误存普通网址）
-    if (!looksLikeCredential(cred)) {
+    if (!(ak && sk) && !looksLikeCredential(cred)) {
       return { ok: false, error: '这不像一个有效令牌（可能是普通网址或太短）。请粘贴带 ?code= 的回调链接或真正的令牌。' }
     }
+    if (ak && !sk) return { ok: false, error: 'AK/SK 需要成对提交：还缺 SK' }
+    if (sk && !ak) return { ok: false, error: 'AK/SK 需要成对提交：还缺 AK' }
     // 🔴 绝不把凭证写日志
     const r = await accounts.save({
       id: body.id,
       provider: body.provider,
       label: body.label || CHANNELS[body.provider].label,
       credential: cred,
+      ak: ak || undefined,
+      sk: sk || undefined,
+      securityToken: securityToken || undefined,
       expiresAt: Number.isFinite(body.expiresAt) ? body.expiresAt : null,
     })
     if (r.ok) {
@@ -372,6 +389,7 @@ export function registerRoutes(webServer, opts = {}) {
     }
     return {
       ok: r.ok, id: r.id,
+      kind: r.kind ?? (ak && sk ? 'aksk' : 'token'),
       hint: r.ok ? '已保存，正在拉取可用模型…（几秒后刷新模型选择器）' : '保存失败',
     }
   })
@@ -415,15 +433,19 @@ export function registerRoutes(webServer, opts = {}) {
   })
 
   // ── 解析（前端粘贴内容交给后端统一判定，避免两套规则不一致）──
+  //
+  // 🔴 安全红线 #4：**绝不把凭据原文回给前端**（XSS/日志/DevTools 都会泄漏）。
+  //    只回判定结果 + 掩码预览；保存时前端把**原始粘贴文本**再发一次，
+  //    后端自己 parse（见 /channels/save 的 body.text 分支）。
   route('/channels/parse', async ({ body }) => {
     const text = String(body?.text ?? '')
     const r = captureCredential(text)
     return {
       ok: r.ok,
-      credential: r.ok ? r.credential : null,
       kind: r.kind ?? null,
       field: r.extra?.field ?? null,
       preview: r.ok ? previewCapture(r) : null,
+      length: r.ok ? String(r.credential ?? '').length : 0,
       error: r.ok ? null : r.error,
     }
   })
@@ -444,6 +466,9 @@ export function registerRoutes(webServer, opts = {}) {
     if (![SCOPE.GLOBAL, SCOPE.PRESET, SCOPE.SESSION].includes(scope)) {
       return { ok: false, error: '未知作用域：' + scope }
     }
+    // 🔴 递归拒绝敏感字段（防嵌套绕过），不落盘
+    const hit = findSensitiveKey(body.config || {})
+    if (hit) return { ok: false, error: `禁止写入敏感字段：${hit}` }
     try {
       const ok = await writeScope(opts.dshHome, scope, body.id, body.config || {})
       const eff = await effectiveConfig({ dshHome: opts.dshHome, presetId: body.presetId, sessionId: body.sessionId })

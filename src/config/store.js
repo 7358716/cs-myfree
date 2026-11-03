@@ -68,3 +68,51 @@ export function withDefaults(cfg = {}) {
   }
   return out
 }
+
+/**
+ * 敏感字段名（红线 #1/#2/#7：任何凭据都不得写进 config.json /
+ * 也不得回给 UI）。
+ *
+ * `authorization` / `cookie` 也在此列：`transportHeaders` 这类嵌套对象
+ * 很容易被用户/前端塞进 `Authorization: Bearer …`。
+ */
+export const SENSITIVE_KEY_RE = /(key|token|secret|password|passwd|authorization|cookie|credential)/i
+
+/**
+ * 递归查找敏感字段（返回第一个命中的路径，如 `transportHeaders.authorization`）。
+ * @param {any} obj
+ * @param {string} [path]
+ * @returns {string|null}
+ */
+export function findSensitiveKey(obj, path = '') {
+  if (Array.isArray(obj)) {
+    for (let i = 0; i < obj.length; i++) {
+      const hit = findSensitiveKey(obj[i], `${path}[${i}]`)
+      if (hit) return hit
+    }
+    return null
+  }
+  if (!obj || typeof obj !== 'object') return null
+  for (const [k, v] of Object.entries(obj)) {
+    const p = path ? `${path}.${k}` : k
+    if (SENSITIVE_KEY_RE.test(k)) return p
+    const hit = findSensitiveKey(v, p)
+    if (hit) return hit
+  }
+  return null
+}
+
+/**
+ * 深拷贝并**剔除**敏感字段（读路径也用：磁盘上若有历史脏数据，
+ * 绝不能通过 GET /config 回给 UI）。
+ */
+export function stripSensitive(obj) {
+  if (Array.isArray(obj)) return obj.map((v) => stripSensitive(v))
+  if (!obj || typeof obj !== 'object') return obj
+  const out = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (SENSITIVE_KEY_RE.test(k)) continue
+    out[k] = stripSensitive(v)
+  }
+  return out
+}

@@ -16,6 +16,27 @@
 
 import { CHANNELS, LOGIN } from '../pools/channels/protocols.js'
 
+/**
+ * 渠道能力实况（2026-11-03 渠道调研定案）—— **不实现就明确说，不假装可用**。
+ *
+ * 背景：插件的「登录」只是把用户粘贴的字符串存下来，**没有** OAuth/设备码 → token
+ * 的兑换实现（accounts.js 只存不换，refresh.js 无网络调用）。因此对需要 token
+ * 交换的渠道，用户即便「登录成功」也拿不到可用凭证 ⇒ 必须如实标注。
+ */
+const IMPLEMENTED = Object.freeze({
+  codearts: true,   // AK/SK 直签 SDK-HMAC-SHA256，本机实测 200 + 真 SSE
+  qiniu: true,      // 官方控制台可拿 API Key，OpenAI 兼容端点
+})
+
+const NEEDS_TOKEN_EXCHANGE = '未实现登录换取（OAuth/设备码 → token），粘贴串不是可用凭证'
+
+/** 本机/上游层面就不可用的渠道（与是否登录无关） */
+const UNAVAILABLE = Object.freeze({
+  gemini: '本机网络不可达（HTTPS 超时），需代理',
+  qodercn: '公开端点已下线（实测 404），真链路为 WASM 加密',
+  opencode: '上游 403 FreeTierError',
+})
+
 /** 各登录方式的执行指引 */
 export const LOGIN_GUIDES = Object.freeze({
   [LOGIN.PASTE_KEY]: {
@@ -119,10 +140,16 @@ export async function listChannels(store) {
   return Object.entries(CHANNELS).map(([id, ch]) => {
     const guide = LOGIN_GUIDES[ch.login] || LOGIN_GUIDES[LOGIN.NONE]
     const mine = byProvider.get(id) || []
+    const unavailableReason = UNAVAILABLE[id] ?? null
+    const implemented = unavailableReason ? false : (IMPLEMENTED[id] === true)
     return {
       id,
       label: ch.label,
       login: ch.login,
+      // 🔴 能力实况：false 时 UI 必须显示「暂不可用」+ reason，不能让用户以为登了就能用
+      implemented,
+      authKind: ch.auth,
+      reason: unavailableReason ?? (implemented ? null : NEEDS_TOKEN_EXCHANGE),
       guideKind: guide.kind,
       guideTitle: guide.title,
       guideSteps: guide.steps,
