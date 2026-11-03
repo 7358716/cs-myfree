@@ -18,6 +18,7 @@ import { startCodearts, pollCodearts } from './codearts.js'
 import { startQoder, pollQoder } from './qoder.js'
 import { startCline, pollCline } from './cline.js'
 import { startMinimax, pollMinimax } from './minimax.js'
+import { startOfficeAce, pollOfficeAce } from './officeace.js'
 import { startBuddy, pollBuddy } from './buddy.js'
 import { startWorkbuddy, pollWorkbuddy } from './workbuddy.js'
 import { startLoomy, pollLoomy } from './loomy.js'
@@ -67,7 +68,10 @@ export const FLOW_MAP = Object.freeze({
   trae: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'TRAE 字节：端点待取证' },
   accio: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'Accio 阿里：端点待取证' },
   gemini: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'Gemini Code Assist：本机网络不可达' },
-  officeace: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'OfficeAce 华为 MaaS：OAuth PKCE，端点待取证' },
+  officeace: {
+    type: FLOW_TYPE.BROWSER, start: startOfficeAce, poll: pollOfficeAce,
+    loginVerified: false, loginNote: 'OfficeAce 华为 MaaS：云侧 state + PKCE + DPoP（端点已对拍），待真机验证',
+  },
   lobsterai: { type: FLOW_TYPE.BROWSER, loginVerified: false, loginNote: 'LobsterAI 有道：端点待取证' },
   // ── 设备码 ──
   qoder: {
