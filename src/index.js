@@ -29,7 +29,7 @@ import { appendRecord } from './audit/sources.js'
 import { createState } from './web/state.js'
 
 const NAME = 'cs-myfree'
-const VERSION = '1.5.0'
+const VERSION = '1.5.1'
 
 export const name = NAME
 export const version = VERSION
