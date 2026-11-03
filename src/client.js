@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const react = require('react')
     const h = react.createElement
 
-    const VERSION = '1.9.4'
+    const VERSION = '1.9.5'
     const API = '/cs-myfree'
     const CASH_PATH = '/cs-myfree/cash'
 

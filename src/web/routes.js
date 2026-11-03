@@ -686,11 +686,20 @@ export function registerRoutes(webServer, opts = {}) {
     const state = r.state ?? 'error'
 
     // 🔴 拿到 credential ⇒ 落盘（只回掩码，原文绝不进响应）
+    //
+    // 🐛 真实缺陷（2026-11-03 用户实测）：「登录成功但提示未登录（AUTH）」。
+    //    根因：`pollLogin()` 的**返回值里没有 credential**（它只把 credential 存在
+    //    内部 session 上），这里却判断 `r.credential` ⇒ 落盘分支永远进不去 ⇒
+    //    账号根本没保存 ⇒ 一测连通就 AUTH。腾讯/讯飞都是这个表现。
+    //    修法：credential 一律从 **session** 取（服务端内存，绝不进 HTTP 响应）。
     let masked = r.maskedAccount ?? null
-    if ((state === 'ok' || state === 'success') && r.credential && session && !session.persisted) {
+    const pendingCredential = session?.credential ?? null
+    if ((state === 'ok' || state === 'success') && pendingCredential && session && !session.persisted) {
       try {
-        masked = (await persistCredential(session.provider, session, r.credential)) ?? masked
+        masked = (await persistCredential(session.provider, session, pendingCredential)) ?? masked
         session.persisted = true
+        // 保存成功后立刻刷新渠道模型清单，让模型选择器马上看到
+        if (opts.reloadChannelModels) { try { await opts.reloadChannelModels() } catch { /* 非致命 */ } }
       } catch (err) {
         logger.warn?.(`login/poll 落盘失败：${safeErrorText(err)}`)
         return { ok: false, state: 'error', hint: '', maskedAccount: null, error: '登录成功但保存失败：' + safeErrorText(err) }
