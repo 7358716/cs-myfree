@@ -80,6 +80,44 @@ export function createAdapter(opts = {}) {
   // 必须共用同一份名额，否则上游会话数照样被打满（实测 5 并发全挂）。
   const gate = concurrency ?? getSharedGate()
 
+  /**
+   * 🔴 上下文容量（contextWindow）—— 这是「会话越跑越断」的根因。
+   *
+   * 真实缺陷（2026-11-04 排查）：链路条目从未设置 `contextWindow` ⇒
+   * `makeModelInfo` 拿不到值 ⇒ 宿主**不知道模型容量** ⇒ **不触发自动压缩**
+   * ⇒ 会话上下文无限增长（实测已到 66.7 万 token 且只增不减）⇒ 必然中断。
+   *
+   * 保守取值（宁可让宿主早压缩，也不要撞上游硬限）：
+   *   · codearts 标称 1M，但实测 60 万+ 开始不稳 ⇒ 报 **256k**（留足安全边界）
+   *   · 免密源（kilo/ovh）实测上下文有限 ⇒ 报 **64k**
+   *   · 渠道条目可显式覆盖（entry.contextWindow 优先）
+   */
+  const CONTEXT_DEFAULTS = {
+    codearts: 262_144,      // 标称 1M，实测 60 万+ 不稳 ⇒ 报 256k 让宿主早压缩
+    buddy: 131_072,
+    workbuddy: 131_072,
+    trae: 1_000_000,        // 官方标称
+    cline: 200_000,
+    minimax: 1_000_000,
+    minimaxintl: 1_000_000,
+    loomy: 128_000,
+    raccoon: 128_000,
+    officeace: 200_000,
+    accio: 1_000_000,
+    kilo: 65_536,           // 免密源实测上下文有限
+    ovh: 32_768,
+    pollinations: 16_384,
+  }
+  const DEFAULT_CONTEXT = 65_536
+
+  /** 取某候选的 contextWindow（条目显式值 > 渠道默认 > 兜底） */
+  const contextOf = (e) => {
+    const explicit = Number(e?.contextWindow)
+    if (Number.isInteger(explicit) && explicit > 0) return explicit
+    const prov = String(e?.provider ?? '').replace(/-free$|-vision$/, '')
+    return CONTEXT_DEFAULTS[prov] ?? DEFAULT_CONTEXT
+  }
+
   let currentBuiltin = Array.isArray(builtin) ? builtin : []
   let currentOverrides = Array.isArray(overrides) ? overrides : []
   let chain = mergeChain(currentBuiltin, currentOverrides)
@@ -190,7 +228,7 @@ export function createAdapter(opts = {}) {
       return catalog().map((e) => makeModelInfo(provider, {
         id: e.model,
         name: e.name || e.model,
-        contextWindow: e.contextWindow,
+        contextWindow: contextOf(e),
         inputModalities: e.inputModalities,
         supportsVision: e.supportsVision,
       }))
@@ -204,7 +242,7 @@ export function createAdapter(opts = {}) {
       return makeModelInfo(provider, {
         id: model,
         name: hit.name || model,
-        contextWindow: hit.contextWindow,
+        contextWindow: contextOf(hit),
         inputModalities: hit.inputModalities,
         supportsVision: hit.supportsVision,
       })

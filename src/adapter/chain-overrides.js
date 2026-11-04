@@ -39,6 +39,9 @@ export function normalizeEntry(e, index = 0) {
   // 🔴 disabled：内置链里的条目无法「物理删除」，用禁用条剔除（用户实测反馈：
   //    kilo/ovh 在页面删掉后又回来 —— 因为只在覆盖层删了，内置链还在）
   if (e.disabled === true) out.disabled = true
+  // 上下文容量：必须透传，否则 adapter 拿不到 ⇒ 宿主不压缩 ⇒ 会话越跑越断
+  const cw = Number(e.contextWindow)
+  if (Number.isInteger(cw) && cw > 0) out.contextWindow = cw
   if (typeof e.note === 'string' && e.note.trim() !== '') out.note = e.note.trim()
   out._i = index
   return out

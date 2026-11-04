@@ -118,7 +118,9 @@ export const FLOW_MAP = Object.freeze({
     type: FLOW_TYPE.QR,
     start: startLoomy,
     poll: pollLoomy,
-    loginVerified: false,
+    // ✅ 2026-11-04 真机验证通过：用户扫码登录成功 + POST /login/test 返回
+    //    ok:true / 1591ms「上游已开始流式返回」
+    loginVerified: true,
     loginNote: 'Loomy 讯飞：微信扫码；无续期端点，14 天后需重新扫码',
   },
   raccoon: {
