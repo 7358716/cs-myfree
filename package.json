@@ -1,6 +1,6 @@
 {
   "name": "cs-myfree",
-  "version": "1.9.14",
+  "version": "1.9.15",
   "type": "module",
   "description": "Myfree — 提供 18 个 AI 渠道接入。",
   "main": "src/index.js",

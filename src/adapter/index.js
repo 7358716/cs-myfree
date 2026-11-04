@@ -210,22 +210,44 @@ export function createAdapter(opts = {}) {
       const ordered = candidatesFor(options.model)
       let lastErr = null
 
+      /** 因「渠道并发已满」被跳过的次数（不消耗失败预算） */
+      let busySkips = 0
+      /** 整条链都忙时，做一次**有界的短重试**（不排队、不多等） */
+      let busyRetried = false
+
       for (const cand of ordered) {
         if (ladder.exhausted(now())) {
           onEvent({ type: 'budget-exhausted', at: now() })
           break
         }
-        ladder.countAttempt()
         const held = createHeld()
 
         let releaseSlot = () => {}
         try {
           onEvent({ type: 'attempt', provider: cand.provider, model: cand.model, layer: ladder.snapshot().layer })
 
-          // 🔴 先拿并发名额（可能排队）——「中断停摆」的核心修复：
-          //    上游会话数满了会直接拒绝，排队比硬发可靠得多
+          // 🔴 并发闸门（主管要求：**不排队、不超并发、满了直接降级**）
+          //
+          //    主智能体 + 多个子智能体（teammate）会并发打同一渠道，
+          //    上游会话数满了会直接拒绝。这里**不等** ⇒ 立刻换下一个候选，
+          //    既保证「不超并发」，又不会让整队串行等待。
           const slot = await gate.acquire(cand.provider)
+          if (!slot.ok) {
+            onEvent({
+              type: 'channel-busy', provider: cand.provider, model: cand.model,
+              active: slot.active, limit: slot.limit, at: now(),
+            })
+            // 不当作失败（不消耗 ladder 的失败判定），直接尝试下一个候选
+            busySkips += 1
+            lastErr = Object.assign(
+              new Error(`渠道 ${cand.provider} 并发已满（${slot.active}/${slot.limit}），已自动降级下一个候选`),
+              { code: 'CHANNEL_BUSY' },
+            )
+            continue
+          }
           releaseSlot = () => { try { slot.release() } catch { /* ignore */ } }
+          // 真正发出请求才计入尝试预算（因忙跳过不算一次失败尝试）
+          ladder.countAttempt()
 
           // 渠道模型（id 形如 codearts/xxx）交给 send 自己判断分发
           const iter = await send({
@@ -306,8 +328,54 @@ export function createAdapter(opts = {}) {
         }
       }
 
-      const e = new Error(`cs-myfree: 全部候选失败（最后错误 ${lastErr?.kind ?? 'unknown'}）`)
-      e.code = lastErr?.kind ?? 'UNKNOWN'
+      // 🔴 整条链都因「并发已满」被跳过 ⇒ 做**一次**有界短重试
+      //
+      // 主管要求「不排队」，所以这里不是队列：只是给上游会话一个极短的
+      // 释放窗口（子智能体的流通常几百毫秒内结束），然后整条链再试一次。
+      // 仍然失败 ⇒ 如实报 CHANNEL_BUSY，让宿主/用户决定，不无限重试。
+      if (busySkips > 0 && !busyRetried && lastErr?.code === 'CHANNEL_BUSY') {
+        busyRetried = true
+        onEvent({ type: 'busy-retry', skips: busySkips, waitMs: 1200, at: now() })
+        await new Promise((r) => setTimeout(r, 1200))
+        for (const cand of candidatesFor(options.model)) {
+          const slot = await gate.acquire(cand.provider)
+          if (!slot.ok) continue
+          try {
+            const iter = await send({
+              provider: cand.provider,
+              model: cand.model,
+              messages: options.messages,
+              signal: options.signal,
+              options,
+              isChannelModel: cand.channelModel === true,
+            })
+            const buffered = []
+            const held2 = createHeld()
+            for await (const chunk of iter) {
+              const r0 = held2.push(chunk)
+              if (r0.released?.length) buffered.push(...r0.released)
+              if (r0.chunk) buffered.push(r0.chunk)
+            }
+            if (!held2.isCommitted) continue
+            async function* replay2() { for (const c of buffered) yield c }
+            yield* toHostChunks(replay2())
+            onEvent({ type: 'success', provider: cand.provider, model: cand.model, afterBusyRetry: true })
+            return
+          } catch {
+            /* 短重试失败就继续下一个 */
+          } finally {
+            try { slot.release() } catch { /* ignore */ }
+          }
+        }
+      }
+
+      const code = lastErr?.code ?? lastErr?.kind ?? 'UNKNOWN'
+      const e = new Error(
+        code === 'CHANNEL_BUSY'
+          ? 'cs-myfree: 所有候选渠道当前并发已满（主/子智能体同时在用）。请稍后重试，或在「降级链」里加一个备用渠道。'
+          : `cs-myfree: 全部候选失败（最后错误 ${lastErr?.kind ?? 'unknown'}）`,
+      )
+      e.code = code === 'CHANNEL_BUSY' ? 'CHANNEL_BUSY' : (lastErr?.kind ?? 'UNKNOWN')
       throw e
     },
 

@@ -1,18 +1,26 @@
 /**
- * cs-myfree — 渠道并发闸门（解决「中断停摆次数过多」）
+ * cs-myfree — 渠道并发闸门（「不排队、不超并发、直接降级」）
  *
  * 🔴 真实根因（2026-11-03/04 实测）：
- *    codearts 上游有**并发会话上限（3 个）**，超了直接 400 TM.00001041。
- *    而 adapter 逐候选重试、失败切换时**不释放上一个流** ⇒ 会话名额被占满
- *    ⇒ 后续所有请求全部失败（用户看到的就是「连续中断停摆」）。
+ *    codearts 上游有**并发会话硬上限（3 个）**，超了直接 400 TM.00001041。
+ *    adapter 逐候选重试时不释放上一个流 ⇒ 名额被占满 ⇒ 后续全部失败，
+ *    用户看到的就是「连续中断停摆」。
  *
- *    实测证据：探测脚本连发 4 个未消费的流后，第 2~4 个全部返回
- *    「并发会话已满」；等 30 秒（会话自然过期）后立刻恢复 200。
+ *    实测证据：连发 4 个未消费的流，第 2~4 个全部「并发会话已满」；
+ *    等 30 秒（会话自然过期）后立刻恢复 200。
  *
- * 本模块提供**按渠道的并发闸门**：
- *   · 每个渠道有上限（默认 3，可按渠道覆盖）
- *   · 超限时**排队等待**（不直接失败），有超时兜底
- *   · 用完/异常都必须 `release()`，否则名额泄漏
+ * ## 设计决策（依主管要求，2026-11-04）
+ *
+ * 主管明确要求：**「设置成请求异步不排队，不超并发，考虑主体、子智能
+ * 并发使用同一模型的情况，可以根据情况降级使用范本」**。
+ *
+ * ⇒ 默认 **reject 模式**：名额满了**不排队等待**，立即返回 `{ok:false}`，
+ *    由 adapter **跳到下一个候选（降级）**。
+ *
+ * 为什么不是排队：
+ *  · 主智能体 + 多个子智能体（teammate）会**并发**打同一个渠道；
+ *  · 排队会让所有请求串行化、整体延迟爆炸，且一个卡住全队等；
+ *  · 降级到链上别的候选（换个渠道/模型）是**更快且更可用**的选择。
  *
  * @module cs-myfree/adapter/concurrency
  */
@@ -31,15 +39,23 @@ export const DEFAULT_LIMITS = Object.freeze({
   default: 2,
 })
 
+/** 拿不到名额时的错误码（adapter 据此判定「换下一个候选」，不算真正的失败） */
+export const BUSY_CODE = 'CHANNEL_BUSY'
+
 /**
  * 创建并发闸门。
+ *
  * @param {object} o
- * @param {object} [o.limits] 渠道 → 上限
- * @param {number} [o.waitTimeoutMs] 排队最长等待（超时则抛错，不静默卡死）
- * @param {(provider:string)=>number} [o.now]
+ * @param {object}  [o.limits]  渠道 → 上限
+ * @param {'reject'|'queue'} [o.mode='reject'] 满了怎么办（默认直接拒绝 ⇒ 由上层降级）
+ * @param {number}  [o.waitTimeoutMs] queue 模式下的排队上限
  */
-export function createConcurrencyGate({ limits = DEFAULT_LIMITS, waitTimeoutMs = 30_000 } = {}) {
-  /** provider -> { active:number, queue:Array<{resolve,reject,timer}> } */
+export function createConcurrencyGate({
+  limits = DEFAULT_LIMITS,
+  mode = 'reject',
+  waitTimeoutMs = 15_000,
+} = {}) {
+  /** provider -> { active, queue } */
   const state = new Map()
 
   const limitOf = (provider) => {
@@ -53,53 +69,73 @@ export function createConcurrencyGate({ limits = DEFAULT_LIMITS, waitTimeoutMs =
   }
 
   /**
-   * 有排队者 ⇒ 名额**转交**（active 不变）；没排队者 ⇒ 名额归还（active--）。
-   * ⚠️ 早先写成「总是 active++」⇒ 释放后 active 反而变大，名额永久泄漏。
+   * 归还一个名额：若 queue 模式有排队者 ⇒ 名额转交（active 不变）；
+   * 否则 active--。
    */
-  const next = (provider) => {
+  const releaseSlot = (provider) => {
     const s = slotOf(provider)
-    const waiter = s.queue.shift()
-    if (!waiter) {
-      s.active = Math.max(0, s.active - 1)   // 归还
-      return
+    if (mode === 'queue') {
+      const waiter = s.queue.shift()
+      if (waiter) {
+        clearTimeout(waiter.timer)
+        waiter.resolve()          // 名额转交，active 不变
+        return
+      }
     }
-    clearTimeout(waiter.timer)
-    // 名额直接转交给排队者：active 保持不变
-    waiter.resolve()
+    s.active = Math.max(0, s.active - 1)
+  }
+
+  const makeTicket = (provider) => {
+    let done = false
+    return {
+      ok: true,
+      release: () => { if (done) return; done = true; releaseSlot(provider) },
+    }
   }
 
   return {
+    mode,
+    limits,
+
     /**
-     * 获取一个名额（可能排队）。
-     * @returns {Promise<{release:Function}>}
+     * 尝试获取名额。
+     *
+     * reject 模式（默认）：满了立即返回 `{ok:false, code:BUSY_CODE, ...}`——**不等待**。
+     * queue 模式：等待直到有名额或超时。
+     *
+     * @returns {Promise<{ok:true, release:Function} | {ok:false, code:string, active:number, limit:number}>}
      */
     async acquire(provider) {
       const key = String(provider ?? 'default')
       const s = slotOf(key)
-      /** 幂等释放：重复调用只生效一次（防 active 被减成负数） */
-      const releaseOnce = () => {
-        let done = false
-        return () => { if (done) return; done = true; next(key) }
-      }
       const lim = limitOf(key)
+
       if (s.active < lim) {
         s.active += 1
-        return { release: releaseOnce() }
+        return makeTicket(key)
       }
-      // 排队
+
+      // 满了
+      if (mode !== 'queue') {
+        return {
+          ok: false,
+          code: BUSY_CODE,
+          provider: key,
+          active: s.active,
+          limit: lim,
+          reason: `渠道 ${key} 并发已满（${s.active}/${lim}）`,
+        }
+      }
+
+      // queue 模式（保留，便于诊断/低并发场景）
       return await new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           const i = s.queue.findIndex((q) => q.resolve === resolve)
           if (i >= 0) s.queue.splice(i, 1)
-          reject(Object.assign(new Error(`渠道 ${key} 并发已满（上限 ${lim}），排队 ${waitTimeoutMs}ms 超时`), { code: 'RATE_LIMIT' }))
+          reject(Object.assign(new Error(`渠道 ${key} 并发已满（上限 ${lim}），排队 ${waitTimeoutMs}ms 超时`), { code: BUSY_CODE }))
         }, waitTimeoutMs)
-        // ⚠️ 不要 unref：排队超时是用户可感知的行为，必须保证定时器真实触发。
-        //    （unref 后若事件循环无其它任务，进程会提前退出/测试挂起）
-        s.queue.push({
-          resolve: () => resolve({ release: releaseOnce() }),
-          reject,
-          timer,
-        })
+        // ⚠️ 不要 unref：排队超时必须真实触发
+        s.queue.push({ resolve: () => resolve(makeTicket(key)), reject, timer })
       })
     },
 
@@ -110,7 +146,13 @@ export function createConcurrencyGate({ limits = DEFAULT_LIMITS, waitTimeoutMs =
       return out
     },
 
-    /** 重置（测试用） */
+    /** 是否还有空位（供 UI 显示） */
+    hasRoom(provider) {
+      const s = state.get(String(provider ?? 'default'))
+      const lim = limitOf(String(provider ?? 'default'))
+      return (s?.active ?? 0) < lim
+    },
+
     reset() { state.clear() },
   }
 }

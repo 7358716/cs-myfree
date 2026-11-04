@@ -25,6 +25,14 @@ export const PRICING = Object.freeze({
     offPeak: { inputMiss: 1, inputHit: 0.02, output: 4 },
     source: 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing',
   },
+  // codearts 实际在用的模型名（带版本后缀，也登记一份避免「价格未知」）
+  'deepseek-v4.1-flash': {
+    label: 'DeepSeek V4.1 Flash (CodeArts)',
+    unit: 'per_million_tokens',
+    peak: { inputMiss: 2, inputHit: 0.04, output: 8 },
+    offPeak: { inputMiss: 1, inputHit: 0.02, output: 4 },
+    source: '按 DeepSeek 官方价目表映射',
+  },
   'deepseek-v4-pro': {
     label: 'DeepSeek V4 Pro',
     unit: 'per_million_tokens',
