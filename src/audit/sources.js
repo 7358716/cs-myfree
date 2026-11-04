@@ -53,7 +53,8 @@ export async function appendRecord(rec, { dshHome } = {}) {
       model: rec.model ?? null,
       in: Number(rec.in) || 0,
       out: Number(rec.out) || 0,
-      cost: Number(rec.cost) || 0,
+      // 🔴 cost=null 表示「价格未知」——不能折成 0（把未知当免费是财务上最危险的错误）
+      cost: Number.isFinite(rec.cost) ? rec.cost : null,
       paid: rec.paid === true,
       ok: rec.ok !== false,
       code: rec.code ?? null,
@@ -110,7 +111,8 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
       d.out += Number(o.out) || 0
       if (o.paid === true) { d.paid++; paidCount++ }
       if (Number.isFinite(o.cost) && o.cost > 0) { d.costCNY += o.cost; costTotal += o.cost }
-      else if (o.paid === true) { d.costUnknown++; costUnknown++ }
+      else if (o.cost === null && o.paid === true) { d.costUnknown++; costUnknown++ }
+      else if (o.paid === true && !Number.isFinite(o.cost)) { d.costUnknown++; costUnknown++ }
       if (o.provider) d.providers.add(o.provider)
 
       const p = o.provider || '(unknown)'

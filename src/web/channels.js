@@ -23,10 +23,26 @@ import { CHANNELS, LOGIN } from '../pools/channels/protocols.js'
  * 的兑换实现（accounts.js 只存不换，refresh.js 无网络调用）。因此对需要 token
  * 交换的渠道，用户即便「登录成功」也拿不到可用凭证 ⇒ 必须如实标注。
  */
-const IMPLEMENTED = Object.freeze({
-  codearts: true,   // AK/SK 直签 SDK-HMAC-SHA256，本机实测 200 + 真 SSE
-  qiniu: true,      // 官方控制台可拿 API Key，OpenAI 兼容端点
-})
+/**
+ * 渠道是否**真的有登录换取实现**。
+ *
+ * 🔴 真实缺陷（2026-11-04 用户实测）：这里曾是一张**手写硬编码表**，
+ *    只登记了 codearts / qiniu 两家。后来 flow-map 里陆续落地了 13 家真实现
+ *    （buddy/workbuddy/qoder/cline/minimax/officeace/loomy/trae/accio/raccoon…），
+ *    但这张表**没跟着更新** ⇒ 用户登录成功后仍显示「暂不可用」。
+ *
+ *    现在改成**从 flow-map 派生**（单一事实来源）：只要某渠道登记了 start 实现，
+ *    就算「已实现」。这样新增渠道不用再改第二处。
+ */
+import { FLOW_MAP } from '../pools/channels/login/flow-map.js'
+
+function isImplemented(id) {
+  const e = FLOW_MAP[id]
+  if (!e) return false
+  // 有 start（真登录器）或本身就是粘贴型（paste 不需要交换）⇒ 可用
+  if (typeof e.start === 'function') return true
+  return e.type === 'paste'
+}
 
 const NEEDS_TOKEN_EXCHANGE = '未实现登录换取（OAuth/设备码 → token），粘贴串不是可用凭证'
 
@@ -141,7 +157,7 @@ export async function listChannels(store) {
     const guide = LOGIN_GUIDES[ch.login] || LOGIN_GUIDES[LOGIN.NONE]
     const mine = byProvider.get(id) || []
     const unavailableReason = UNAVAILABLE[id] ?? null
-    const implemented = unavailableReason ? false : (IMPLEMENTED[id] === true)
+    const implemented = unavailableReason ? false : isImplemented(id)
     return {
       id,
       label: ch.label,

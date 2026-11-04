@@ -128,24 +128,28 @@ export const CHANNELS = Object.freeze({
   qoder: {
     label: 'Qoder',
     family: 'openai',
-    baseUrl: 'https://api2.qoder.sh',
+    // 🔴 真实端点：qoder.com/model/v1/chat/completions（实测 400=端点存在）
+    //    旧值 api2.qoder.sh 实测 404（MODEL_NOT_FOUND 的真正原因）
+    baseUrl: 'https://qoder.com',
+    chatPath: '/model/v1/chat/completions',
     auth: AUTH.BEARER,
     login: LOGIN.DEVICE_CODE,
     refresh: REFRESH.AUTO,
     checkin: { supported: true, note: '每日 10:00 (UTC+8) 刷新' },
     credRef: 'QODER_TOKEN',
-    loginPage: 'https://qoder.sh',
+    loginPage: 'https://qoder.com',
   },
   qodercn: {
     label: 'Qoder 中国版',
     family: 'openai',
-    baseUrl: 'https://api2-v2.qoder.sh',
+    baseUrl: 'https://qoder.cn',
+    chatPath: '/model/v1/chat/completions',
     auth: AUTH.BEARER,
     login: LOGIN.DEVICE_CODE,
     refresh: REFRESH.AUTO,
     checkin: { supported: true, note: '每日 10:00 (UTC+8) 刷新' },
     credRef: 'QODERCN_TOKEN',
-    loginPage: 'https://qoder.sh',
+    loginPage: 'https://qoder.cn',
   },
   trae: {
     label: 'TRAE（字节）',

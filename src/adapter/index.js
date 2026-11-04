@@ -20,6 +20,8 @@ import { providerRetryPolicy } from './policy.js'
 import { mergeChain } from './chain-overrides.js'
 import { makeProviderInfo, makeModelInfo, checkProviderInfo, checkModelInfo } from './contract.js'
 import { toHostChunks } from './chunks.js'
+import { computeCost } from '../audit/pricing.js'
+import { createConcurrencyGate } from './concurrency.js'
 
 export { providerRetryPolicy }
 
@@ -53,9 +55,13 @@ export function createAdapter(opts = {}) {
     now = () => Date.now(),
     providerId = PROVIDER_ID,
     displayName = 'Myfree（免费模型）',
+    concurrency = null,            // 并发闸门（默认按渠道内置上限）
   } = opts
 
   if (typeof send !== 'function') throw new TypeError('createAdapter 需要 send 函数')
+
+  // 🔴 并发闸门：渠道有会话数上限（codearts=3），超了上游直接拒绝
+  const gate = concurrency ?? createConcurrencyGate()
 
   let currentBuiltin = Array.isArray(builtin) ? builtin : []
   let currentOverrides = Array.isArray(overrides) ? overrides : []
@@ -212,8 +218,14 @@ export function createAdapter(opts = {}) {
         ladder.countAttempt()
         const held = createHeld()
 
+        let releaseSlot = () => {}
         try {
           onEvent({ type: 'attempt', provider: cand.provider, model: cand.model, layer: ladder.snapshot().layer })
+
+          // 🔴 先拿并发名额（可能排队）——「中断停摆」的核心修复：
+          //    上游会话数满了会直接拒绝，排队比硬发可靠得多
+          const slot = await gate.acquire(cand.provider)
+          releaseSlot = () => { try { slot.release() } catch { /* ignore */ } }
 
           // 渠道模型（id 形如 codearts/xxx）交给 send 自己判断分发
           const iter = await send({
@@ -261,9 +273,16 @@ export function createAdapter(opts = {}) {
               outTok = Number(u.outputTokens) || outTok
               cacheRead = Number(u.cacheReadTokens) || cacheRead
             }
+            // 🔴 真实计价（此前硬编码 cost:0 / paid:false ⇒ 付费调用永不计费）
+            //    cost=null 表示「价格未知」，必须如实记，不能当 0
+            const priced = computeCost({
+              provider: cand.provider, model: cand.model,
+              inTokens: inTok, outTokens: outTok, cacheReadTokens: cacheRead, at: now(),
+            })
             onRecord({
               at: now(), provider: cand.provider, model: cand.model,
-              in: inTok, out: outTok, cacheRead, cost: 0, paid: false, ok: true,
+              in: inTok, out: outTok, cacheRead,
+              cost: priced.costCNY, paid: priced.paid, ok: true,
               ms: now() - (ladder.snapshot().startedAt || now()),
             })
           } catch { /* ignore */ }
@@ -272,11 +291,18 @@ export function createAdapter(opts = {}) {
           lastErr = classify(err)
           onEvent({ type: 'failure', provider: cand.provider, model: cand.model, kind: lastErr.kind })
           try {
-            onRecord({ at: now(), provider: cand.provider, model: cand.model, in: 0, out: 0, cost: 0, paid: false, ok: false, code: lastErr.kind })
+            const failedPriced = computeCost({ provider: cand.provider, model: cand.model, inTokens: 0, outTokens: 0, at: now() })
+            onRecord({
+              at: now(), provider: cand.provider, model: cand.model,
+              in: 0, out: 0, cost: 0, paid: failedPriced.paid, ok: false, code: lastErr.kind,
+            })
           } catch { /* ignore */ }
           const step = ladder.onFailure(lastErr, cand, now())
           onEvent({ type: 'ladder', layer: step.layer, action: step.action, reason: step.reason })
           if (step.action === 'report') break
+        } finally {
+          // 🔴 无论成功/失败/抛错，都必须释放名额（否则会话名额泄漏 ⇒ 后续全挂）
+          releaseSlot()
         }
       }
 

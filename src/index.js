@@ -41,7 +41,7 @@ import { refreshLogin } from './pools/channels/login/refresh.js'
 import { fetchAllCredits } from './pools/channels/credits/index.js'
 
 const NAME = 'cs-myfree'
-const VERSION = '1.9.13'
+const VERSION = '1.9.14'
 
 export const name = NAME
 export const version = VERSION

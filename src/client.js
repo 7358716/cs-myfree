@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const react = require('react')
     const h = react.createElement
 
-    const VERSION = '1.9.13'
+    const VERSION = '1.9.14'
     const API = '/cs-myfree'
     const CASH_PATH = '/cs-myfree/cash'
 
@@ -1552,7 +1552,7 @@ window.__ModuleLoader__.load({
         const modelMissing = e.model && !ms.some((m) => m.id === e.model)
         return h('div', { key: i, style: Object.assign({}, S.tile, {
           marginBottom: '6px', display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap',
-          ...(e.disabled ? { opacity: 0.5, textDecoration: 'line-through' } : {}),
+          ...(e.disabled ? { opacity: 0.6 } : {}),
         }) },
           h('span', { style: Object.assign({}, S.mono, S.dim) }, '#' + (i + 1)),
           h('select', {
@@ -1581,14 +1581,19 @@ window.__ModuleLoader__.load({
               ? Object.assign({}, x, { tier: 1 })
               : Object.assign({}, x, { tier: Math.max(1, (Number(x.tier) || 1) + (Number(x.tier || 1) === 1 ? 1 : 0)) })))),
           }, '设为首选'),
-          // 🔴 禁用：内置链条目无法物理删除（删了会回来），用 disabled 标记剔除
-          h('span', {
-            style: Object.assign({}, S.btn(false), e.disabled ? S.warn : null),
-            title: e.disabled ? '已禁用（点一下恢复）' : '禁用本条（内置链条目用这个剔除，不是删除）',
-            onClick: () => setDraft((arr) => arr.map((x, j) => (j === i
-              ? Object.assign({}, x, { disabled: !x.disabled, _isDisabled: !x.disabled })
-              : x))),
-          }, e.disabled ? '已禁用' : '禁用'),
+          // 已移除的条目：给个「恢复」入口（取消 disabled 规则）
+          e.disabled
+            ? h('span', {
+                style: S.btn(false),
+                title: '恢复这条（取消移除规则）',
+                onClick: () => setDraft((arr) => arr.map((x, j) => {
+                  if (j !== i) return x
+                  const n = Object.assign({}, x)
+                  delete n.disabled
+                  return n
+                })),
+              }, '恢复')
+            : null,
           h('span', { style: S.btn(false), onClick: () => move(i, -1), title: '上移' }, '↑'),
           h('span', { style: S.btn(false), onClick: () => move(i, 1), title: '下移' }, '↓'),
           h('span', {

@@ -212,20 +212,27 @@ test('🔴 历史数据「AK 一条 + SK 一条」自动配对成一条（含写
 
 // ── ⑤ 能力实况（诚实降级）──
 
-test('🔴 渠道清单如实标注 implemented / reason', async () => {
+test('🔴 渠道清单如实标注 implemented / reason（必须与 flow-map 真实现一致）', async () => {
   const store = { list: async () => [] }
   const list = await listChannels(store)
   const byId = Object.fromEntries(list.map((c) => [c.id, c]))
-  assert.equal(byId.codearts.implemented, true, 'codearts 有 AK/SK 直签实现 ⇒ 可用')
-  assert.equal(byId.qiniu.implemented, true, 'qiniu 粘贴 API Key 可用')
-  for (const id of ['buddy', 'workbuddy', 'cline', 'trae', 'qoder', 'minimax', 'lobsterai', 'zcode', 'officeace', 'accio', 'raccoon']) {
-    assert.equal(byId[id].implemented, false, id + ' 未实现 token 交换 ⇒ 必须标 false')
+
+  // 已落地真登录器的渠道 ⇒ implemented 必须 true
+  // （此前这里是硬编码表，只登记 2 家；用户登录成功仍显示「暂不可用」）
+  const SHOULD_BE_IMPLEMENTED = [
+    'codearts', 'buddy', 'workbuddy', 'qoder', 'trae', 'cline',
+    'loomy', 'raccoon', 'minimax', 'minimaxintl', 'officeace', 'accio', 'qiniu',
+  ]
+  for (const id of SHOULD_BE_IMPLEMENTED) {
+    assert.equal(byId[id].implemented, true, id + ' 已有真实现 ⇒ 必须标 true')
+  }
+
+  // 仍不可用的渠道 ⇒ false + 明确 reason
+  for (const id of ['lobsterai', 'zcode', 'qodercn', 'opencode', 'gemini']) {
+    assert.equal(byId[id].implemented, false, id + ' 仍不可用 ⇒ 必须标 false')
     assert.ok(byId[id].reason, id + ' 必须给出 reason')
   }
-  assert.equal(byId.gemini.implemented, false)
   assert.match(byId.gemini.reason, /网络不可达/)
-  assert.equal(byId.qodercn.implemented, false)
   assert.match(byId.qodercn.reason, /404|WASM/)
-  assert.equal(byId.opencode.implemented, false)
   assert.match(byId.opencode.reason, /403/)
 })

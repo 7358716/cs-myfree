@@ -229,5 +229,13 @@ export async function* parseSse(res, now = () => Date.now()) {
 /** 完整流式对话（渠道级） */
 export async function* streamChat(o) {
   const res = await chat({ ...o, stream: true })
-  yield* parseSse(res)
+  try {
+    yield* parseSse(res)
+  } finally {
+    // 🔴 必须主动销毁上游连接：否则会话在上游侧残留，
+    //    codearts 的「并发会话 3 个」名额会被占满 ⇒ 后续请求全部被拒
+    //    （实测：连发 4 个未销毁的流后，第 2~4 个直接 400 TM.00001041）
+    try { res.body?.destroy?.() } catch { /* 已结束 */ }
+    try { res.body?.[Symbol.asyncIterator]?.()?.return?.() } catch { /* ignore */ }
+  }
 }
