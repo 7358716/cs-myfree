@@ -75,7 +75,7 @@ export function createConcurrencyGate({
   limits = DEFAULT_LIMITS,
   mode = 'reject',
   waitTimeoutMs = 15_000,
-  busyCooldownMs = 12_000,     // 上游会话释放窗口（实测约 10s，留余量）
+  busyCooldownMs = 15_000,     // 上游会话释放窗口（实测约 10s，留余量）
 } = {}) {
   /** provider -> { active, queue } */
   const state = new Map()
