@@ -27,7 +27,11 @@
 
 /** 各渠道默认并发上限（参考包实测值 + 保守取整） */
 export const DEFAULT_LIMITS = Object.freeze({
-  codearts: 3,        // 上游硬限制：并发会话 3 个（TM.00001041）
+  // 🔴 codearts 实测（2026-11-04）：上游按会话计数，且**连接断开后名额不会
+  //    立刻归还**（同一 Session-Id 串行第二次就报「并发已满」，等 ~10s 才恢复）。
+  //    即：一个请求就占掉一个名额并保持约 10 秒。
+  //    故本地上限压到 **1**（严格串行），避免自己把自己打满。
+  codearts: 1,
   buddy: 2,
   workbuddy: 2,
   qoder: 2,
@@ -71,6 +75,7 @@ export function createConcurrencyGate({
   limits = DEFAULT_LIMITS,
   mode = 'reject',
   waitTimeoutMs = 15_000,
+  busyCooldownMs = 12_000,     // 上游会话释放窗口（实测约 10s，留余量）
 } = {}) {
   /** provider -> { active, queue } */
   const state = new Map()
@@ -127,6 +132,19 @@ export function createConcurrencyGate({
       const s = slotOf(key)
       const lim = limitOf(key)
 
+      // 冷却期内直接判忙（不浪费一次往返）
+      if (s.coolUntil && Date.now() < s.coolUntil) {
+        return {
+          ok: false,
+          code: BUSY_CODE,
+          provider: key,
+          active: s.active,
+          limit: lim,
+          cooling: true,
+          reason: `渠道 ${key} 冷却中（上游会话未释放，剩 ${Math.ceil((s.coolUntil - Date.now()) / 1000)}s）`,
+        }
+      }
+
       if (s.active < lim) {
         s.active += 1
         return makeTicket(key)
@@ -159,7 +177,14 @@ export function createConcurrencyGate({
     /** 只读快照（诊断页用） */
     snapshot() {
       const out = {}
-      for (const [k, s] of state) out[k] = { active: s.active, queued: s.queue.length, limit: limitOf(k) }
+      for (const [k, s] of state) {
+        out[k] = {
+          active: s.active,
+          queued: s.queue.length,
+          limit: limitOf(k),
+          coolingMs: s.coolUntil ? Math.max(0, s.coolUntil - Date.now()) : 0,
+        }
+      }
       return out
     },
 
@@ -168,6 +193,34 @@ export function createConcurrencyGate({
       const s = state.get(String(provider ?? 'default'))
       const lim = limitOf(String(provider ?? 'default'))
       return (s?.active ?? 0) < lim
+    },
+
+    /**
+     * 标记「上游报并发已满」⇒ 该渠道进入冷却期。
+     *
+     * 🔴 实测（2026-11-04）：codearts 上游名额在连接断开后**不会立刻归还**
+     *    （同一 Session-Id 串行第二次就报满，约 10 秒后才恢复）。
+     *    若冷却期内仍去重试，只是白白多花一次 2.7 秒往返，且**每次失败
+     *    本身可能又占一个名额** ⇒ 自我恶化。
+     *    ⇒ 报满后直接跳过该渠道，让降级链上的其它候选顶上。
+     */
+    markBusy(provider, cooldownMs = busyCooldownMs) {
+      const key = String(provider ?? 'default')
+      const s = slotOf(key)
+      s.coolUntil = Date.now() + cooldownMs
+    },
+
+    /** 该渠道是否在冷却期 */
+    isCooling(provider) {
+      const s = state.get(String(provider ?? 'default'))
+      return Boolean(s?.coolUntil && Date.now() < s.coolUntil)
+    },
+
+    /** 冷却剩余毫秒（0 表示不在冷却） */
+    cooldownLeft(provider) {
+      const s = state.get(String(provider ?? 'default'))
+      if (!s?.coolUntil) return 0
+      return Math.max(0, s.coolUntil - Date.now())
     },
 
     reset() { state.clear() },

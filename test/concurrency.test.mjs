@@ -10,8 +10,9 @@ import assert from 'node:assert/strict'
 import { createConcurrencyGate, DEFAULT_LIMITS } from '../src/adapter/concurrency.js'
 import { createAdapter } from '../src/adapter/index.js'
 
-test('codearts 默认上限是 3（对齐上游实测的并发会话限制）', () => {
-  assert.equal(DEFAULT_LIMITS.codearts, 3)
+test('codearts 本地上限压到 1（上游会话不随连接关闭释放）', () => {
+  // 实测（2026-11-04）：上游名额约 10s 才归还，一个请求就占一个 ⇒ 本地压到 1
+  assert.equal(DEFAULT_LIMITS.codearts, 1)
   assert.ok(DEFAULT_LIMITS.kilo >= 2, '免密源不该限成 1')
 })
 
@@ -169,4 +170,56 @@ test('adapter 默认使用共享闸门（不是自己 new 一个）', async () =
   assert.ok(chunks.some((c) => c.type === 'text-delta'), '应降级到 q 并成功')
   hog.release()
   resetSharedGate()
+})
+
+
+// ── 冷却期（上游会话不随连接关闭释放）──
+test('🔴 报「并发已满」⇒ 进入冷却期，期间直接判忙（不浪费往返）', async () => {
+  const { createConcurrencyGate } = await import('../src/adapter/concurrency.js')
+  const g = createConcurrencyGate({ limits: { x: 1, default: 1 }, busyCooldownMs: 500 })
+  assert.equal(g.isCooling('x'), false)
+  g.markBusy('x')
+  assert.equal(g.isCooling('x'), true)
+  const r = await g.acquire('x')
+  assert.equal(r.ok, false)
+  assert.equal(r.cooling, true)
+  assert.match(r.reason, /冷却中/)
+  await new Promise((res) => setTimeout(res, 560))
+  assert.equal(g.isCooling('x'), false, '冷却期结束应恢复')
+})
+
+test('识别上游「并发已满」错误（TM.00001041 中文/英文形态都要认）', async () => {
+  const { isChannelBusyError } = await import('../src/adapter/index.js')
+  assert.equal(isChannelBusyError(new Error('codearts HTTP 400: {"error_code":"TM.00001041"}')), true)
+  assert.equal(isChannelBusyError(new Error('渠道 codearts 并发会话已满（上游限制 3 个）')), true)
+  assert.equal(isChannelBusyError(new Error('concurrent session limit')), true)
+  assert.equal(isChannelBusyError(new Error('HTTP 500 server error')), false)
+})
+
+test('adapter：上游报满 ⇒ 该渠道冷却 + 降级到备用渠道成功', async () => {
+  const { createConcurrencyGate } = await import('../src/adapter/concurrency.js')
+  const gate = createConcurrencyGate({ limits: { codearts: 2, backup: 2, default: 2 }, busyCooldownMs: 3000 })
+  const seen = []
+  const adapter = createAdapter({
+    builtin: [
+      { provider: 'codearts', model: 'm', tier: 1 },
+      { provider: 'backup', model: 'mb', tier: 2 },
+    ],
+    send: async ({ provider }) => {
+      seen.push(provider)
+      if (provider === 'codearts') {
+        throw Object.assign(new Error('渠道 codearts 并发会话已满（上游限制 3 个）'), { status: 400, code: 'INVALID_REQUEST' })
+      }
+      return (async function* () {
+        yield { type: 'text-delta', text: 'ok' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })()
+    },
+    concurrency: gate,
+  })
+  const chunks = []
+  for await (const c of adapter.stream({ model: 'm', messages: [] })) chunks.push(c)
+  assert.ok(chunks.some((c) => c.type === 'text-delta'), '应降级成功')
+  assert.ok(seen.includes('backup'))
+  assert.equal(gate.isCooling('codearts'), true, '报满的渠道必须进入冷却')
 })

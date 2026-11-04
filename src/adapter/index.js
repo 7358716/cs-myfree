@@ -27,6 +27,21 @@ export { providerRetryPolicy }
 
 export const PROVIDER_ID = 'cs-myfree'
 
+/**
+ * 错误是否表示「上游渠道并发已满」。
+ *
+ * codearts 的报文形如：
+ *   `HTTP 400: {"error_code":"TM.00001041","error_msg":"并发会话数已达上限(3个)"}`
+ * driver 会把它包成中文可读文案（含「并发会话已满」）。
+ */
+export function isChannelBusyError(err) {
+  const s = String(err?.message ?? '')
+  return /TM\.00001041/.test(s)
+    || /并发会话/.test(s)
+    || /并发已满/.test(s)
+    || /concurrent session/i.test(s)
+}
+
 /** 无账号时的安全兜底：只有免密源 */
 export const DEFAULT_CANDIDATES = Object.freeze([
   { provider: 'kilo-free', model: 'kilo-auto/free', tier: 1, inputModalities: ['text'] },
@@ -313,6 +328,15 @@ export function createAdapter(opts = {}) {
           return
         } catch (err) {
           lastErr = classify(err)
+          // 🔴 上游报「并发已满」⇒ 该渠道进入冷却期，本次直接降级，
+          //    不再对它重试（实测：名额约 10 秒才归还，重试只是白等）
+          if (isChannelBusyError(err)) {
+            try { gate.markBusy(cand.provider) } catch { /* ignore */ }
+            onEvent({
+              type: 'channel-cooldown', provider: cand.provider, model: cand.model,
+              reason: String(err?.message ?? '').slice(0, 120), at: now(),
+            })
+          }
           onEvent({ type: 'failure', provider: cand.provider, model: cand.model, kind: lastErr.kind })
           try {
             const failedPriced = computeCost({ provider: cand.provider, model: cand.model, inTokens: 0, outTokens: 0, at: now() })

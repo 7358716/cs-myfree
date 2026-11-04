@@ -41,7 +41,7 @@ import { refreshLogin } from './pools/channels/login/refresh.js'
 import { fetchAllCredits } from './pools/channels/credits/index.js'
 
 const NAME = 'cs-myfree'
-const VERSION = '1.9.17'
+const VERSION = '1.9.18'
 
 export const name = NAME
 export const version = VERSION
@@ -330,6 +330,21 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
    * 这样主模型不需要是多模态，也不会有「静默丢图」问题。
    */
   /** 渠道模型发送：id 形如 `codearts/xxx`，用该渠道的登录凭证发 */
+  /**
+   * 插件级稳定的 codearts 会话 ID。
+   *
+   * 为什么需要：上游按 Session-Id 计并发会话数（上限 3）。
+   * 若每次请求都换新 ID，名额会被瞬间打满 ⇒ 连续中断。
+   * 用稳定 ID ⇒ 同一插件进程的所有请求复用同一会话槽。
+   */
+  const codeartsSessionId = (() => {
+    let id = null
+    return () => {
+      if (!id) id = randomUUID().replace(/-/g, '')
+      return id
+    }
+  })()
+
   const sendToChannel = async ({ model, messages, signal, options }) => {
     const parsed = parseModelId(model)
     if (!parsed) throw Object.assign(new Error('无法解析渠道模型：' + model), { code: 'MODEL_NOT_FOUND' })
@@ -351,7 +366,21 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
           { code: 'AUTH' },
         )
       }
-      if (options?.sessionId) extraHeaders['Session-Id'] = String(options.sessionId)
+      // 🔴 codearts 的上游按 **Session-Id** 计并发会话（硬上限 3 个）。
+      //
+      //    真实缺陷（2026-11-04 实测）：此前只在宿主传了 sessionId 时才带该头，
+      //    连通性测试等路径**没传** ⇒ 每次请求都算一个新会话 ⇒ 3 个名额被
+      //    瞬间耗尽 ⇒ 后续请求全部「并发会话已满」，用户看到「连续中断停摆」。
+      //
+      //    参考包的做法是**适配器级稳定 sessionId**（一个实例一个），
+      //    所有请求复用同一会话槽。这里照做：宿主给了 sessionId 就用它
+      //    （同一会话内复用），否则退回**插件级稳定 ID**（绝不再每次随机）。
+      if (options?.sessionId) {
+        extraHeaders['Session-Id'] = String(options.sessionId)
+      } else {
+        extraHeaders['Session-Id'] = codeartsSessionId()
+      }
+      // Chat-Id 是**单次对话**标识，随机是正确的（上游用它做 completion id 种子）
       extraHeaders['Chat-Id'] = randomUUID().replace(/-/g, '')
       extraHeaders.lang = 'en'
     }
