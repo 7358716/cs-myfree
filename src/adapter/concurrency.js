@@ -43,6 +43,23 @@ export const DEFAULT_LIMITS = Object.freeze({
 export const BUSY_CODE = 'CHANNEL_BUSY'
 
 /**
+ * **进程级共享闸门**。
+ *
+ * 🔴 真实缺陷（2026-11-04 实测）：adapter 内部 new 了自己的闸门，
+ *    而 `/login/test`（连通性测试）**直接调 driver.chat**，完全绕过闸门 ⇒
+ *    5 个并发测试请求全部撞上「并发会话已满」，闸门形同虚设。
+ *
+ *    真实对话走 adapter、连通性测试走 driver —— 两条路径必须**共用同一份
+ *    名额**，否则上游会话数照样被打满。
+ */
+let sharedGate = null
+export function getSharedGate(opts) {
+  if (!sharedGate) sharedGate = createConcurrencyGate(opts)
+  return sharedGate
+}
+export function resetSharedGate() { sharedGate = null }
+
+/**
  * 创建并发闸门。
  *
  * @param {object} o

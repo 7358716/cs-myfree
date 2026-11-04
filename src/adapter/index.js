@@ -21,7 +21,7 @@ import { mergeChain } from './chain-overrides.js'
 import { makeProviderInfo, makeModelInfo, checkProviderInfo, checkModelInfo } from './contract.js'
 import { toHostChunks } from './chunks.js'
 import { computeCost } from '../audit/pricing.js'
-import { createConcurrencyGate } from './concurrency.js'
+import { createConcurrencyGate, getSharedGate } from './concurrency.js'
 
 export { providerRetryPolicy }
 
@@ -61,7 +61,9 @@ export function createAdapter(opts = {}) {
   if (typeof send !== 'function') throw new TypeError('createAdapter 需要 send 函数')
 
   // 🔴 并发闸门：渠道有会话数上限（codearts=3），超了上游直接拒绝
-  const gate = concurrency ?? createConcurrencyGate()
+  // 默认用**进程级共享闸门**：真实对话（adapter）与连通性测试（driver）
+  // 必须共用同一份名额，否则上游会话数照样被打满（实测 5 并发全挂）。
+  const gate = concurrency ?? getSharedGate()
 
   let currentBuiltin = Array.isArray(builtin) ? builtin : []
   let currentOverrides = Array.isArray(overrides) ? overrides : []

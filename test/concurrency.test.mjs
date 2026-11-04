@@ -132,3 +132,41 @@ test('🔴 adapter：并发超限 ⇒ 自动降级到备用渠道（不排队、
   assert.equal(pMax, 0, 'p 已满 ⇒ 不应该再对 p 发请求（不超并发）')
   hog.release()
 })
+
+// ── 共享闸门（真实缺陷回归）──
+test('🔴 进程级共享闸门：adapter 与 login/test 必须共用同一份名额', async () => {
+  const { getSharedGate, resetSharedGate, BUSY_CODE } = await import('../src/adapter/concurrency.js')
+  resetSharedGate()
+  const g1 = getSharedGate({ limits: { x: 1, default: 1 } })
+  const g2 = getSharedGate()
+  assert.equal(g1, g2, '必须是同一个实例（否则两条路径各算各的名额）')
+  const a = await g1.acquire('x')
+  const busy = await g2.acquire('x')
+  assert.equal(busy.ok, false, '共享 ⇒ 第二个入口也应看到满')
+  assert.equal(busy.code, BUSY_CODE)
+  a.release()
+  const c = await g2.acquire('x')
+  assert.equal(c.ok, true)
+  c.release()
+  resetSharedGate()
+})
+
+test('adapter 默认使用共享闸门（不是自己 new 一个）', async () => {
+  const { getSharedGate, resetSharedGate } = await import('../src/adapter/concurrency.js')
+  resetSharedGate()
+  const g = getSharedGate({ limits: { p: 1, default: 1 } })
+  const hog = await g.acquire('p')
+  const adapter = createAdapter({
+    builtin: [{ provider: 'p', model: 'm', tier: 1 }, { provider: 'q', model: 'mq', tier: 2 }],
+    send: async ({ provider }) => (async function* () {
+      if (provider === 'p') throw Object.assign(new Error('should not reach p'), { code: 'SERVER', status: 500 })
+      yield { type: 'text-delta', text: 'ok' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })(),
+  })
+  const chunks = []
+  for await (const c of adapter.stream({ model: 'm', messages: [] })) chunks.push(c)
+  assert.ok(chunks.some((c) => c.type === 'text-delta'), '应降级到 q 并成功')
+  hog.release()
+  resetSharedGate()
+})

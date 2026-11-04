@@ -35,6 +35,7 @@ import { startLogin, getSession, pollLogin, cancelLogin, handleCallback } from '
 import { FLOW_MAP } from '../pools/channels/login/flow-map.js'
 import { refreshLogin, NO_REFRESH_ERROR } from '../pools/channels/login/refresh.js'
 import { classify, explainKind } from '../adapter/failure-map.js'
+import { getSharedGate, BUSY_CODE } from '../adapter/concurrency.js'
 import { maskCredential } from '../pools/channels/accounts.js'
 import { builtinModelsOf } from '../pools/channels/builtin-models.js'
 import { chat } from '../pools/channels/driver.js'
@@ -797,6 +798,25 @@ export function registerRoutes(webServer, opts = {}) {
     if (!model) return { ok: false, provider: p, model: null, ms: 0, error: '该渠道没有已知模型，请在 body.model 指定', kind: 'MODEL_NOT_FOUND' }
 
     const started = now()
+
+    // 🔴 连通性测试也必须拿并发名额：它直接调 driver.chat，绕过 adapter；
+    //    若不拿名额，测试请求会和真实对话抢上游会话（实测 5 并发全部
+    //    「并发会话已满」⇒ 闸门形同虚设）。
+    const gate = getSharedGate()
+    const slot = await gate.acquire(p)
+    if (!slot.ok) {
+      return {
+        ok: false,
+        provider: p,
+        model,
+        ms: 0,
+        at: now(),
+        error: `渠道 ${p} 并发已满（${slot.active}/${slot.limit}）——主/子智能体正在用该渠道`,
+        kind: BUSY_CODE,
+        hint: 'CHANNEL_BUSY — 该渠道并发名额已用完｜建议：稍后重试，或在「降级链」加一个备用渠道',
+      }
+    }
+
     // 🔴 连通性测试必须用**流式**：腾讯系（buddy/workbuddy）明确拒绝非流式
     //    （实测 400 code:11101 "Non-stream chat request is currently not supported"）。
     //    流式只读首帧就 abort，不发完整请求 ⇒ 既快又不浪费额度。
@@ -860,6 +880,7 @@ export function registerRoutes(webServer, opts = {}) {
       }
     } finally {
       clearTimeout(timer)
+      try { slot.release() } catch { /* ignore */ }
     }
   })
 
