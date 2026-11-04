@@ -219,8 +219,10 @@ test('🔴 渠道清单如实标注 implemented / reason（必须与 flow-map �
 
   // 已落地真登录器的渠道 ⇒ implemented 必须 true
   // （此前这里是硬编码表，只登记 2 家；用户登录成功仍显示「暂不可用」）
+  // ⚠️ qoder 有真登录器（能拿到 token），但**推理链路需 WASM 加密签名**，
+  //    裸 HTTP 会回 CSRFInvalid ⇒ 如实标为不可用，避免用户以为登了就能用。
   const SHOULD_BE_IMPLEMENTED = [
-    'codearts', 'buddy', 'workbuddy', 'qoder', 'trae', 'cline',
+    'codearts', 'buddy', 'workbuddy', 'trae', 'cline',
     'loomy', 'raccoon', 'minimax', 'minimaxintl', 'officeace', 'accio', 'qiniu',
   ]
   for (const id of SHOULD_BE_IMPLEMENTED) {
@@ -228,7 +230,7 @@ test('🔴 渠道清单如实标注 implemented / reason（必须与 flow-map �
   }
 
   // 仍不可用的渠道 ⇒ false + 明确 reason
-  for (const id of ['lobsterai', 'zcode', 'qodercn', 'opencode', 'gemini']) {
+  for (const id of ['lobsterai', 'zcode', 'qodercn', 'opencode', 'gemini', 'qoder']) {
     assert.equal(byId[id].implemented, false, id + ' 仍不可用 ⇒ 必须标 false')
     assert.ok(byId[id].reason, id + ' 必须给出 reason')
   }

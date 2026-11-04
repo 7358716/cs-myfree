@@ -49,6 +49,12 @@ const NEEDS_TOKEN_EXCHANGE = '未实现登录换取（OAuth/设备码 → token�
 /** 本机/上游层面就不可用的渠道（与是否登录无关） */
 const UNAVAILABLE = Object.freeze({
   gemini: '本机网络不可达（HTTPS 超时），需代理',
+  // 🔴 qoder / qodercn 的真实推理链路需要 **WASM 加密签名 + 凭据 uid**
+  //    （参考包 qoder-adapter 明确要求：缺 uid 时 WASM 产出无效签名，服务端回
+  //     Signature invalid (101)）。裸 HTTP 打公开端点会回
+  //     `400 CSRFInvalid: Invalid or missing CSRF token`（2026-11-04 实测）。
+  //    纯 JS 零依赖无法复刻该 WASM ⇒ 如实标不可用，不给用户假的「登录成功」。
+  qoder: '推理链路需 WASM 加密签名（实测裸 HTTP 回 CSRFInvalid），暂不支持',
   qodercn: '公开端点已下线（实测 404），真链路为 WASM 加密',
   opencode: '上游 403 FreeTierError',
 })
