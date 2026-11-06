@@ -36,7 +36,7 @@ import {
   resolveHiddenSources, isHiddenByDefault, isSourceHidden, channelGroupOf,
   normalizeSourceId, validateHiddenSources,
 } from '../src/config/store.js'
-import { filterVisibleCatalog, visibleCatalog, visibilitySummary, createRoutingSnapshot } from '../src/web/routing.js'
+import { filterVisibleCatalog, visibleCatalog, visibilitySummary, createRoutingSnapshot, dedupeModelsVisible } from '../src/web/routing.js'
 import { SOURCES } from '../src/pools/registry.js'
 import { CHANNELS } from '../src/pools/channels/protocols.js'
 import { registerRoutes, PREFIX } from '../src/web/routes.js'
@@ -804,4 +804,76 @@ test('/chain/catalog 按 sources.hidden 过滤（选择器目录），但链路�
       assert.ok(idsAfter.includes(id), '非隐藏渠道不该被顺带删掉：' + id)
     }
   } finally { cleanup(home) }
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// 模型去重（用户口径 2026-11-06）
+//
+// 「每次选择模型的时候，除了 deepseek 的付费 api 和自行添加的模型，
+//   其他的模型只带出一个可用的渠道。」
+//
+// 背景：实测同模型跨渠道重复严重 —— deepseek-v4.1-flash 同时挂在
+//       codearts / buddy / workbuddy / lobsterai / cline 五家。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('🟥 渠道包同模型只留一个渠道，且优先「已验证 + 可用」的那家', () => {
+  const groups = [
+    { provider: 'buddy', label: 'CodeBuddy', kind: 'channel', models: [{ id: 'X', name: 'X' }] },
+    { provider: 'codearts', label: 'CodeArts', kind: 'channel', models: [{ id: 'X', name: 'X' }] },
+  ]
+  // codearts 已验证；buddy 未验证 ⇒ 应留 codearts
+  const channels = [
+    { id: 'buddy', loggedIn: true, loginVerified: false, implemented: true, usable: true, hidden: false },
+    { id: 'codearts', loggedIn: true, loginVerified: true, implemented: true, usable: true, hidden: false },
+  ]
+  const out = dedupeModelsVisible(groups, channels)
+  const flat = out.flatMap((g) => g.models.map((m) => ({ p: g.provider, id: m.id })))
+  assert.equal(flat.filter((x) => x.id === 'X').length, 1, '同名模型必须只剩一个：' + JSON.stringify(flat))
+  assert.equal(flat.find((x) => x.id === 'X').p, 'codearts', '应留已验证的那家：' + JSON.stringify(flat))
+})
+
+test('🟥 自加 API（deepseek/ark）**不参与**去重，与渠道包里的同名模型并存', () => {
+  const groups = [
+    { provider: 'codearts', label: 'CodeArts', kind: 'channel', models: [{ id: 'X', name: 'X' }] },
+    { provider: 'deepseek', label: 'DeepSeek 官方', kind: 'channel', models: [{ id: 'X', name: 'X' }] },
+    { provider: 'ark', label: '火山方舟', kind: 'channel', models: [{ id: 'X', name: 'X' }] },
+  ]
+  const channels = [
+    { id: 'codearts', loggedIn: true, loginVerified: true, implemented: true, usable: true, hidden: false },
+    { id: 'deepseek', loggedIn: true, loginVerified: true, implemented: true, usable: true, hidden: false },
+    { id: 'ark', loggedIn: true, loginVerified: false, implemented: true, usable: true, hidden: false },
+  ]
+  const out = dedupeModelsVisible(groups, channels)
+  const providers = out.flatMap((g) => g.models.filter((m) => m.id === 'X').map(() => g.provider))
+  assert.equal(providers.length, 3, '自加 API 必须各自保留一行：' + JSON.stringify(providers))
+  for (const p of ['codearts', 'deepseek', 'ark']) assert.ok(providers.includes(p), '缺 ' + p)
+})
+
+test('🟥 不可用的渠道排在可用之后：有可用渠道时不会留未登录的那家', () => {
+  const groups = [
+    { provider: 'workbuddy', label: 'WorkBuddy', kind: 'channel', models: [{ id: 'X', name: 'X' }] },
+    { provider: 'buddy', label: 'CodeBuddy', kind: 'channel', models: [{ id: 'X', name: 'X' }] },
+  ]
+  const channels = [
+    { id: 'workbuddy', loggedIn: false, implemented: true, usable: true, hidden: false },
+    { id: 'buddy', loggedIn: true, loginVerified: false, implemented: true, usable: true, hidden: false },
+  ]
+  const out = dedupeModelsVisible(groups, channels)
+  const kept = out.flatMap((g) => g.models.filter((m) => m.id === 'X').map(() => g.provider))
+  assert.equal(kept[0], 'buddy', '已登录的优先于未登录的：' + JSON.stringify(kept))
+})
+
+test('去重不误伤：不同模型各自保留', () => {
+  const groups = [
+    { provider: 'codearts', label: 'C', kind: 'channel', models: [{ id: 'A', name: 'A' }, { id: 'B', name: 'B' }] },
+  ]
+  const channels = [{ id: 'codearts', loggedIn: true, loginVerified: true, implemented: true, usable: true, hidden: false }]
+  const out = dedupeModelsVisible(groups, channels)
+  const ids = out.flatMap((g) => g.models.map((m) => m.id)).sort()
+  assert.deepEqual(ids, ['A', 'B'])
+})
+
+test('空输入不抛（选择器永不因目录为空而崩）', () => {
+  assert.deepEqual(dedupeModelsVisible([], []), [])
+  assert.deepEqual(dedupeModelsVisible(null, null), [])
 })

@@ -36,7 +36,7 @@ import {
   isHiddenByDefault,
 } from '../config/store.js'
 import { ledgerFile } from '../audit/sources.js'
-import { filterVisibleCatalog } from './routing.js'
+import { filterVisibleCatalog, dedupeModelsVisible } from './routing.js'
 
 /** 人类可读的作用域名（页面步骤1 选项文案） */
 export const SCOPE_LABELS = Object.freeze({
@@ -378,6 +378,10 @@ export async function readSettings(deps, query) {
   const hidden = resolveHiddenSources(eff.config)
   const selectorCatalog = filterVisibleCatalog(models, eff.config)
 
+  // 需求（2026-11-06）：同一个模型只带出一个可用渠道。
+  // 只作用在「选择器展示」上；models 仍给全量（配降级链要用）。
+  const modelsDeduped = dedupeModelsVisible(selectorCatalog.sources, channelStatus)
+
   const recent = await readRecentRecords({ dshHome, limit: 5 })
 
   // 作用域下拉的真实对象枚举（design/21 §2；尽力而为，异常 ⇒ []）
@@ -397,7 +401,7 @@ export async function readSettings(deps, query) {
       note: 'isAdmin=false 时，owner=admin 的层只读（由管理员统一管理）',
     },
     models,                       // 设置页模型清单 = 全量（配置链要用）
-    modelsVisible: selectorCatalog.sources,  // 对话模型选择器口径 = 已过滤 hidden
+    modelsVisible: modelsDeduped,            // 对话模型选择器口径 = 已过滤 hidden + 同模型只留一个渠道
     channels: channelStatus,
     visibility: {
       hidden: hidden.list,

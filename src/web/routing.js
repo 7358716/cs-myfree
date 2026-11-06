@@ -97,6 +97,108 @@ export function visibleCatalog(sources, cfg) {
 }
 
 /**
+ * 模型去重：「同一个模型名只出现一次，并带出一个可用渠道」。
+ *
+ * 用户原话（2026-11-06）：
+ *   「每次选择模型的时候，除了 deepseek 的付费 api 和自行添加的模型，
+ *     其他的模型只带出一个可用的渠道。」
+ *
+ * 🔴 输入是 `/chain/catalog` 形状（`modelsVisible` 来自这里）：
+ *   - 每组 `{ provider, label, kind, models: [{id, name}] }`
+ *   - 渠道模型的 `id` 是**原始模型名**（无前缀），所以同名模型会跨组重复
+ *
+ * 🔴 三条纪律：
+ *   1. **自加/付费 API 不打散**：`deepseek` / `ark` / `deepseek-web` 单独保留
+ *      （用户要能明确地选「用我自己 key 的那个」）
+ *   2. **去重只影响选择器展示，不影响路由**：候选链/降级链仍含全部渠道
+ *   3. **可用性优先**：loggedIn && implemented && !disabled && !hidden 的渠道优先；
+ *      同级里已验证 > 免费 > 原始顺序；若没有可用的，保留最好的兜底并标注
+ *
+ * @param {Array} groups `/settings` 的 models 目录（每组 {provider, label, kind, models}）
+ * @param {Array} channels 渠道状态（id/label/loggedIn/loginVerified/implemented/usable/hidden）
+ * @returns {Array} 去重后的分组（每模型只出现在一个组里）
+ */
+export function dedupeModelsVisible(groups, channels = []) {
+  const chan = new Map()
+  // 容错：目录或渠道清单可能是 null/非数组（老后端、首次启动），不许因此崩选择器
+  for (const c of (Array.isArray(channels) ? channels : [])) {
+    if (c && c.id) chan.set(String(c.id), c)
+  }
+
+  /** 渠道是否「可用」（登录 + 已实现 + 未停用 + 未隐藏） */
+  const isUsable = (provider) => {
+    const c = chan.get(provider)
+    if (!c) return false
+    if (c.implemented === false) return false
+    if (c.loggedIn !== true) return false
+    if (c.usable === false) return false
+    if (c.hidden === true) return false
+    return true
+  }
+
+  /** 渠道评分（越小越优先） */
+  const rank = (provider) => {
+    const c = chan.get(provider) || {}
+    let s = 0
+    if (!isUsable(provider)) s += 1000      // 不可用 ⇒ 靠后
+    if (c.loginVerified !== true) s += 100  // 未验证 ⇒ 靠后（如实反映不确定性）
+    return s * 1000 + Number(c.order || 0)
+  }
+
+  const isSelf = (provider) => /^(deepseek|ark|volcengine-agent-plan|kimi-coding|deepseek-web)$/.test(provider)
+
+  /** modelName → {provider, label, kind, entry}  */
+  const byModel = new Map()
+  const dropped = []
+  const flatGroups = []
+
+  // 展开所有 (provider, model) 对
+  for (const g of groups || []) {
+    const provider = String(g?.provider ?? '')
+    if (!provider) continue
+    flatGroups.push({ provider, label: g.label, kind: g.kind, models: Array.isArray(g.models) ? g.models : [] })
+  }
+
+  for (const g of flatGroups) {
+    const selfApi = isSelf(g.provider)
+    for (const m of g.models) {
+      const mid = String(m?.id ?? '')
+      if (!mid) continue
+      const key = selfApi ? `${mid}\u0000${g.provider}` : mid
+      const entry = { id: mid, name: String(m.name || m.id || mid) }
+      const cur = byModel.get(key)
+      if (!cur) {
+        byModel.set(key, { provider: g.provider, label: g.label, kind: g.kind, entry, _rank: rank(g.provider) })
+        continue
+      }
+      const r = rank(g.provider)
+      if (r < cur._rank) {
+        byModel.set(key, { provider: g.provider, label: g.label, kind: g.kind, entry, _rank: r })
+        dropped.push({ model: mid, droppedProvider: cur.provider, keptProvider: g.provider })
+      } else {
+        dropped.push({ model: mid, droppedProvider: g.provider, keptProvider: cur.provider })
+      }
+    }
+  }
+
+  // 按 provider 重新分组
+  const byProvider = new Map()
+  for (const [, v] of byModel) {
+    const p = v.provider
+    if (!byProvider.has(p)) byProvider.set(p, { provider: p, label: v.label, kind: v.kind, models: [], _count: 0 })
+    byProvider.get(p).models.push(v.entry)
+    byProvider.get(p)._count++
+  }
+
+  return [...byProvider.values()].map((g) => ({
+    provider: g.provider,
+    label: g.label,
+    kind: g.kind,
+    models: g.models,
+  }))
+}
+
+/**
  * 设置页表格的「渠道可见性」摘要（不依赖 adapter，纯配置 + 渠道清单）。
  * @param {Array<{id:string}>} channels
  * @param {object} cfg 生效配置

@@ -630,6 +630,7 @@ function makeBackend(overrides = {}) {
     settingsLayers: {},       // 各层已存配置（global 仍走 runtimeConfig）
     settingsContext: null,    // meta.context 覆盖（workspaceId / sessionId / teamId）
     settingsModels: null,     // /settings.models 覆盖（不给 ⇒ 用默认三条）
+    settingsModelsVisible: null, // /settings.modelsVisible 覆盖（后端已去重的选择器口径）
     settingsChannels: null,   // /settings.channels 覆盖（不给 ⇒ 用默认两条）
     contextState: null,       // /context 覆盖（不给 ⇒ 尚无上报）
     rejectSettingsConj: null, // 形如 'PATCH' / 'POST'：模拟旧后端不支持该方法（405）
@@ -705,6 +706,7 @@ function makeBackend(overrides = {}) {
               effective: { config: clone(db.runtimeConfig), layers: { global: 1, workspace: 0, session: 0, team: 0 }, ids: {}, byLayer },
               scopes,
               meta: { isAdmin: true, context: ctx, note: 'isAdmin=false 时，owner=admin 的层只读' },
+              modelsVisible: db.settingsModelsVisible || undefined,
               models: db.settingsModels || [
                 { provider: 'kilo', label: 'Kilo 免费池', models: [{ id: 'kilo-auto/free', name: 'kilo-auto/free' }] },
                 { provider: 'ovh', label: 'OVH 免费视觉', models: [{ id: 'Qwen3.5-397B-A17B', name: 'Qwen3.5-397B-A17B' }] },
@@ -1925,5 +1927,42 @@ test('外部上下文卡：禁用态下口令不可编辑（管理员锁定的�
     await c.start(c.mod.ContextBridgeCard, { fv: () => '', fset: () => {}, disabled: true })
     const input = c.nodes().find((n) => n.type === 'input' && n.props && n.props.disabled === true)
     assert.ok(input, '禁用时 input 必须有 disabled（不装假按钮）')
+  } finally { c.unmount() }
+})
+
+test('🟥 选择器优先用后端 modelsVisible（同模型只留一个渠道），不被前端本地过滤覆盖', async () => {
+  // 后端已去重：deepseek-v4.1-flash 只挂在 codearts（而不是 5 家全列）
+  const be = makeBackend({
+    settingsModels: [
+      { provider: 'codearts', label: 'CodeArts', models: [{ id: 'deepseek-v4.1-flash', name: 'DS Flash' }] },
+      { provider: 'buddy', label: 'CodeBuddy', models: [{ id: 'deepseek-v4.1-flash', name: 'DS Flash' }] },
+    ],
+    settingsModelsVisible: [
+      { provider: 'codearts', label: 'CodeArts', kind: 'channel', models: [{ id: 'deepseek-v4.1-flash', name: 'DS Flash' }] },
+    ],
+  })
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start(c.mod.SettingsPage)
+    await c.waitFor(() => modelSelect(c), { label: '模型下拉' })
+    const vals = optionValues(modelSelect(c))
+    const hits = vals.filter((v) => v === 'deepseek-v4.1-flash').length
+    assert.equal(hits, 1, '同一模型在选择器里只能出现一次：' + JSON.stringify(vals))
+  } finally { c.unmount() }
+})
+
+test('后端没给 modelsVisible 时，前端回退本地过滤（老后端兼容）', async () => {
+  const be = makeBackend({
+    settingsModels: [
+      { provider: 'codearts', label: 'CodeArts', models: [{ id: 'X-model', name: 'X' }] },
+    ],
+    settingsModelsVisible: null,
+  })
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start(c.mod.SettingsPage)
+    await c.waitFor(() => modelSelect(c), { label: '模型下拉' })
+    const vals = optionValues(modelSelect(c))
+    assert.ok(vals.includes('X-model'), '老后端（无 modelsVisible）时仍要能列出模型：' + JSON.stringify(vals))
   } finally { c.unmount() }
 })

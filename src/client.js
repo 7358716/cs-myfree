@@ -4091,8 +4091,15 @@ window.__ModuleLoader__.load({
         src.hidden = list
         return next
       })
-      // 只把「选择器里允许出现」的来源喂给模型下拉（hidden:true 的条目在这里就被挡掉）
-      const modelsVisible = visibleModelSources(models, hiddenNow())
+      // 只把「选择器里允许出现」的来源喂给模型下拉。
+      //
+      // 🔴 优先用后端已算好的 `modelsVisible`：它 = hidden 过滤 + **同模型只留一个渠道**
+      //    （用户口径：除 deepseek 付费 API / 自加 API 外，一个模型只带出一个可用渠道）。
+      //    前端只在「后端没给」时才回退到本地过滤 —— 否则本地过滤会把后端的去重结果覆盖掉，
+      //    表现是「改了后端但选择器仍重复」，属于最难查的那类失效。
+      const modelsVisible = Array.isArray(d.modelsVisible) && d.modelsVisible.length > 0
+        ? d.modelsVisible
+        : visibleModelSources(models, hiddenNow())
 
       /** 通用小开关（40×20）：on 绿 off 灰；禁用时**不给 onClick**（不装假按钮） */
       const minToggle = (on, onClick, off, key) => h('span', {
