@@ -40,6 +40,7 @@ import { maskCredential } from '../pools/channels/accounts.js'
 import { builtinModelsOf } from '../pools/channels/builtin-models.js'
 import { chat } from '../pools/channels/driver.js'
 import { readSettings, updateSettings } from './settings.js'
+import { createDocsHandler, DOCS_PREFIX } from '../docs/serve.js'
 import { filterVisibleCatalog } from './routing.js'
 import { webFetch, createSearchCache, createRateLimiter, runMultiSourceSearch } from './search.js'
 
@@ -1298,6 +1299,25 @@ export function registerRoutes(webServer, opts = {}) {
       now,
     })
   }, { method: 'POST' })
+
+  // ── 文档页（只读；手机浏览器可直接打开）──
+  // 用户反馈：交付报告是服务器上的 .md，手机浏览器打不开。
+  // 这里用 prefix 路由把 design/ 目录渲染成移动端友好的 HTML。
+  // 🔴 安全：白名单目录 + resolve 后边界校验（越界 403）+ 渲染器全量转义。
+  try {
+    const docsHandler = createDocsHandler({
+      docsRoot: opts.docsRoot || '/home/ubuntu/output2026/butlers/dev/design',
+      allowDirs: Array.isArray(opts.docsAllowDirs) && opts.docsAllowDirs.length
+        ? opts.docsAllowDirs
+        : [opts.docsRoot || '/home/ubuntu/output2026/butlers/dev/design'],
+      trustedHosts,
+      log: logger,
+    })
+    webServer.register({ kind: 'prefix', path: `${PREFIX}${DOCS_PREFIX}`, handler: docsHandler })
+    registered += 1
+  } catch (e) {
+    logger.warn?.(`文档路由挂载失败（不影响其它功能）：${safeErrorText(e)}`)
+  }
 
   return registered
 }
