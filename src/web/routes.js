@@ -1050,15 +1050,26 @@ export function registerRoutes(webServer, opts = {}) {
           const url = new URL(req.url ?? '/', 'http://localhost')
           const sub = url.pathname.replace(`${PREFIX}/context`, '').replace(/^\//, '') || 'status'
 
-          // 鉴权：配置了 token 就校验（没配 ⇒ 只允许本机回环，防公网裸奔）
-          const need = contextToken()
-          const given = String(req.headers?.['x-context-token'] ?? url.searchParams.get('token') ?? '')
-          if (need) {
-            if (given !== need) return sendRaw(res, 401, { ok: false, error: 'x-context-token 不匹配' })
-          } else {
-            const addr = String(req.socket?.remoteAddress ?? '')
-            const loop = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
-            if (!loop) return sendRaw(res, 401, { ok: false, error: '未配置 contextBridgeCode，仅允许本机上报（在设置页配置口令后扩展才可用）' })
+          // ── 鉴权（两条通道，都是**只读或只能写上下文**，没有写配置的能力）──
+          //
+          // ① 设置页里看状态：同源浏览器请求，带宿主会话 cookie。
+          //    走 judge() 校验（与其它 API 同一把尺子），命中即放行**只读** GET。
+          // ② 扩展上报：来自 DeepSeek 页面的跨域请求，不可能带 cookie，
+          //    改用它持有的 x-context-token 口令校验。
+          const verdict = judge(req, { trustedHosts, getConnection })
+          const isSameOriginUi = verdict.ok === true
+          const isRead = req.method === 'GET'
+
+          if (!(isSameOriginUi && isRead)) {
+            const need = contextToken()
+            const given = String(req.headers?.['x-context-token'] ?? url.searchParams.get('token') ?? '')
+            if (need) {
+              if (given !== need) return sendRaw(res, 401, { ok: false, error: 'x-context-token 不匹配' })
+            } else {
+              const addr = String(req.socket?.remoteAddress ?? '')
+              const loop = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+              if (!loop) return sendRaw(res, 401, { ok: false, error: '未配置 contextBridgeCode，仅允许本机上报（在设置页配置口令后扩展才可用）' })
+            }
           }
 
           if (req.method === 'GET') {

@@ -3477,6 +3477,116 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 「外部对话上下文」卡片（需求：把 DeepSeek 网页版的对话同步给 DSH，且「传得少」）。
+     *
+     * 三件事都在这一张卡里解决：
+     *   ① 口令：扩展要用它鉴权（键名 contextBridgeCode，避开敏感字段拦截器）
+     *   ② 状态：最近一次上报的时间/条数/字节（直接打 GET /context，走同源 cookie 校验）
+     *   ③ 操作：清空、刷新、复制扩展地址（用户不用去翻文档）
+     *
+     * 🔴 这张卡**不提交**任何 agent 配置：口令走 fset（普通设置路径），
+     *    状态查询是纯 GET。所以它不会把设置页变成另一个写入面。
+     */
+    function ContextBridgeCard(props) {
+      const fv = props.fv
+      const fset = props.fset
+      const disabled = props.disabled === true
+      const [st, setSt] = react.useState(null)
+      const [err, setErr] = react.useState(null)
+      const [busy, setBusy] = react.useState(false)
+      const [msg, setMsg] = react.useState(null)
+
+      const code = fv('contextBridgeCode') || ''
+      const endpoint = 'http://150.158.175.241/cs-myfree/context/deepseek'
+
+      const load = () => {
+        setErr(null)
+        api('/context').then((d) => setSt(d)).catch((e) => setErr(String((e && e.message) || e)))
+      }
+      react.useEffect(() => { load() }, [])
+
+      const fmtTs = (ms) => {
+        if (!Number.isFinite(Number(ms)) || !ms) return '—'
+        try { return new Date(Number(ms)).toLocaleString('zh-CN', { hour12: false }) } catch { return '—' }
+      }
+      const ageText = (ms) => {
+        if (!Number.isFinite(Number(ms))) return ''
+        if (ms < 60000) return Math.round(ms / 1000) + ' 秒前'
+        if (ms < 3600000) return Math.round(ms / 60000) + ' 分钟前'
+        return Math.round(ms / 3600000) + ' 小时前'
+      }
+
+      const doClear = () => {
+        setBusy(true); setMsg(null)
+        fetch(API + '/context', { method: 'DELETE', credentials: 'same-origin' })
+          .then((r) => r.json())
+          .then((r) => { setMsg({ ok: true, text: '✅ 已清空上下文' }); load() })
+          .catch((e) => setMsg({ ok: false, text: '❌ ' + String((e && e.message) || e) }))
+          .then(() => setBusy(false))
+      }
+      const doCopy = () => {
+        const t = endpoint + '\n口令：' + (code || '（还没填，先在上面填一个）')
+        copyPlainText(t).then((r) => setMsg({ ok: r.ok, text: r.text }))
+      }
+
+      const empty = !st || st.empty === true
+      const badge = err
+        ? h('span', { style: S.badge('warn') }, '读取失败')
+        : empty
+          ? h('span', { style: S.badge() }, '尚无上报')
+          : h('span', { style: S.badge('good') }, '已连接')
+
+      return h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '外部对话上下文（DeepSeek 网页版）', badge),
+        h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+          '把你在 chat.deepseek.com 聊的内容，按「最近 N 条、每条截断」同步过来，供这里继续干活。'
+          + '只读你当前页面的对话正文，不读 cookie、不读侧栏历史。'),
+
+        // ① 口令
+        h('div', { style: { marginBottom: '10px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '口令（扩展用它鉴权）'),
+          h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) },
+            '自己定一串即可。填好后在扩展弹窗里填同一个值。'),
+          h('input', {
+            style: Object.assign({}, S.input, { width: '260px' }),
+            value: code,
+            disabled,
+            placeholder: '例如 my-free-2026',
+            onChange: (e) => fset('contextBridgeCode', e.target.value || null),
+          })),
+
+        // ② 状态
+        h('div', { style: Object.assign({ marginBottom: '10px' }, S.row) },
+          h('span', null, '最近上报'),
+          h('span', { style: { fontWeight: 600 } },
+            empty ? '还没有' : fmtTs(st.updatedAt) + '（' + ageText(st.ageMs) + '）')),
+        empty ? null : h('div', { style: S.row },
+          h('span', null, '保留条数'),
+          h('span', { style: { fontWeight: 600 } },
+            (st.count || 0) + ' 条 · ' + Math.round((st.bytesKept || 0) / 1024) + ' KB'
+            + (st.dropped > 0 ? '（已丢弃较早的 ' + st.dropped + ' 条）' : ''))),
+        empty || !Array.isArray(st.preview) ? null : h('div', { style: { marginTop: '6px' } },
+          h('div', { style: Object.assign({ marginBottom: '3px' }, S.dim) }, '最近两条预览（只显示开头）'),
+          st.preview.map((m, i) => h('div', { key: i, style: Object.assign({}, S.row, { padding: '2px 0' }) },
+            h('span', { style: S.dim }, m.role === 'assistant' ? 'AI' : '你'),
+            h('span', { style: { flex: '1 1 auto', marginLeft: '8px', wordBreak: 'break-all' } }, String(m.text || ''))))),
+
+        err ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '读取状态失败：' + err) : null,
+
+        // ③ 操作
+        h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '10px', alignItems: 'center' } },
+          h('button', { style: S.btn(false), onClick: load, disabled: busy }, '刷新状态'),
+          h('button', { style: S.btn(false), onClick: doCopy }, '复制给扩展用'),
+          h('button', { style: S.btn(false), onClick: doClear, disabled: busy || empty }, '清空')),
+        msg ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, msg.ok ? S.good : S.warn) }, msg.text) : null,
+
+        // 「传得少」的四道闸门，写清楚让用户知道上限在哪
+        h('div', { style: Object.assign({ marginTop: '10px' }, S.dim) },
+          '上传上限（固定）：最近 20 条 · 每条 200 字 · 总计 64KB · 6 小时过期。'
+          + '需要更少可以在扩展弹窗里把「最多几条 / 每条最多字」调小。'))
+    }
+
+    /**
      * 「路由基本规则」区块（契约 B：routing.rules；旧称「复杂路由基本规则」）。
      *
      * 🔴 定位：**规则说明 + 统计 + 设置**，不是开关面板 —— 用户明确要求「不要加任何开关」。
@@ -4159,6 +4269,8 @@ window.__ModuleLoader__.load({
           h(VisionSettingsCard, { fv, fset, disabled })),
         h('div', { style: { marginTop: '12px' } },
           h(SubagentRoutingCard, { fv, fset, disabled, models: modelsVisible })),
+        h('div', { style: { marginTop: '12px' } },
+          h(ContextBridgeCard, { fv, fset, disabled })),
       )
 
       // ── 步骤3 实时状态（只读）──
@@ -4507,6 +4619,7 @@ window.__ModuleLoader__.load({
     exports.SearchSettingsCard = SearchSettingsCard
     exports.VisionSettingsCard = VisionSettingsCard
     exports.SubagentRoutingCard = SubagentRoutingCard
+    exports.ContextBridgeCard = ContextBridgeCard
     exports.RoutingRulesCard = RoutingRulesCard
     // 需求 #5/#6：差异面板 + 模型选择器可见性（导出便于 UI 单测直接断言）
     exports.GlobalDiffPanel = GlobalDiffPanel

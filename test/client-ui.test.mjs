@@ -631,6 +631,7 @@ function makeBackend(overrides = {}) {
     settingsContext: null,    // meta.context 覆盖（workspaceId / sessionId / teamId）
     settingsModels: null,     // /settings.models 覆盖（不给 ⇒ 用默认三条）
     settingsChannels: null,   // /settings.channels 覆盖（不给 ⇒ 用默认两条）
+    contextState: null,       // /context 覆盖（不给 ⇒ 尚无上报）
     rejectSettingsConj: null, // 形如 'PATCH' / 'POST'：模拟旧后端不支持该方法（405）
     fail: {},
     log: [],
@@ -732,6 +733,7 @@ function makeBackend(overrides = {}) {
           s2.maskedAccount = s2.maskedAccount || 'HPUA…7NLO'
           return { body: { ok: true, state: 'ok', hint: '已收到授权，正在换取凭证…', maskedAccount: s2.maskedAccount, error: null } }
         }
+        case '/cs-myfree/context': return { body: db.contextState || { ok: true, empty: true } }
         case '/cs-myfree/ledger': return { body: clone(FIX.ledger) }
         case '/cs-myfree/cash': return { body: FIX.cash }
       }
@@ -775,6 +777,10 @@ function makeBackend(overrides = {}) {
         const next = applyPatch(layerCfg(b.scope, b.id), b.patch)
         setLayerCfg(b.scope, b.id, next)
         return { body: { ok: true, scope: b.scope, id: b.id ?? null, owner: 'admin', setKeys: Object.keys(next).length, hint: '已保存，下次请求生效' } }
+      }
+      case '/cs-myfree/context': {
+        if (req.method === 'DELETE') { db.contextState = null; return { body: { ok: true, cleared: true } } }
+        return { body: { ok: false, error: 'unsupported' } }
       }
       case '/cs-myfree/channels/parse': {
         const r = captureCredential(req.body?.text)
@@ -1827,5 +1833,97 @@ test('需求 #6 展示开关：sources.hidden 里的渠道不出现在选择器�
     assert.ok(post, '应 POST /settings')
     assert.deepEqual(post.body.patch.sources.hidden, ['qoder'],
       '展示开关写 sources.hidden（codearts 已被移除、qoder 加进来）：' + JSON.stringify(post.body.patch))
+  } finally { c.unmount() }
+})
+
+// ══════════════════════════════════════════════════════════════════════════
+// 外部对话上下文卡片（DeepSeek 网页版 → DSH）
+//
+// 用户要求「UI 卡片放上，让我直观操作感受」⇒ 这张卡必须自己说清三件事：
+//   ① 口令怎么填 ② 现在有没有数据 ③ 怎么清空/复制
+// 且必须如实显示「尚无上报」而不是假装已连接。
+// ══════════════════════════════════════════════════════════════════════════
+
+test('外部上下文卡：尚无上报时如实说「还没有」，不假装已连接', async () => {
+  const be = makeBackend({ contextState: { ok: true, empty: true } })
+  const c = await mount({ backend: be.backend })
+  try {
+    const form = {}
+    await c.start(c.mod.ContextBridgeCard, {
+      fv: (p) => (p in form ? form[p] : undefined),
+      fset: (p, v) => { form[p] = v },
+      disabled: false,
+    })
+    const t = c.text()
+    assert.ok(t.includes('外部对话上下文'), '卡片标题：' + t.slice(0, 400))
+    assert.ok(t.includes('尚无上报'), '空态必须有徽标：' + t.slice(0, 400))
+    assert.ok(t.includes('还没有'), '空态要写人话：' + t.slice(0, 400))
+    assert.equal(t.includes('已连接'), false, '没有数据时绝不能说已连接：' + t.slice(0, 400))
+    // 「传得少」的四道闸门要写出来
+    for (const s of ['最近 20 条', '每条 200 字', '64KB', '6 小时']) {
+      assert.ok(t.includes(s), '缺上限说明：' + s)
+    }
+  } finally { c.unmount() }
+})
+
+test('外部上下文卡：有数据时显示时间/条数/预览，并允许清空', async () => {
+  const be = makeBackend({
+    contextState: {
+      ok: true, empty: false, threadId: '/a/chat/s/1', updatedAt: 1793690401174,
+      ageMs: 120000, count: 7, dropped: 13, bytesKept: 2048,
+      preview: [{ role: 'user', text: '我想问个事' }, { role: 'assistant', text: '你说' }],
+    },
+  })
+  const c = await mount({ backend: be.backend })
+  try {
+    const form = { contextBridgeCode: 'abc123' }
+    await c.start(c.mod.ContextBridgeCard, {
+      fv: (p) => form[p],
+      fset: (p, v) => { form[p] = v },
+      disabled: false,
+    })
+    const t = c.text()
+    assert.ok(t.includes('已连接'), '有数据 ⇒ 已连接：' + t.slice(0, 400))
+    assert.ok(t.includes('7 条'), '要显示条数：' + t.slice(0, 500))
+    assert.ok(t.includes('2 KB'), '要显示占用：' + t.slice(0, 500))
+    assert.ok(t.includes('丢弃较早的 13 条'), '要如实说丢了多少：' + t.slice(0, 500))
+    assert.ok(t.includes('我想问个事'), '要显示预览：' + t.slice(0, 600))
+
+    // 口令回填到输入框（用户在扩展里要填同一个）
+    const input = c.nodes().find((n) => n.type === 'input' && n.props && n.props.value === 'abc123')
+    assert.ok(input, '口令必须回填到输入框（否则用户不知道要填什么）')
+
+    // 清空可用
+    const clearBtn = c.nodes().find((n) => n.props && typeof n.props.onClick === 'function' && n.props.children === '清空')
+    assert.ok(clearBtn, '要有「清空」按钮：' + t.slice(0, 500))
+    await c.click(clearBtn)
+    await c.waitFor(() => c.text().includes('已清空上下文'), { label: '清空反馈' })
+  } finally { c.unmount() }
+})
+
+test('外部上下文卡：读取失败要如实报错，不静默', async () => {
+  const be = makeBackend()
+  be.backend = (() => {
+    const orig = be.backend
+    return async (url, req) => {
+      if (String(url).includes('/context')) return { status: 500, body: { ok: false, error: 'boom' } }
+      return orig(url, req)
+    }
+  })()
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start(c.mod.ContextBridgeCard, { fv: () => '', fset: () => {}, disabled: false })
+    await c.waitFor(() => c.text().includes('读取状态失败') || c.text().includes('读取失败'), { label: '错误可见' })
+    const t = c.text()
+    assert.ok(t.includes('读取状态失败') || t.includes('读取失败'), '失败必须可见：' + t.slice(0, 400))
+  } finally { c.unmount() }
+})
+
+test('外部上下文卡：禁用态下口令不可编辑（管理员锁定的层）', async () => {
+  const c = await mount({ backend: makeBackend().backend })
+  try {
+    await c.start(c.mod.ContextBridgeCard, { fv: () => '', fset: () => {}, disabled: true })
+    const input = c.nodes().find((n) => n.type === 'input' && n.props && n.props.disabled === true)
+    assert.ok(input, '禁用时 input 必须有 disabled（不装假按钮）')
   } finally { c.unmount() }
 })
