@@ -929,3 +929,27 @@ test('🟥 自加 API 不受渠道门槛约束（用户自己的 key，他自己
   const providers = out.map((g) => g.provider).sort()
   assert.deepEqual(providers, ['ark', 'deepseek', 'deepseek-web'], '自加 API 一律保留：' + JSON.stringify(providers))
 })
+
+test('🟥 免密源不受「已登录+已验证」约束（它们没有登录概念）', () => {
+  const groups = [
+    { provider: 'kilo', label: 'Kilo 免费池', kind: 'keyless', models: [{ id: 'kilo-auto/free' }] },
+    { provider: 'ovh', label: 'OVH', kind: 'keyless', models: [{ id: 'Qwen' }] },
+    { provider: 'codearts', label: 'CodeArts', kind: 'channel', models: [{ id: 'A' }] },
+  ]
+  // 免密源不在 channels 清单里（真实情况：它们是 SOURCES 的 KEYLESS，不是 CHANNELS）
+  const channels = [
+    { id: 'codearts', loggedIn: true, loginVerified: true, inChannels: true, implemented: true, usable: true, hidden: false },
+  ]
+  const out = dedupeModelsVisible(groups, channels)
+  const providers = out.map((g) => g.provider)
+  assert.ok(providers.includes('kilo'), '免密源必须保留（不能因为「没登录」被删）：' + JSON.stringify(providers))
+  assert.ok(providers.includes('ovh'), '免密源必须保留：' + JSON.stringify(providers))
+  assert.ok(providers.includes('codearts'))
+})
+
+test('免密源若显式标 inChannels:false，同样放行', () => {
+  const groups = [{ provider: 'pollinations', label: 'P', kind: 'keyless', models: [{ id: 'openai' }] }]
+  const channels = [{ id: 'pollinations', inChannels: false, implemented: true, usable: true, hidden: false }]
+  const out = dedupeModelsVisible(groups, channels)
+  assert.deepEqual(out.map((g) => g.provider), ['pollinations'])
+})

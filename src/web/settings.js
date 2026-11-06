@@ -242,6 +242,9 @@ export function channelStatusList(channels, routing, ledger, effectiveCfg = {}) 
     // 渠道级 loginVerified 说的是「登录器端点验证过」，两件事不能混。
     const accounts = Array.isArray(c.accounts) ? c.accounts : []
     const accountVerified = accounts.some((a) => Number.isFinite(a?.verifiedAt) && a.verifiedAt > 0)
+    // 是否属于 CHANNELS（账号渠道）。免密源（kilo/ovh/pollinations）不在此列 ——
+    // 它们没有登录概念，选择器准入规则必须区别对待（见 routing.js#isEligibleChannel）。
+    const inChannels = c.inChannels !== false
 
     let statusCode = 'ok'
     let reasonCode = null
@@ -310,6 +313,7 @@ export function channelStatusList(channels, routing, ledger, effectiveCfg = {}) 
       available,
       loginVerified,
       accountVerified,
+      inChannels,
       status,
       statusCode,
       hidden: isSourceHidden(id, effectiveCfg),

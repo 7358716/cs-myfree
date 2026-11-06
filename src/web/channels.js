@@ -197,6 +197,8 @@ export async function listChannels(store) {
         expired: a.expired === true,
       })),
       loggedIn: mine.length > 0,
+      // 供选择器准入判断区分「账号渠道」与「免密源」（免密源不在 CHANNELS 里）
+      inChannels: true,
     }
   })
 }

@@ -156,14 +156,25 @@ export function dedupeModelsVisible(groups, channels = []) {
    */
   const isEligibleChannel = (provider) => {
     const c = chan.get(provider)
-    if (!c) return false
+
+    // 🔴 免密源（kilo / ovh / pollinations…）**没有登录概念**，也**不在 CHANNELS 里**
+    //    ⇒ `channels` 清单里查不到它（`c === undefined`）。
+    //    它们不发 Authorization、按 IP 限额，套「必须已登录/已验证」
+    //    等于把一个本来就能用的源整条删掉 —— 那是功能退化，不是收紧。
+    //    ⇒ 查不到 ⇒ 当作免密源，直接放行。
+    if (!c) return true
+
     if (c.implemented === false) return false
-    if (c.loggedIn !== true) return false
-    // 已验证：渠道级 loginVerified OR 任一账号 verifiedAt 已写（真机验证过）
-    const verified = c.loginVerified === true || c.accountVerified === true
-    if (!verified) return false
     if (c.usable === false) return false
     if (c.hidden === true) return false
+
+    // 显式标记为「非账号渠道」（防线：将来免密源也进了 channels 清单时仍正确）
+    if (c.inChannels === false) return true
+
+    // 渠道包：已登录 + 已验证（渠道级 or 账号级），缺一不可
+    if (c.loggedIn !== true) return false
+    const verified = c.loginVerified === true || c.accountVerified === true
+    if (!verified) return false
     return true
   }
 
