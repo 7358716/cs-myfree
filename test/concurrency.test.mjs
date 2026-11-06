@@ -223,3 +223,103 @@ test('adapter：上游报满 ⇒ 该渠道冷却 + 降级到备用渠道成功',
   assert.ok(seen.includes('backup'))
   assert.equal(gate.isCooling('codearts'), true, '报满的渠道必须进入冷却')
 })
+
+// ── 账号级并发（用户需求 #2：「自动切换区分每个账号的并发」）──────────────────
+//
+// 背景：上游并发会话数是**按账号**计的（codearts 硬上限 3 / buddy 实测 2），不是按渠道。
+// 旧实现只有一条 `provider#default` 槽 ⇒ 同渠道 2 个账号互相挤占，A 占满后 B 永远被拒
+// ⇒ 「多账号摊薄」形同虚设。下面三条测试分别钉住：账号维度独立、单账号语义不变、
+// 以及 **adapter 真的把账号传进了闸门**（否则闸门再对也没用）。
+
+test('🟥 账号级并发：同渠道 2 个账号，A 占满名额时 B 仍能拿到名额（证伪「共享名额」）', async () => {
+  const gate = createConcurrencyGate({ limits: { p: 1, default: 1 } })
+  const a = await gate.acquire('p', 'accA')
+  assert.equal(a.ok, true)
+  // 🔴 证伪点：共享名额的实现（只按 provider 计数）在这里必然返回 {ok:false, code:'CHANNEL_BUSY'}
+  const b = await gate.acquire('p', 'accB')
+  assert.equal(b.ok, true, '账号 B 的名额与 A 独立（A 占满不得挡住 B）')
+  // A 自己仍受上限 1 约束（不是把上限放大成 2）
+  const a2 = await gate.acquire('p', 'accA')
+  assert.equal(a2.ok, false, '账号 A 自己仍受上限 1 约束')
+  assert.equal(a2.code, 'CHANNEL_BUSY')
+
+  const snap = gate.snapshot()
+  assert.equal(snap.p.active, 2, 'provider 级 active = 该渠道下所有账号的并发之和')
+  assert.deepEqual(Object.keys(snap.p.accounts).sort(), ['p#accA', 'p#accB'])
+  assert.equal(snap.p.accounts['p#accA'].active, 1)
+  assert.equal(snap.p.accounts['p#accB'].active, 1)
+  assert.equal(snap.p.accounts['p#accB'].limit, 1)
+
+  a.release(); b.release()
+  assert.equal(gate.snapshot().p.active, 0)
+  const again = await gate.acquire('p', 'accA')
+  assert.equal(again.ok, true, '释放后 A 又能拿到自己的名额')
+  again.release()
+})
+
+test('单账号语义不变：不带账号 ⇒ 仍共用 provider#default 单槽（上限照旧）', async () => {
+  const gate = createConcurrencyGate({ limits: { p: 1, default: 1 } })
+  const a = await gate.acquire('p')            // 与改造前完全相同的调用形态
+  assert.equal(a.ok, true)
+  const b = await gate.acquire('p')
+  assert.equal(b.ok, false, '不带账号 ⇒ 共用 provider#default 槽（上限 1）')
+  assert.equal(b.code, 'CHANNEL_BUSY')
+  assert.equal(b.accountId, null, '无账号时如实回报 null（不是猜一个账号）')
+  const snap = gate.snapshot()
+  assert.equal(snap.p.active, 1)
+  assert.deepEqual(Object.keys(snap.p.accounts), ['p#default'], '不带账号 ⇒ 只有默认槽')
+  a.release()
+  const c = await gate.acquire('p', '')        // 空串 = 没带账号（不得偷偷开新槽）
+  assert.equal(c.ok, true)
+  assert.deepEqual(Object.keys(gate.snapshot().p.accounts), ['p#default'])
+  c.release()
+})
+
+test('snapshot() 形状冻结：扁平 provider 关键字一个不能少，账号明细只是新增字段', async () => {
+  const gate = createConcurrencyGate({ limits: { x: 1, default: 1 } })
+  const slot = await gate.acquire('x')
+  gate.markBusy('x')
+  const snap = gate.snapshot()
+  // 🔴 诊断页/测试都按扁平形状取值：这些关键字一旦丢失，页面全是 undefined（半成品事故）
+  for (const k of ['active', 'limit', 'ratio', 'coolingMs', 'streak429', 'last429At', 'lastSuccessAt', 'failRate']) {
+    assert.ok(k in snap.x, `snapshot()[provider] 必须保留关键字 ${k}`)
+  }
+  assert.equal(typeof snap.x.active, 'number')
+  assert.equal(typeof snap.x.accounts, 'object', '账号明细是新增字段（对象，键 = provider#accountId）')
+  assert.equal(snap.x.accounts['x#default'].active, 1)
+  assert.equal(snap.x.active, snap.x.accounts['x#default'].active, '单账号时聚合值 == 该账号值')
+  slot.release()
+})
+
+test('🟥 adapter 真的把账号传进闸门：账号 A 满 + 默认槽满 时，候选仍能靠账号 B 的名额发出', async () => {
+  const gate = createConcurrencyGate({ limits: { p: 1, default: 1 } })
+  // 账号 A：模拟另一个子智能体正占着 A 的名额
+  const hogA = await gate.acquire('p', 'accA')
+  // 默认槽：模拟**不带账号**的调用方（如连通性测试走 driver → gate.acquire(p)）
+  const hogDefault = await gate.acquire('p')
+  const calls = []
+  const adapter = createAdapter({
+    builtin: [
+      { provider: 'p', model: 'model-a', tier: 1 },
+      { provider: 'p', model: 'model-b', tier: 2 },
+    ],
+    // 装配层将来接线的注入点：候选 → 账号
+    accountOf: (cand) => (cand.model === 'model-a' ? 'accA' : 'accB'),
+    send: async ({ model }) => {
+      calls.push(model)
+      return (async function* () {
+        yield { type: 'text-delta', text: 'ok' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })()
+    },
+    concurrency: gate,
+  })
+  const chunks = []
+  for await (const c of adapter.stream({ model: 'nomatch', messages: [] })) chunks.push(c)
+  assert.ok(chunks.some((c) => c.type === 'text-delta'), '必须靠账号 B 的名额成功')
+  // 🔴 证伪点：若 adapter 不把账号传给闸门，两个候选都会落到 p#default（已被占满）
+  //    ⇒ 一个都不会发送，两轮兜底等待后抛 CHANNEL_BUSY（本断言拿到的 calls 会是 []）。
+  assert.deepEqual(calls, ['model-b'], 'model-a 的账号已满、默认槽已满 ⇒ 只有账号 B 该被发出')
+  assert.equal(gate.snapshot().p.accounts['p#accB'].active, 0, '成功后名额必须归还')
+  hogA.release(); hogDefault.release()
+})

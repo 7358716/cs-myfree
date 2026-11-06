@@ -94,7 +94,7 @@ test('apply 会注册 settings.section', () => {
   assert.equal(typeof registered[0].Component, 'function', '第二个参数必须是组件')
 })
 
-test('组件能渲染出 12 个区', () => {
+test('组件能渲染出 5 个区（design/21 §1）', () => {
   const { decl } = loadClient('src/client.js')
   const mod = decl.factory((id) => {
     if (id === 'react') return fakeReact
@@ -111,7 +111,13 @@ test('组件能渲染出 12 个区', () => {
   const tree = captured[0]()
   const json = JSON.stringify(tree, (k, v) => (typeof v === 'function' ? '[fn]' : v))
   assert.ok(json.includes('总览'), '缺少总览标签')
-  for (let i = 1; i <= 12; i++) assert.ok(json.includes(`W${i}`), `缺少 W${i}`)
+  assert.ok(json.includes('供给源'), '缺少供给源标签')
+  assert.ok(json.includes('模型与路由'), '缺少模型与路由标签')
+  assert.ok(json.includes('设置'), '缺少设置标签')
+  // 旧的 12 个分区标签不得再出现在 tab 行（ZONES 只 5 区）
+  for (const old of ['W4', 'W5', 'W6', 'W7', 'W8', 'W9', 'W10', 'W11', 'W12']) {
+    assert.equal(json.includes(`title:"${old}"`), false, '旧分区 ' + old + ' 不应再进 ZONES')
+  }
 })
 
 test('apply 在 slots 缺失时不抛（防白屏）', () => {
@@ -135,16 +141,23 @@ test('apply 在 register 抛错时也不抛（防白屏）', () => {
   }))
 })
 
-test('ZONES 必须含 W0 总览 + W1..W12（共 13 区）', () => {
+test('ZONES 必须是 5 区（总览/供给源/模型与路由/设置；design/21 §1）', () => {
   const { decl } = loadClient('src/client.js')
   const mod = decl.factory((id) => {
     if (id === 'react') return fakeReact
     throw new Error('unexpected ' + id)
   })
-  assert.equal(mod.ZONES.length, 13, '总览 + 12 功能区')
+  assert.equal(mod.ZONES.length, 4, '总览/供给源/模型与路由/设置 四区（W4 预留不占位）')
+  const keys = mod.ZONES.map((z) => z.key)
+  assert.deepEqual(keys, ['overview', 'sources', 'models', 'settings'], '四区键必须与 design/21 §1 一致')
   const ids = mod.ZONES.map((z) => z.id)
-  assert.ok(ids.includes('W0'), '缺少总览 W0')
-  for (let i = 1; i <= 12; i++) assert.ok(ids.includes('W' + i), '缺少 W' + i)
+  assert.equal(ids[0], 'W0')
+  assert.deepEqual(ids, ['W0', 'W1', 'W2', 'W3'])
+  // 旧 14 区组件源码必须保留（防回归），只是不再进 ZONES
+  const names = ['ChainZone', 'PinZone', 'HealthZone', 'PolicyZone', 'BudgetZone', 'SaverZone', 'ObserveZone', 'IoZone', 'ScopeZone', 'DiagZone']
+  for (const n of names) assert.equal(typeof mod[n], 'function', n + ' 源码必须保留（design/21 §6）')
+  assert.equal(typeof mod.ModelsZone, 'function', '新增模型与路由组件')
+  assert.equal(typeof mod.SettingsZone, 'function', '设置页新名（= SettingsPage 改造）')
 })
 
 test('apply 同时注册设置页与余额 chip（两个槽位）', () => {
@@ -291,7 +304,7 @@ test('主设置页必须把当前 Tab 包进 Safe，且带上 tab 作为 key（�
   const src = readFileSync('src/client.js', 'utf8')
   // v1.7.1：Safe 额外接收 scope（= 当前 tab），用于 key 重建 ErrorBoundary；
   // 否则一个分区渲染崩了，错误边界状态会一直留着，其它分区也全变错误页。
-  assert.match(src, /h\(Safe,\s*\{[^}]*View:\s*View[^}]*\}\)/, '视图必须被 Safe 包裹')
-  assert.match(src, /h\(Safe,\s*\{[^}]*scope:\s*tab[^}]*\}\)/, 'Safe 必须带 scope=当前 tab')
+  assert.match(src, /h\(Safe,\s*\{[^)]*?View:\s*View[^)]*?\}\)/, '视图必须被 Safe 包裹')
+  assert.match(src, /h\(Safe,\s*\{[^)]*?scope:\s*tab[^)]*?\}\)/, 'Safe 必须带 scope=当前 tab')
   assert.match(src, /h\(ErrorBoundary,\s*\{\s*key:\s*props\.scope/, 'ErrorBoundary 必须用 scope 做 key')
 })

@@ -20,7 +20,14 @@ import { toUsage } from '../keyless/base.js'
  */
 export function isConcurrencyCapError(text) {
   const s = String(text ?? '')
-  return /TM\.00001041/.test(s) || /并发会话数/.test(s) || /concurrent session/i.test(s)
+  return /TM\.00001041/.test(s)
+    || /并发会话数/.test(s)
+    // 🔴 我们自己的归一化文案是「并发会话已满」（driver 抛错时替换 message）——
+    //    旧正则只认「并发会话数」，导致二次判定（离线日志/上层复检）认不出来。
+    || /并发会话已满/.test(s)
+    || /并发会话/.test(s)
+    || /concurrent session/i.test(s)
+    || /session.*(limit|full)/i.test(s)
 }
 
 /**

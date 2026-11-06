@@ -398,6 +398,7 @@ function makeBackend(overrides = {}) {
         case '/cs-myfree/channels/models': return { body: { ok: true, total: 0, models: [], byChannel: {} } }
         case '/cs-myfree/config': return { body: { ok: true, config: {}, defaults: {} } }
         case '/cs-myfree/scope': return { body: { ok: true, scopes: ['global', 'preset', 'session'], files: [], effective: { config: {}, layers: { global: 0, preset: 0, session: 0 } }, hint: '' } }
+        case '/cs-myfree/settings': return { body: { ok: true, layers: [{ scope: 'global', id: null, owner: null, setKeys: 0, config: {} }, { scope: 'workspace', id: null, owner: null, setKeys: 0, config: {} }, { scope: 'session', id: null, owner: null, setKeys: 0, config: {} }, { scope: 'team', id: null, owner: null, setKeys: 0, config: {} }], effective: { config: {}, layers: {}, ids: {}, byLayer: {} }, meta: { isAdmin: true, context: {} }, models: [], channels: [], recent: [], failures: null, hint: '' } }
         case '/cs-myfree/ledger': return { body: { ok: true, summary: {}, spend: { ok: false, days: [], providers: [] }, token: { days: [] } } }
         case '/cs-myfree/cash': return { body: { ok: true, deepseek: { available: true, balances: [{ currency: 'CNY', total: 1, granted: 0, topped: 1 }] }, errors: [] } }
         case '/cs-myfree/checkin/status': return { body: { ok: true, enabled: true, alive: true, running: false, at_time: '10:05', nextAt: Date.now() + 3600_000, lastAt: null, lastDate: null, lastResult: null, pending: 0, lastError: null, channels: [] } }
@@ -497,14 +498,14 @@ function makeBackend(overrides = {}) {
 const has = (c, s) => c.text().includes(s)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ① 13 面板 smoke：新登录 UI 不能把其它分区拖垮
+// ① 14 面板 smoke：新登录 UI 不能把其它分区拖垮
 // ─────────────────────────────────────────────────────────────────────────────
-test('13 个分区在 stub 宿主下全部渲染，无 ErrorBoundary 兜底、无 effect 异常', async () => {
+test('14 个分区在 stub 宿主下全部渲染，无 ErrorBoundary 兜底、无 effect 异常', async () => {
   const be = makeBackend()
   const c = await mount({ backend: be.backend })
   try {
     await c.start()
-    const tabs = ['总览', '供给源', '模型目录', '降级链 ★', '钉选', '额度健康', '保护策略', '预算付费', '省 Token', '可观测', '导入导出', '作用域', '诊断']
+    const tabs = ['总览', '供给源', '模型与路由', '设置']
     for (const tab of tabs) {
       await c.openTab(tab)
       assert.deepEqual(c.runtime.errors.map((e) => String(e.error && e.error.message)), [], `${tab} 抛错`)

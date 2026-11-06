@@ -91,10 +91,25 @@ export async function fetchChannelModels(channelId, cred, opts = {}) {
     ? (cred.includes(':') ? { token: cred, ak: cred.split(':')[0], sk: cred.split(':')[1] } : { token: cred })
     : (cred ?? {})
 
+  // 🔴 鉴权形态必须跟着**凭据形态**走（真实缺陷：登录成功但选不到模型）
+  //
+  //    officeace（华为 MaaS）与 codearts 一样，登录拿到的是**华为云临时凭据**
+  //    （AK/SK + securityToken）。而 protocols 里 officeace 声明的是 BEARER ——
+  //    `buildAuthHeaders` 在没有 `cred.token` 时**根本不会设置 authorization**，
+  //    于是 `GET /v2/models` 恒 401/403 ⇒ 回落内置清单 ⇒ 而
+  //    `BUILTIN_MODELS.officeace = []` ⇒ 模型列表永远为空。
+  //
+  //    修法（不硬编任何模型名）：凭据里有 AK/SK ⇒ 用华为云 SDK-HMAC-SHA256 签名
+  //    （复用 `sign.js`，与 codearts 同一套）；只有 token ⇒ 仍走原声明的 Bearer。
+  //    这样「登录后动态拉取模型」这条链路才真正通。
+  const chForAuth = (credObj.ak && credObj.sk && ch.auth !== AUTH.SIGNED_HUAWEI)
+    ? { ...ch, auth: AUTH.SIGNED_HUAWEI }
+    : ch
+
   try {
     let headers
     try {
-      headers = buildRequestHeaders(ch, credObj, {
+      headers = buildRequestHeaders(chForAuth, credObj, {
         method: 'GET',
         url,
         body: '',

@@ -1,0 +1,44 @@
+{
+  "chain": [
+    {
+      "provider": "loomy",
+      "model": "deepseek-v4-flash-0731",
+      "tier": 1,
+      "_i": 0
+    },
+    {
+      "provider": "codearts",
+      "model": "deepseek-v4.1-flash-1017",
+      "tier": 2,
+      "_i": 1
+    },
+    {
+      "provider": "ovh",
+      "model": "Qwen3.5-397B-A17B",
+      "tier": 3,
+      "_i": 2
+    },
+    {
+      "provider": "buddy",
+      "model": "deepseek-v4.1-flash",
+      "tier": 2,
+      "_i": 3,
+      "disabled": true
+    },
+    {
+      "provider": "qoder",
+      "model": "qfmodel",
+      "tier": 2,
+      "_i": 4,
+      "disabled": true
+    },
+    {
+      "provider": "kilo",
+      "model": "kilo-auto/free",
+      "tier": 1,
+      "disabled": true,
+      "_i": 5
+    }
+  ],
+  "at": 1793803729035
+}

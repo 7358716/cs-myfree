@@ -330,23 +330,25 @@ window.__ModuleLoader__.load({
       return best
     }
 
+    // design/21 §1：5 Tab 信息架构（旧 14 区组件源码保留，仅不再进 ZONES）
     const ZONES = [
       { id: 'W0', key: 'overview', label: '总览' },
       { id: 'W1', key: 'sources', label: '供给源' },
-      { id: 'W2', key: 'catalog', label: '模型目录' },
-      { id: 'W3', key: 'chain', label: '降级链 ★' },
-      { id: 'W4', key: 'pin', label: '钉选' },
-      { id: 'W5', key: 'health', label: '额度健康' },
-      { id: 'W6', key: 'policy', label: '保护策略' },
-      { id: 'W7', key: 'budget', label: '预算付费' },
-      { id: 'W8', key: 'saver', label: '省 Token' },
-      { id: 'W9', key: 'observe', label: '可观测' },
-      { id: 'W10', key: 'io', label: '导入导出' },
-      { id: 'W11', key: 'scope', label: '作用域' },
-      { id: 'W12', key: 'diag', label: '诊断' },
+      { id: 'W2', key: 'models', label: '模型与路由' },
+      { id: 'W3', key: 'settings', label: '设置' },
     ]
 
     // ── 通用样式 ──
+    /** 时间戳 ⇒ 本地「月-日 时:分」（验证时间戳用；非法/缺失返回空串，不显示 "Invalid Date"） */
+    const fmtDate = (ts) => {
+      const n = Number(ts)
+      if (!Number.isFinite(n) || n <= 0) return ''
+      try {
+        const d = new Date(n)
+        const p = (x) => String(x).padStart(2, '0')
+        return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+      } catch { return '' }
+    }
     const S = {
       root: { padding: '16px', fontFamily: 'inherit', fontSize: '13px', lineHeight: '1.6' },
       h2: { fontSize: '15px', fontWeight: 600, margin: '0 0 4px' },
@@ -512,6 +514,69 @@ window.__ModuleLoader__.load({
         h('span', { style: Object.assign({ textAlign: 'right', marginLeft: '12px' }, props.dim ? S.dim : null) }, props.v))
     }
 
+    /**
+     * 通用开关（滑块）。与设置页里内联的开关**同一套样式**，抽出来是为了新增卡片
+     * 不再复制 30 行 DIV；`label` 不传 ⇒ 显示「已开启 / 已关闭」。
+     * disabled=true ⇒ 置灰且不可点（识图 mode=off 时下方子项全部置灰就靠它）。
+     */
+    function Toggle(props) {
+      const on = props.value === true
+      const dis = props.disabled === true
+      const flip = () => { if (!dis && typeof props.onChange === 'function') props.onChange(!on) }
+      return h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+        h('span', {
+          onClick: dis ? undefined : flip,
+          style: {
+            cursor: dis ? 'not-allowed' : 'pointer', userSelect: 'none', display: 'inline-flex', alignItems: 'center',
+            width: '44px', height: '22px', borderRadius: '11px', flexShrink: 0, opacity: dis ? 0.5 : 1,
+            background: on ? 'var(--dsw-alias-state-success-primary)' : 'rgba(128,128,128,0.35)',
+          },
+        }, h('span', {
+          style: {
+            display: 'block', width: '18px', height: '18px', borderRadius: '50%',
+            background: '#fff', margin: '2px',
+            transform: on ? 'translateX(22px)' : 'translateX(0)',
+          },
+        })),
+        h('span', {
+          onClick: dis ? undefined : flip,
+          style: Object.assign(
+            { fontWeight: 600, cursor: dis ? 'not-allowed' : 'pointer', userSelect: 'none', opacity: dis ? 0.5 : 1 },
+            on ? S.good : { color: 'var(--dsw-alias-label-secondary)' },
+          ),
+        }, props.label !== undefined ? props.label : (on ? '已开启' : '已关闭')))
+    }
+
+    /**
+     * 账本「表格」的一行。**本文件全是 flex，刻意不用 <table>**（窄屏会溢出）。
+     * 列宽固定 ⇒ 表头 / 渠道行 / 模型子行天然对齐；indent=true 用于 per-model 子行缩进。
+     * 列序：渠道/模型 | 切换成功 | 调用 | 失败 | token(in/out)
+     *
+     * 单元格可以直接给字符串，也可以给 `{ text, warn }`：warn=true ⇒ 该格用 S.warn 高亮
+     * （失败数 > 0 的格子就靠它标红，不用为了一格颜色重写整行）。
+     */
+    function spendRow(opts, cells) {
+      const o = opts || {}
+      const widths = ['1 1 180px', '62px', '58px', '58px', '104px']
+      return h('div', {
+        style: {
+          display: 'flex', gap: '6px', alignItems: 'baseline',
+          padding: o.indent ? '2px 0 2px 16px' : '4px 0',
+          borderBottom: o.head ? '1px solid rgba(128,128,128,0.35)' : '1px solid rgba(128,128,128,0.10)',
+        },
+      }, (cells || []).map((c, i) => {
+        const cell = (c && typeof c === 'object') ? c : { text: c }
+        return h('span', {
+          key: i,
+          style: Object.assign({
+            flex: widths[i] || '1 1 60px', minWidth: 0, textAlign: i === 0 ? 'left' : 'right',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }, o.head ? S.dim : null, o.dim && !o.head ? { opacity: 0.75, fontSize: '11px' } : null,
+          cell.warn ? S.warn : null),
+        }, cell.text)
+      }))
+    }
+
     // ── 错误边界（关键：一个区崩了不能拖垮整页 → 白屏）──
     // React 的函数组件无法捕获自身渲染错误，必须用类组件做边界。
     class ErrorBoundary extends react.Component {
@@ -550,7 +615,7 @@ window.__ModuleLoader__.load({
 
     /** 把任意区域包进边界（key=当前分区：一个分区崩了不能连累其它分区） */
     function Safe(props) {
-      return h(ErrorBoundary, { key: props.scope || 'zone' }, h(props.View))
+      return h(ErrorBoundary, { key: props.scope || 'zone' }, h(props.View, props.viewProps || {}))
     }
 
     // ── 余额卡片 ──
@@ -608,6 +673,14 @@ window.__ModuleLoader__.load({
       //    探测范围只覆盖默认优先源（当前 Kilo/OVH），所以这里只报「可用几个」+ 说明
       const keylessOk = d && d.probe ? d.probe.okCount + ' 个可用（探测范围：默认优先源）' : '未探测'
       const paidEnabled = !!(d && d.config && d.config.paid && d.config.paid.enabled)
+      // 契约 A4：切换成功统计（/state → routing.switches）。
+      // 口径：分母 = 成功调用数，不是账本行数 ⇒ 后端拿不到时分母 0、成功率 null（显示「—」，不假装 0%）。
+      const sw = (d && d.routing && d.routing.switches) || null
+      // 成功率 null = 还没有「成功调用」当分母 ⇒ **只报次数**，不要显示「成功率 —」或 0%
+      const swRate = sw && sw.switchSuccessRate != null ? sw.switchSuccessRate + '%' : null
+      const swText = !sw
+        ? '未就绪（后端未返回 routing.switches）'
+        : (Number(sw.total) || 0) + ' 次' + (swRate ? '（成功率 ' + swRate + '）' : '')
       const chainProviders = d && d.chain && Array.isArray(d.chain.tiers)
         ? Array.from(new Set(d.chain.tiers.reduce((all, t) => all.concat(t.providers || []), [])))
         : []
@@ -635,7 +708,9 @@ window.__ModuleLoader__.load({
           status(d && d.probe ? !!d.probe.anyOk : null, '免密源', keylessOk),
           status(chLogged === null ? null : chLogged > 0, '渠道账号', chTotal === null ? '加载中' : (chLogged + '/' + chTotal + ' 家已登录')),
           status(null, 'DeepSeek 余额', '见上方卡片'),
-          status(paidEnabled ? null : true, '付费闸门', paidEnabled ? '⚠️ 已开启（会花钱，注意限额）' : '默认全关（不会自动花钱）')),
+          status(paidEnabled ? null : true, '付费闸门', paidEnabled ? '⚠️ 已开启（会花钱，注意限额）' : '默认全关（不会自动花钱）'),
+          // 「切换成功」：换了候选才成功的调用数（口径 A；失败行不构成"切换机会"）
+          status(sw ? (Number(sw.total) || 0) > 0 : null, '切换成功', swText)),
 
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '现在能用什么'),
@@ -650,6 +725,15 @@ window.__ModuleLoader__.load({
 
         h('div', { style: { display: 'flex', gap: '8px', marginTop: '10px' } },
           h('button', { style: S.btn(false), onClick: () => { reload(); reloadCh() } }, '刷新')),
+
+        // design/21 §0.3/§1：诊断并入总览（复用旧 DiagZone 渲染，不删源码）
+        h('div', { style: { marginTop: '14px', borderTop: '1px solid rgba(128,128,128,0.18)', paddingTop: '12px' } },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '一键体检'),
+          h(DiagZone)),
+        // design/21 §1：可观测花费汇总并入总览（复用旧 ObserveZone 渲染）
+        h('div', { style: { marginTop: '14px', borderTop: '1px solid rgba(128,128,128,0.18)', paddingTop: '12px' } },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '花费与用量'),
+          h(ObserveZone)),
       )
     }
 
@@ -890,6 +974,25 @@ window.__ModuleLoader__.load({
           .then((r) => {
             if (r.ok) setAcc(key, true, '✅ 连通 ' + (r.ms || 0) + 'ms · ' + (r.model || ''))
             else setAcc(key, false, '❌ ' + (r.error || '失败') + (r.kind ? '（' + r.kind + '）' : ''))
+          })
+          .catch((e) => setAcc(key, false, '❌ ' + String((e && e.message) || e)))
+          .then(() => setAccBusy(null))
+      }
+
+      /**
+       * 账号级真机验证（需求 #3）。
+       * 与「测试」的区别：验证结果会**落盘**到账号（verifiedAt / verifyError），
+       * 让徽标从此有据可依；测试只回一次结果、不留痕。
+       */
+      const runVerify = (payload, key) => {
+        setAccBusy('verify:' + key)
+        setAccMsg(null)
+        api('/channels/verify', { method: 'POST', body: JSON.stringify(payload) })
+          .then((r) => {
+            if (r.ok) setAcc(key, true, '✅ ' + (r.note || '已验证') + ' · ' + (r.ms || 0) + 'ms')
+            else if (r.kind === 'CHANNEL_BUSY') setAcc(key, false, '⏳ 并发已满，稍后再试（本次没有写验证结果）')
+            else setAcc(key, false, '❌ ' + (r.error || '验证未通过') + (r.note ? ' · ' + r.note : ''))
+            props.onChanged && props.onChanged()
           })
           .catch((e) => setAcc(key, false, '❌ ' + String((e && e.message) || e)))
           .then(() => setAccBusy(null))
@@ -1199,11 +1302,28 @@ window.__ModuleLoader__.load({
 
         accs.map((a) => {
           const key = a.id
+          // ── 账号级真机验证（需求 #3）：时间戳是**真跑通过**的证据，不是二值 flag ──
+          const verifiedAt = Number.isFinite(a.verifiedAt) ? a.verifiedAt : null
+          const vErr = typeof a.verifyError === 'string' && a.verifyError ? a.verifyError : null
           return h('div', { key, style: Object.assign({}, S.row, { marginTop: '6px', flexWrap: 'wrap', gap: '6px' }) },
             h('span', { style: { minWidth: 0, wordBreak: 'break-all', flex: '1 1 180px' } },
               (a.label || ch.label) + '  ' + (a.masked || ''),
-              a.kind ? h('span', { style: Object.assign({ marginLeft: '6px' }, S.dim) }, '· ' + a.kind) : null),
+              a.kind ? h('span', { style: Object.assign({ marginLeft: '6px' }, S.dim) }, '· ' + a.kind) : null,
+              // 徽标三态：已验证（绿，带日期）/ 未验证（黄）/ 过期（红，需重登）
+              a.expired === true
+                ? h('span', { style: Object.assign({ marginLeft: '6px' }, S.badge('warn')) }, '凭据已过期，需重新登录')
+                : (verifiedAt
+                    ? h('span', { style: Object.assign({ marginLeft: '6px' }, S.badge('good')) }, '已验证 ' + fmtDate(verifiedAt))
+                    : h('span', { style: Object.assign({ marginLeft: '6px' }, S.badge('warn')) }, '未验证')),
+              (vErr && !a.expired)
+                ? h('span', { style: Object.assign({ marginLeft: '6px' }, S.dim, S.warn), title: vErr }, '上次验证失败：' + String(vErr).slice(0, 40))
+                : null),
             h('span', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' } },
+              h('span', {
+                style: S.btn(false),
+                title: '用真实最小推理验一次，通过后记下时间（不通过会如实记原因）',
+                onClick: () => runVerify({ id: key }, key),
+              }, accBusy === 'verify:' + key ? '验证中…' : '验证'),
               h('span', { style: S.btn(false), onClick: () => runTest({ id: key }, key) }, accBusy === 'test:' + key ? '测试中…' : '测试'),
               h('span', {
                 style: Object.assign({}, S.btn(false), refreshable ? null : { opacity: 0.6 }),
@@ -1236,6 +1356,11 @@ window.__ModuleLoader__.load({
       const [probing, setProbing] = react.useState(false)
       const [probe, setProbe] = react.useState(null)
       const [bulk, setBulk] = react.useState(null)
+      // 模型搜索探测（一键串行三步）：结果 + 关键词过滤（纯前端本地过滤）
+      const [scan, setScan] = react.useState(null)
+      const [scanning, setScanning] = react.useState(false)
+      const [scanStep, setScanStep] = react.useState('')   // 正在跑第几步（按钮上显示进度）
+      const [scanQ, setScanQ] = react.useState('')
       const aliveRef = react.useRef(true)
       react.useEffect(() => () => { aliveRef.current = false }, [])
 
@@ -1254,6 +1379,133 @@ window.__ModuleLoader__.load({
           .then((r) => setProbe(r))
           .catch((e) => setProbe({ ok: false, error: String((e && e.message) || e) }))
           .then(() => { setProbing(false); reload() })
+      }
+
+      // ── 模型搜索探测（一键串行三步）────────────────────────────────────────
+      // 串行而不是并发：/probe 会发**真实推理请求**，/channels/models 会**真打渠道端点**，
+      // 一起打会把上游打爆（也可能互相抢限流桶）。
+      //   a) POST /probe            免密源真实探测（每个源的 ms / error）
+      //   b) POST /channels/models  拉取渠道模型（远端优先，失败回落内置并如实标来源）
+      //   c) GET /models + /channels/models 聚合（模型名 / 来源 / 状态）
+      const runModelScan = () => {
+        setScanning(true)
+        setScan(null)
+        setScanStep('① 探测免密源')
+        ;(async () => {
+          const steps = []
+          const out = { ok: false, at: Date.now(), probe: null, models: null, channels: null, steps, error: null }
+          // stage 只用于「失败时告诉用户卡在哪一步」（可读错误 > 一句 HTTP 500）
+          let stage = '① 免密源探测'
+          try {
+            const p = await api('/probe', { method: 'POST', body: JSON.stringify({}) })
+            out.probe = p
+            steps.push('① 免密源探测：' + (p.anyOk ? (p.okCount + '/' + (p.results || []).length + ' 可用') : '全部不可用'))
+            if (aliveRef.current) { stage = '② 渠道模型拉取'; setScanStep('② 渠道模型拉取') }
+            const cmPost = await api('/channels/models', { method: 'POST', body: JSON.stringify({}) })
+            steps.push('② 渠道模型拉取：' + (cmPost.total ?? 0) + ' 个模型')
+            if (aliveRef.current) { stage = '③ 聚合结果'; setScanStep('③ 聚合结果') }
+            const m = await api('/models')
+            const cm = await api('/channels/models')
+            out.models = m
+            out.channels = cm
+            steps.push('③ 聚合：免密源 ' + ((m.sources || []).length) + ' 个平台 + 渠道模型 ' + ((cm.models || []).length) + ' 条')
+            out.ok = true
+          } catch (e) {
+            out.error = String((e && e.message) || e)
+            steps.push('✗ 中断于 ' + stage + '：' + out.error)
+          }
+          if (!aliveRef.current) return
+          setScan(out)
+          setScanning(false)
+          setScanStep('')
+          if (out.ok) reload()
+        })()
+      }
+
+      /**
+       * 把 probe / models / channels.models 拼成「按平台分组」的行。
+       * 来源字段原样透传（remote / builtin / builtin-after-http-error / builtin-empty-remote / none）
+       * ——不猜、不改写；`ok` 单独给出布尔值，供「共 K 个可用」汇总与 S.warn 高亮使用。
+       */
+      const scanGroups = (sc) => {
+        if (!sc) return []
+        const groups = []
+        const probed = {}
+        for (const r of (sc.probe && sc.probe.results) || []) probed[r.id] = r
+        const dm = (sc.models && sc.models.defaultModels) || {}
+        // ① 免密源平台（单独一组）：状态 = 真实探测的 ms / error
+        for (const src of (sc.models && sc.models.sources) || []) {
+          const pid = src.probeId || src.id
+          const p = probed[pid]
+          const model = dm[pid] || dm[src.id] || ''
+          const ok = p ? p.ok === true : null
+          groups.push({
+            id: 'keyless:' + pid,
+            platform: src.label || pid,
+            kind: 'keyless',
+            note: p ? null : '未探测（本次 probe 没有该源结果）',
+            rows: model
+              ? [{
+                  model,
+                  source: 'builtin',
+                  ok,
+                  status: p ? (p.ok ? (p.ms != null ? p.ms + 'ms' : '可用') : (p.error || '失败')) : '未探测',
+                }]
+              : [],
+          })
+        }
+        // ② 渠道平台：模型清单 + 拉取来源（失败原因如实显示在平台行与状态列）
+        const byChannel = {}
+        for (const m of (sc.channels && sc.channels.models) || []) {
+          const cid = m.channelId || m.id || '?'
+          if (!byChannel[cid]) byChannel[cid] = []
+          byChannel[cid].push(m)
+        }
+        const meta = (sc.channels && sc.channels.byChannel) || {}
+        for (const [cid, list] of Object.entries(byChannel)) {
+          const mt = meta[cid] || {}
+          const fetchOk = mt.ok !== false
+          groups.push({
+            id: 'channel:' + cid,
+            platform: cid,
+            kind: 'channel',
+            note: fetchOk ? null : '拉取失败：' + (mt.error || '未知原因'),
+            rows: list.map((m) => ({
+              model: m.modelId || m.id || m.name,
+              source: m.source || mt.source || '—',
+              ok: fetchOk,
+              status: fetchOk ? '可用' : (mt.error || '失败'),
+            })),
+          })
+        }
+        // ③ 拉了但一个模型都没回来的渠道（多半是失败）也要露出来，否则「失败」无从看见
+        for (const [cid, mt] of Object.entries(meta)) {
+          if (byChannel[cid]) continue
+          groups.push({
+            id: 'channel:' + cid,
+            platform: cid,
+            kind: 'channel',
+            note: mt && mt.ok === false ? '拉取失败：' + (mt.error || '未知原因') : '（该渠道没有返回模型）',
+            rows: [],
+          })
+        }
+        return groups
+      }
+
+      /** 关键词过滤（平台名 / 模型名，纯前端；空关键词 = 不过滤） */
+      const scanFiltered = (groups) => {
+        const kw = String(scanQ || '').trim().toLowerCase()
+        if (!kw) return groups
+        const out = []
+        for (const g of groups) {
+          const platformHit = String(g.platform).toLowerCase().includes(kw)
+          const rows = (g.rows || []).filter((r) => String(r.model).toLowerCase().includes(kw))
+          if (platformHit || rows.length) {
+            // 平台名命中 ⇒ 保留该平台全部模型；只有模型名命中 ⇒ 只留命中的模型
+            out.push(Object.assign({}, g, { rows: rows.length ? rows : (g.rows || []) }))
+          }
+        }
+        return out
       }
 
       // 全部测试 / 全部续期：逐个账号操作（串行，避免把宿主/上游打爆）
@@ -1320,7 +1572,15 @@ window.__ModuleLoader__.load({
           h('button', { style: S.btn(false), onClick: () => runBulk('test'), disabled: bulkRunning, title: '对每个已登录账号发一条最小推理请求' },
             '全部测试' + (bulk && bulk.kind === 'test' && !bulk.finished ? ' ' + bulk.done + '/' + bulk.total : '')),
           h('button', { style: S.btn(false), onClick: () => runBulk('refresh'), disabled: bulkRunning, title: '对每个已登录账号续期（无续期端点的会如实标出）' },
-            '全部续期' + (bulk && bulk.kind === 'refresh' && !bulk.finished ? ' ' + bulk.done + '/' + bulk.total : ''))),
+            '全部续期' + (bulk && bulk.kind === 'refresh' && !bulk.finished ? ' ' + bulk.done + '/' + bulk.total : '')),
+          h('button', { style: S.btn(false), onClick: runModelScan, disabled: scanning, title: '串行三步：真实探测免密源 → 拉取渠道模型 → 聚合 /models + /channels/models' },
+            scanning ? ('模型搜索探测中…' + (scanStep ? ' ' + scanStep : '')) : '模型搜索探测'),
+          h('input', {
+            style: Object.assign({}, S.input, { width: '190px' }),
+            placeholder: '按平台 / 模型名过滤',
+            value: scanQ,
+            onChange: (e) => setScanQ(e.target.value),
+          })),
 
         probe ? h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '6px' } },
@@ -1342,6 +1602,69 @@ window.__ModuleLoader__.load({
             ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '有失败项：先看行内错误；「未验证」渠道的端点可能未取证，登录器修好后重试。')
             : null) : null,
 
+        // ── 模型搜索探测结果（按平台分组：模型 | 来源 | 状态）──
+        scan ? (() => {
+          const all = scanGroups(scan)
+          const groups = scanFiltered(all)
+          // 总览口径：平台数 / 模型数 / 其中「可用」的模型数（ok===true 才算可用，未探测不计）
+          const tally = (list) => {
+            let models = 0
+            let usable = 0
+            for (const g of list) {
+              for (const r of (g.rows || [])) {
+                models++
+                if (r.ok === true) usable++
+              }
+            }
+            return { platforms: list.length, models, usable }
+          }
+          const cur = tally(groups)
+          const whole = tally(all)
+          const kw = String(scanQ || '').trim()
+          const summary = '共 ' + cur.platforms + ' 个平台 / ' + cur.models + ' 个模型 / 其中 ' + cur.usable + ' 个可用'
+            + (kw
+              ? '（已按「' + kw + '」过滤；全部 ' + whole.platforms + ' 个平台 / ' + whole.models + ' 个模型 / ' + whole.usable + ' 个可用）'
+              : '')
+          const totalRows = cur.models
+          // 表头用 S.dim 小字（本文件全是 flex ⇒ 手写「表格」，不用 <table>）
+          const head = h('div', { style: { display: 'flex', gap: '8px', padding: '3px 0', borderBottom: '1px solid rgba(128,128,128,0.35)' } },
+            h('span', { style: Object.assign({ flex: '1 1 220px' }, S.dim) }, '模型'),
+            h('span', { style: Object.assign({ width: '150px', flexShrink: 0 }, S.dim) }, '来源'),
+            h('span', { style: Object.assign({ width: '130px', flexShrink: 0, textAlign: 'right' }, S.dim) }, '状态'))
+          const groupNodes = groups.map((g) => {
+            const rowNodes = (g.rows || []).map((r, i) => h('div', {
+              key: i,
+              style: { display: 'flex', gap: '8px', padding: '2px 0 2px 10px', borderBottom: '1px solid rgba(128,128,128,0.10)' },
+            },
+              h('span', { style: Object.assign({ flex: '1 1 220px', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, S.mono) }, r.model),
+              h('span', { style: { width: '150px', flexShrink: 0, fontSize: '11px', opacity: 0.8 } }, r.source),
+              // 状态：可用=正常色；失败= S.warn 高亮并显示后端 error 原文；未探测=暗色
+              h('span', {
+                style: Object.assign(
+                  { width: '130px', flexShrink: 0, textAlign: 'right', fontSize: '11px' },
+                  r.ok === true ? { opacity: 0.8 } : (r.ok === false ? S.warn : { opacity: 0.6 }),
+                ),
+              }, r.status)))
+            return h('div', { key: g.id, style: { marginTop: '8px' } },
+              h('div', { style: { fontWeight: 600, fontSize: '12px' } }, g.platform,
+                h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) },
+                  (g.rows || []).length + ' 个模型' + (g.kind === 'keyless' ? '（免密源）' : ''))),
+              g.note ? h('div', { style: Object.assign({ marginTop: '2px' }, S.dim, S.warn) }, '· ' + g.note) : null,
+              rowNodes)
+          })
+          return h('div', { style: S.card },
+            h('div', { style: { fontWeight: 600, marginBottom: '4px' } },
+              scan.ok ? '✅ 模型搜索探测完成' : '❌ 模型搜索探测失败'),
+            h('div', { style: { marginBottom: '4px', fontWeight: 600, fontSize: '12px' } }, summary),
+            (scan.steps || []).map((t, i) => h('div', { key: i, style: S.dim }, t)),
+            scan.error ? h('div', { style: Object.assign({ marginTop: '4px' }, S.mono, S.bad) }, scan.error) : null,
+            scan.ok && totalRows === 0
+              ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) },
+                  kw ? '没有匹配「' + kw + '」的平台或模型（清空过滤词看全部）' : '（没有拿到任何模型：先登录一个渠道，或看上面三步的状态）')
+              : null,
+            groups.length ? h('div', { style: { marginTop: '6px' } }, head, groupNodes) : null)
+        })() : null,
+
         h('div', { style: { fontWeight: 600, margin: '4px 0 8px' } }, '免密源（无需登录）'),
         h('div', { style: S.grid }, (d.sources.keyless || []).map((k) => h('div', { key: k.id, style: S.tile },
           h('div', { style: { fontWeight: 600 } }, k.label),
@@ -1360,6 +1683,11 @@ window.__ModuleLoader__.load({
               key: c.id, channel: c, status: statusById[c.id] || null,
               onChanged: () => { reloadCh(); reload(); reloadLs() },
             })),
+
+        // design/21 §1：额度健康并入供给源（复用旧 HealthZone 渲染，不删源码）
+        h('div', { style: { marginTop: '16px', borderTop: '1px solid rgba(128,128,128,0.18)', paddingTop: '12px' } },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '额度与签到'),
+          h(HealthZone)),
       )
     }
 
@@ -1462,6 +1790,13 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = react.useState([])
       const [msg, setMsg] = react.useState(null)
       const [busy, setBusy] = react.useState(false)
+      // 每行的「跨平台模型搜索」关键词（空 = 只看所选平台的模型）。
+      // 用 ChainZone 级别的 map（row 不是组件，不能在里面放 hook）。
+      // 🔴 key 用「行身份 = provider+model」，不用行号：删/移一行后行号会整体错位，
+      //    关键词若按行号存就会串到别人的行上；身份一变（选了别的模型）关键词自然失效，
+      //    正好回到「只列该平台模型」的常规状态。
+      const [mq, setMq] = react.useState({})
+      const mqKey = (e) => String(e.provider || '') + '\u0000' + String(e.model || '')
 
       react.useEffect(() => {
         if (!s.data) return
@@ -1494,6 +1829,28 @@ window.__ModuleLoader__.load({
         return src && Array.isArray(src.models) ? src.models : []
       }
 
+      /**
+       * 跨平台模型关键词匹配 ⇒ [{provider, model, platformLabel, label}]。
+       * 为什么需要：用户常常只记得模型名、不记得它在哪家平台；「平台 + 模型」两层分立后
+       * 逐层点太慢，所以给一个只看模型名的搜索口，命中就把模型下拉换成跨平台清单。
+       * ⚠️ 提交给后端的仍然是 { provider, model } 两项（chain-overrides 存储格式不变）。
+       */
+      const crossMatches = (kw) => {
+        const k = String(kw || '').trim().toLowerCase()
+        if (!k) return []
+        const out = []
+        for (const src of sources) {
+          for (const m of (Array.isArray(src.models) ? src.models : [])) {
+            const id = String(m.id || '')
+            const name = String(m.name || id)
+            if (!id.toLowerCase().includes(k) && !name.toLowerCase().includes(k)) continue
+            out.push({ provider: src.provider, model: m.id, platformLabel: src.label || src.provider, label: name })
+            if (out.length >= 60) return out   // 防御：极端关键词别把下拉撑爆
+          }
+        }
+        return out
+      }
+
       const set = (i, k, v) => setDraft((arr) => arr.map((e, j) => {
         if (j !== i) return e
         const next = Object.assign({}, e, { [k]: v })
@@ -1505,6 +1862,10 @@ window.__ModuleLoader__.load({
         return next
       }))
       const del = (i) => setDraft((arr) => arr.filter((_, j) => j !== i))
+      /** 成对设置平台 + 模型（跨平台选择时用：两者必须同源，不能拆开设） */
+      const setPair = (i, provider, model) => setDraft((arr) => arr.map((e, j) => (
+        j === i ? Object.assign({}, e, { provider, model }) : e
+      )))
       const add = () => setDraft((arr) => {
         const first = sources[0]
         if (!first) return arr.concat([{ provider: '', model: '', tier: 1 }])
@@ -1550,25 +1911,62 @@ window.__ModuleLoader__.load({
       const row = (e, i) => {
         const ms = modelsOf(e.provider)
         const modelMissing = e.model && !ms.some((m) => m.id === e.model)
+        // 跨平台搜索：有关键词 ⇒ 模型下拉展开为「平台 / 模型」的跨平台匹配结果
+        const kw = String(mq[mqKey(e)] || '')
+        const cross = crossMatches(kw)
+        const sep = '\u0000'
+        const curVal = e.provider + sep + e.model
+        /** 模型下拉的可选项：跨平台命中优先，否则只列所选平台的模型 */
+        const modelOpts = cross.length
+          ? [h('option', { key: '__cur', value: curVal }, '当前：' + e.provider + ' / ' + e.model)]
+              .concat(cross.map((c) => h('option', { key: c.provider + sep + c.model, value: c.provider + sep + c.model },
+                c.platformLabel + ' / ' + (c.label && c.label !== c.model ? (c.label + '（' + c.model + '）') : c.model))))
+          : [].concat(
+              modelMissing ? [h('option', { key: '__missing', value: e.model }, e.model + '（清单里没有，可能是旧值）')] : [],
+              ms.map((m) => h('option', { key: m.id, value: m.id }, m.name && m.name !== m.id ? (m.name + ' · ' + m.id) : m.id)))
         return h('div', { key: i, style: Object.assign({}, S.tile, {
           marginBottom: '6px', display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap',
           ...(e.disabled ? { opacity: 0.6 } : {}),
         }) },
           h('span', { style: Object.assign({}, S.mono, S.dim) }, '#' + (i + 1)),
+          // ① 平台下拉（独立一层：只决定"在哪家平台上找"）
           h('select', {
             style: Object.assign({}, S.input, { flex: '1 1 150px', minWidth: '120px' }),
             value: e.provider,
             onChange: (ev) => set(i, 'provider', ev.target.value),
-            title: '渠道 / 免密源',
+            title: '平台（渠道 / 免密源）',
           }, providerOpts.map((o) => h('option', { key: o.value, value: o.value }, o.label))),
+          // ② 跨平台模型搜索（只按模型名过滤；命中后 ③ 变成跨平台清单）
+          h('input', {
+            style: Object.assign({}, S.input, { flex: '0 1 130px', minWidth: '100px' }),
+            value: kw,
+            placeholder: '跨平台搜模型',
+            title: '输入模型关键词（如 qwen）：模型下拉会展开为所有平台的匹配结果',
+            onChange: (ev) => setMq((prev) => Object.assign({}, prev, { [mqKey(e)]: ev.target.value })),
+          }),
+          // ③ 模型下拉（关键词为空 ⇒ 只列所选平台的模型；有命中 ⇒ 跨平台清单）
           h('select', {
             style: Object.assign({}, S.input, { flex: '1 1 200px', minWidth: '150px' }),
-            value: e.model,
-            onChange: (ev) => set(i, 'model', ev.target.value),
-            title: '该渠道可用的模型',
-          },
-            modelMissing ? h('option', { value: e.model }, e.model + '（清单里没有，可能是旧值）') : null,
-            ms.map((m) => h('option', { key: m.id, value: m.id }, m.name && m.name !== m.id ? (m.name + ' · ' + m.id) : m.id))),
+            value: cross.length ? curVal : e.model,
+            onChange: (ev) => {
+              const v = String(ev.target.value || '')
+              if (v.indexOf(sep) >= 0) {
+                // 跨平台选择：平台与模型必须同源，一次性成对写入（保存时仍只提交 {provider, model}）
+                const parts = v.split(sep)
+                setPair(i, parts[0], parts[1])
+              } else {
+                set(i, 'model', v)
+              }
+            },
+            title: cross.length
+              ? '跨平台匹配 ' + cross.length + ' 个：选中会同时切换平台'
+              : '该平台可用的模型（左侧输入关键词可跨平台搜索）',
+          }, modelOpts),
+          cross.length
+            ? h('span', { style: Object.assign({}, S.dim) }, '跨平台命中 ' + cross.length)
+            : (kw.trim()
+                ? h('span', { style: Object.assign({}, S.dim, S.warn) }, '跨平台无匹配（模型下拉仍是本平台的清单）')
+                : null),
           h('select', {
             style: Object.assign({}, S.input, { width: '78px' }),
             value: String(e.tier || 1),
@@ -1617,8 +2015,9 @@ window.__ModuleLoader__.load({
               ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '⚠️ 页面这份链与运行时不一致：保存后需重启插件/宿主才生效')
               : h('div', { style: Object.assign({ marginTop: '6px' }, S.dim) }, '（后端未报告该链是否已应用到运行时）')),
 
-        h('div', { style: { fontWeight: 600, margin: '14px 0 8px' } }, '降级链配置（全部用下拉选择）'),
+        h('div', { style: { fontWeight: 600, margin: '14px 0 8px' } }, '降级链配置（平台与模型分两层 + 跨平台搜索）'),
         h('div', { style: S.dim }, 'T1 最先尝试，失败后依次降级。同 provider+model ⇒ 替换内置条目的 tier；新的 ⇒ 追加。留空的条目保存时会被忽略。'),
+        h('div', { style: S.dim }, '每行三个控件：① 平台下拉（只决定在哪家平台找）② 跨平台搜索框（只输模型关键词）③ 模型下拉（默认只列该平台的模型；搜索有命中时展开为「平台 / 模型」，选中会同时切换平台）。保存提交的仍是 { 平台, 模型 }。'),
 
         cat.error ? h('div', { style: Object.assign({}, S.dim, S.warn) }, '可选项加载失败：' + cat.error + '（仍可保存已有配置）') : null,
         draft.length === 0 ? h('div', { style: Object.assign({ margin: '10px 0' }, S.dim) }, '（空 —— 保存后完全使用内置链）') : null,
@@ -1984,6 +2383,13 @@ window.__ModuleLoader__.load({
       const spendDays = (d.spend && d.spend.days) || []
       const providers = (d.spend && d.spend.providers) || []
       const tokenDays = (d.token && d.token.days) || []
+      // 契约 A3/A4：切换成功口径与 /state 的 routing.switches 同源。
+      // 取数优先级：/ledger 顶层 switches → spend.switches（两种后端形状都吃得下，前端不做假设）。
+      const switches = d.switches || (d.spend && d.spend.switches) || null
+      const swRate = switches && switches.switchSuccessRate != null ? switches.switchSuccessRate + '%' : null
+      const swText = switches
+        ? (Number(switches.total) || 0) + ' 次' + (swRate ? '（成功率 ' + swRate + '）' : '')
+        : '—（账本未返回切换口径）'
 
       return h('div', null,
         h('div', { style: S.card },
@@ -1993,6 +2399,7 @@ window.__ModuleLoader__.load({
           h(KV, { k: '今日调用', v: String(sum.todayCalls ?? 0) }),
           h(KV, { k: '累计调用', v: String(sum.totalCalls ?? 0) }),
           h(KV, { k: '付费调用', v: String(sum.paidCalls ?? 0) + (sum.costUnknown ? '（' + sum.costUnknown + ' 条价格未知）' : '') }),
+          h(KV, { k: '切换成功', v: swText }),
           h(KV, { k: '数据源', v: d.spend && d.spend.ok ? d.spend.file : '未读到 spend.jsonl', dim: true })),
 
         spendDays.length ? h('div', { style: S.card },
@@ -2001,11 +2408,39 @@ window.__ModuleLoader__.load({
             h('span', null, x.date),
             h('span', { style: S.dim }, x.calls + ' 次  ¥' + x.costCNY + '  in ' + x.in + ' / out ' + x.out)))) : null,
 
+        // 渠道 × 模型统计：手写 flex「表格」（不用 <table>）。**不加花费列**：
+        // costCNY 恒 0 是既有缺陷（见 adapter 单价表口径），摆出来只会误导。
         providers.length ? h('div', { style: S.card },
-          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '按渠道'),
-          providers.slice(0, 8).map((x) => h('div', { key: x.provider, style: S.row },
-            h('span', null, x.provider),
-            h('span', { style: S.dim }, x.calls + ' 次  ¥' + x.costCNY)))) : null,
+          h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '渠道 × 模型统计'),
+          h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
+            '切换成功 = 该行「换过候选才成功」的调用数；token 列 = 输入 / 输出。子行是该渠道下调用最多的 3 个模型。'),
+          spendRow({ head: true }, ['渠道 / 模型', '切换成功', '调用', '失败', 'token(in/out)']),
+          providers.slice(0, 8).map((x) => {
+            const models = Object.entries(x.models || {})
+            const chFailed = Number(x.failed) || 0
+            return h('div', { key: x.provider },
+              spendRow({}, [
+                x.provider,
+                String(x.switched ?? 0),
+                String(x.calls ?? 0),
+                { text: String(chFailed), warn: chFailed > 0 },
+                (x.in ?? 0) + ' / ' + (x.out ?? 0),
+              ]),
+              models.slice(0, 3).map(([mid, m]) => {
+                const mFailed = Number(m.failed) || 0
+                return spendRow({ indent: true, dim: true }, [
+                  '└ ' + mid,
+                  String(m.switched ?? 0),
+                  String(m.calls ?? 0),
+                  { text: String(mFailed), warn: mFailed > 0 },
+                  (m.in ?? 0) + ' / ' + (m.out ?? 0),
+                ])
+              }),
+              models.length > 3
+                ? h('div', { style: Object.assign({ paddingLeft: '16px', paddingBottom: '2px' }, S.dim) },
+                    '（另有 ' + (models.length - 3) + ' 个模型未显示）')
+                : null)
+          })) : null,
 
         // 🔴 中断/失败统计（用户要求「页面能看到中断次数与报错」）
         (() => {
@@ -2363,16 +2798,1619 @@ window.__ModuleLoader__.load({
           : null)
     }
 
-    const ZONE_VIEWS = {
-      overview: OverviewZone,
-      sources: SourcesZone, catalog: CatalogZone, chain: ChainZone, pin: PinZone,
-      health: HealthZone, policy: PolicyZone, budget: BudgetZone, saver: SaverZone,
-      observe: ObserveZone, io: IoZone, scope: ScopeZone, diag: DiagZone,
+    // ═══════════════════════════════════════════════════════════════════════
+    // W13 模型与费用设置（design/19 §2 — 人类视角三步走；默认入口 tab）
+    // ═══════════════════════════════════════════════════════════════════════
+    // 步骤1 作用域选择器（所有对话/这个工作区/这个对话/这个团队）
+    // 步骤2 设置项（默认模型 / 允许付费 / 自动切换 / 预算 / 渠道可用清单）
+    // 步骤3 实时状态（最近 5 次请求 / 火山方舟余额 / 高级折叠区）
+    // 锁定态：层 owner=admin 且当前非 admin ⇒ 控件禁用 +「由管理员统一管理」
+    // 保存成功提示「已保存，下次请求生效」；错误走中文文案（explainKind 口径）。
+    const SETTINGS_LAYER_LABEL = { global: '全局', workspace: '工作区', session: '对话', team: '团队', preset: '预设' }
+    const SETTINGS_SOURCE_ORDER = ['team', 'session', 'workspace', 'preset', 'global']
+    const PRIORITY_OPTIONS = [
+      { v: 'free-first', t: '先免费（省钱优先）' },
+      { v: 'balanced', t: '均衡（免费 + 付费混用）' },
+      { v: 'reliability-first', t: '稳定优先（多用付费）' },
+    ]
+    // 错误分类的中文文案（与后端 failure-map 的 explainKind 同口径；后端已给中文时优先用后端）
+    const KIND_TEXT = {
+      AUTH: '凭据无效或未登录', QUOTA: '额度用尽', RATE_LIMIT: '被限流（请求太频繁）',
+      MODEL_NOT_FOUND: '模型名不存在', NOT_FOUND: '端点不存在', REGION_BLOCKED: '地区限制',
+      PERMISSION: '无权限或被风控', INVALID_REQUEST: '请求参数被上游拒绝', TIMEOUT: '上游超时',
+      TRANSPORT: '网络传输失败', SERVER: '上游服务器错误', EMPTY_RESPONSE: '上游返回空内容',
+      UNKNOWN: '未能归类',
     }
 
-    // ── 主设置页（含 Tab）──
+    function getField(obj, path) {
+      return String(path).split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj)
+    }
+    function setField(obj, path, v) {
+      const next = JSON.parse(JSON.stringify(obj || {}))
+      const keys = String(path).split('.')
+      let cur = next
+      for (let i = 0; i < keys.length - 1; i++) {
+        if (!cur[keys[i]] || typeof cur[keys[i]] !== 'object' || Array.isArray(cur[keys[i]])) cur[keys[i]] = {}
+        cur = cur[keys[i]]
+      }
+      cur[keys[keys.length - 1]] = v
+      return next
+    }
+    /** 生成 patch：与层原值 diff；编辑层被清空的字段 ⇒ null（删除恢复继承） */
+    function diffPatch(base, edited) {
+      const out = {}
+      for (const [k, v] of Object.entries(edited || {})) {
+        const b = base && typeof base === 'object' ? base[k] : undefined
+        if (v === null || v === undefined || v === '') {
+          if (b !== undefined && b !== null && b !== '') out[k] = null
+          continue
+        }
+        if (v && typeof v === 'object' && !Array.isArray(v)) {
+          const sub = diffPatch(b && typeof b === 'object' && !Array.isArray(b) ? b : {}, v)
+          if (Object.keys(sub).length > 0) out[k] = sub
+        } else if (b !== v || (Array.isArray(v) && (!Array.isArray(b) || JSON.stringify(b) !== JSON.stringify(v)))) {
+          out[k] = v
+        }
+      }
+      return out
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 需求 #5：这一层跟全局哪里不一样（差异面板）
+    //
+    // 数据来源（真实字段名，见 src/web/settings.js `readSettings` 与 src/config/scope.js
+    // `effectiveConfig`）：GET /settings →
+    //   { layers: [{ scope, id, owner, setKeys, config }],          // 每层已存配置
+    //     effective: { config, layers, byLayer: { global, preset, workspace, session, team } } }
+    // 因此：
+    //   「这一层的已存值」 = layers[scope=pick].config（与保存时算 patch 的 base 同一份）
+    //   「全局值」         = effective.byLayer.global
+    // 只列**这一层自己写过**且与全局不同的叶子路径；全局有、这层没有 = 正常继承，不算差异。
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /** 展开成叶子路径（对象递归；数组整体当一个值，避免 `a.0.b` 这种点号歧义） */
+    function flattenLeafPaths(obj, prefix = '', out = []) {
+      if (obj == null || typeof obj !== 'object' || Array.isArray(obj)) {
+        if (prefix) out.push(prefix)
+        return out
+      }
+      for (const [k, v] of Object.entries(obj)) {
+        if (k === '_meta') continue                      // 权限元数据不是用户设置
+        flattenLeafPaths(v, prefix ? prefix + '.' + k : k, out)
+      }
+      return out
+    }
+
+    /** 值是否相同（对象/数组按 JSON 比） */
+    function sameValue(a, b) {
+      if (Object.is(a, b)) return true
+      if (a && b && typeof a === 'object' && typeof b === 'object') {
+        try { return JSON.stringify(a) === JSON.stringify(b) } catch (_) { return false }
+      }
+      return false
+    }
+
+    /**
+     * 算「当前层 vs 全局层」的差异清单。
+     * @param {object} scopeCfg 当前作用域的已存配置（layers[pick].config）
+     * @param {object} globalCfg 全局层配置（effective.byLayer.global）
+     * @param {(path:string)=>string} [sourceOf] 该路径的生效值来自哪一层（「来源层」列用）
+     * @returns {Array<{path:string, globalValue:any, currentValue:any, source:string|null}>}
+     */
+    function diffAgainstGlobal(scopeCfg, globalCfg, sourceOf) {
+      const out = []
+      for (const path of flattenLeafPaths(scopeCfg || {}).sort()) {
+        const cur = getField(scopeCfg, path)
+        const glob = getField(globalCfg, path)
+        if (sameValue(cur, glob)) continue
+        out.push({
+          path,
+          globalValue: glob,
+          currentValue: cur,
+          source: typeof sourceOf === 'function' ? sourceOf(path) : null,
+        })
+      }
+      return out
+    }
+
+    /** 差异值的展示文案（对象/数组折成一行；没有就说未设） */
+    function diffValueText(v) {
+      if (v === undefined) return '未设'
+      if (v === null) return '未设（清空）'
+      if (typeof v === 'string') return v === '' ? '（空）' : v
+      if (typeof v === 'object') {
+        try {
+          const s = JSON.stringify(v)
+          return s.length > 80 ? s.slice(0, 80) + '…' : s
+        } catch (_) { return String(v) }
+      }
+      return String(v)
+    }
+
+    /** 返回「删掉某个叶子键之后」的新对象（不原地改，供编辑底稿用） */
+    function dropField(obj, path) {
+      const next = JSON.parse(JSON.stringify(obj || {}))
+      const keys = String(path).split('.')
+      let cur = next
+      for (let i = 0; i < keys.length - 1; i++) {
+        cur = cur == null ? null : cur[keys[i]]
+        if (cur == null || typeof cur !== 'object') return next
+      }
+      if (cur && typeof cur === 'object') delete cur[keys[keys.length - 1]]
+      return pruneEmptyObjects(next)
+    }
+
+    /** 清掉被删空的壳（与后端 applyPatch「递归后子对象被删空 ⇒ 一并删除」同口径） */
+    function pruneEmptyObjects(obj) {
+      for (const k of Object.keys(obj || {})) {
+        const v = obj[k]
+        if (v && typeof v === 'object' && !Array.isArray(v)) {
+          pruneEmptyObjects(v)
+          if (Object.keys(v).length === 0) delete obj[k]
+        }
+      }
+      return obj
+    }
+
+    /**
+     * 删掉「某一层」的这个键 = 恢复全局（**不是**把全局值拷进这一层）。
+     *
+     * 契约形状：`PATCH /settings { scope, id?, patch: { <path>: null } }`
+     * （后端 applyPatch 里 null 就是删除该键 ⇒ 该层重新继承上一层/全局）。
+     * 兼容：旧后端只实现了 `POST /settings`（patch 里 null 同样是删除语义）⇒ 405/404 时降级 POST，
+     *       免得新 UI 配旧后端时按钮直接报错装死。
+     */
+    function deleteLayerSetting(scope, id, path) {
+      const body = { scope, patch: setField({}, path, null) }
+      if (scope !== 'global' && id) body.id = id
+      const send = (method) => api('/settings', { method, body: JSON.stringify(body) })
+      return send('PATCH').catch((e) => {
+        const m = String((e && e.message) || e)
+        if (/HTTP 40[45]/.test(m) || /method not allowed|不支持.*方法/i.test(m)) return send('POST')
+        throw e
+      })
+    }
+
+    const DIFF_SCOPE_LABEL = { workspace: '工作区', session: '对话', team: '团队', preset: '预设' }
+
+    /**
+     * 「与全局不同（N 项）」面板（需求 #5）。放在工作区/对话作用域设置页顶部。
+     * props: { scope, diffs, onRestore, busy, disabled }
+     */
+    function GlobalDiffPanel(props) {
+      const diffs = Array.isArray(props.diffs) ? props.diffs : []
+      const scopeText = DIFF_SCOPE_LABEL[props.scope] || props.scope || '这一层'
+      const has = diffs.length > 0
+      const off = props.disabled === true || props.busy === true
+      return h('div', {
+        style: Object.assign({}, S.card, {
+          borderColor: has ? 'rgba(220,160,40,0.45)' : 'rgba(128,128,128,0.25)',
+          background: has ? 'rgba(220,160,40,0.06)' : S.card.background,
+        }),
+        'data-diff-panel': props.scope || 'scope',
+      },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } },
+          has ? '与全局不同（' + diffs.length + ' 项）' : '与全局一致',
+          h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) },
+            '作用域：' + scopeText + '（只算已保存的改动）')),
+        h('div', { style: Object.assign({}, S.dim, has ? { marginBottom: '8px' } : null) },
+          has
+            ? '这些项在这一层被改过，所以这个' + scopeText + '用的不是全局值。点「恢复全局」= 删掉这一层的该项、重新继承全局（不是把全局值拷进来）。'
+            : '这一层还没有任何设置跟全局不同；没设的项一律继承全局。'),
+        has ? h('div', null,
+          h('div', { style: Object.assign({}, S.row, { fontWeight: 600 }) },
+            h('span', { style: { flex: '1 1 34%' } }, '配置路径'),
+            h('span', { style: { flex: '1 1 22%' } }, '全局值'),
+            h('span', { style: { flex: '1 1 22%' } }, '当前值'),
+            h('span', { style: { flex: '0 0 64px' } }, '来源层'),
+            h('span', { style: { flex: '0 0 84px', textAlign: 'right' } }, '操作')),
+          diffs.map((d) => h('div', {
+            key: d.path, style: Object.assign({}, S.row, { alignItems: 'center', gap: '6px' }),
+            'data-diff-path': d.path,
+          },
+            h('span', { style: Object.assign({ flex: '1 1 34%' }, S.mono) }, d.path),
+            h('span', { style: { flex: '1 1 22%', opacity: 0.75, wordBreak: 'break-all' } }, diffValueText(d.globalValue)),
+            h('span', { style: { flex: '1 1 22%', fontWeight: 600, wordBreak: 'break-all' } }, diffValueText(d.currentValue)),
+            h('span', { style: { flex: '0 0 64px' } }, SETTINGS_LAYER_LABEL[d.source] || '全局'),
+            h('span', { style: { flex: '0 0 84px', textAlign: 'right' } },
+              h('button', {
+                style: Object.assign({}, S.btn(false), off ? { opacity: 0.5, cursor: 'not-allowed' } : null),
+                disabled: off,
+                title: '删掉这一层对「' + d.path + '」的设置，重新用全局值',
+                onClick: off ? undefined : () => { if (typeof props.onRestore === 'function') props.onRestore(d.path) },
+                'data-diff-restore': d.path,
+              }, props.busy ? '恢复中…' : '恢复全局')))))
+        : null,
+      )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 需求 #6：模型选择器的可见性（白名单 + 渲染兜底）
+    //
+    // 用户口径：对话里选模型的列表只展示 deepseek 系 / 用户自加 API / 免费可用渠道 /
+    // 华为云；其它渠道包不展示。
+    // 分工：**默认隐藏集合以后端 `sources.hidden` 为准**（计划 §WP-B，不在 UI 写死渠道名），
+    //       前端只做两件事：
+    //         ① 渲染兜底：条目带 `hidden:true` 或 id 在 `sources.hidden` 里 ⇒ 不渲染；
+    //         ② 后端给了来源分类（`kind`）时按白名单兜一层（渠道包非白名单 ⇒ 不展示）。
+    // 条目来源未知（老后端没给 kind/flags）⇒ 不据此隐藏，交给后端 hidden 决定（零回归）。
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /** 华为云渠道包（CodeArts / MaaS）——用户点名要求保留的选择器入口 */
+    const HUAWEI_MODEL_PROVIDERS = new Set(['codearts', 'officeace', 'maas', 'huaweicloud'])
+
+    /**
+     * 该条目的**来源自身**是否被判为「不展示」（只含 hidden 口径，不含白名单）。
+     * 与 `isModelSourceVisible` 分开，是因为页面要如实说明「有几个渠道是被『不展示』挡的」
+     * —— 白名单挡掉的（qoder/loomy 这类渠道包）不属于「不展示」开关的范畴，混在一起就是撒谎。
+     * @param {object} entry
+     * @param {string[]} [hiddenList]
+     * @returns {boolean}
+     */
+    function isModelSourceHidden(entry, hiddenList) {
+      if (!entry || typeof entry !== 'object') return false
+      const id = String(entry.provider || entry.id || entry.channelId || '')
+      if (entry.hidden === true) return true
+      if (Array.isArray(hiddenList) && hiddenList.includes(id)) return true
+      // 别名归一：kilo-free ≡ kilo（后端写的是归一 id，目录里可能带旧别名）
+      if (Array.isArray(hiddenList)) {
+        const base = id.replace(/-free$|-vision$/, '')
+        if (base !== id && hiddenList.includes(base)) return true
+        if (base !== id && hiddenList.includes(id + '-free')) return true
+      }
+      return false
+    }
+
+    /**
+     * 该模型来源是否允许出现在「选模型」列表里。
+     * @param {object} entry 目录条目（/settings.models 分组 或 /routing/catalog 条目）
+     * @param {string[]} [hiddenList] 生效配置里的 `sources.hidden`（用户「不展示」清单）
+     * @returns {boolean}
+     */
+    function isModelSourceVisible(entry, hiddenList) {
+      if (!entry || typeof entry !== 'object') return false
+      const id = String(entry.provider || entry.id || entry.channelId || '')
+      // ① 渲染兜底：后端已判定不展示 / 用户在设置里点过「不展示」⇒ 一律不渲染
+      if (isModelSourceHidden(entry, hiddenList)) return false
+      // ③ 白名单：deepseek 系 / 用户自加 API / 免费免密 / 华为云
+      if (/^deepseek/i.test(id)) return true
+      if (entry.userAdded === true || entry.kind === 'user-api' || entry.kind === 'custom') return true
+      if (entry.kind === 'keyless') return true                       // 免密源 = 免费可用
+      if (HUAWEI_MODEL_PROVIDERS.has(id)) return true
+      const kind = String(entry.kind || '')
+      if (/^channel/.test(kind)) {
+        // 其它渠道包：只有明确「免费可用」才展示
+        return entry.free === true || entry.billing === 'free' || entry.billingTier === 'free_only'
+      }
+      return true   // 来源未知（老后端没给 kind/flags）⇒ 不据此隐藏
+    }
+
+    /** 从一张模型分组清单里挑出可展示的（保持原顺序） */
+    function visibleModelSources(list, hiddenList) {
+      return (Array.isArray(list) ? list : []).filter((e) => isModelSourceVisible(e, hiddenList))
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 设置页新增卡片（联网搜索 / 识图 / 子智能体路由 / 火山方舟）
+    //
+    // 共同形态：卡片本身**不提交**，只把改动写进 SettingsPage 的编辑底稿（fset），
+    // 保存统一由页面底部「保存这一层」按钮走 POST /settings（patch 语义：只写改动字段）。
+    // 这样「作用域 / 管理员锁定 / diffPatch 只发差异」三件事只存在一处，不会各处漂移。
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /** 联网搜索可选源（id 必须与后端 PARSERS 完全一致，写错后端会回「未知搜索源」） */
+    const SEARCH_SOURCE_OPTIONS = [
+      { id: 'bing-rss', t: 'Bing RSS' },
+      { id: 'bing-html', t: 'Bing 网页' },
+      { id: 'sogou', t: '搜狗' },
+      { id: 'mwmbl', t: 'Mwmbl' },
+    ]
+
+    /**
+     * 「联网搜索」卡片（字段路径 search.*）。
+     * 右下角「测试搜索」直接打 POST /search/run（真联网、真打源站），
+     * 因此把**每个源**的 ok/耗时/条数/错误都摊开显示——用户才能判断「是我配错了，还是这家源挂了」。
+     */
+    function SearchSettingsCard(props) {
+      const fv = props.fv
+      const fset = props.fset
+      const off = props.disabled === true
+      const [q, setQ] = react.useState('')
+      const [res, setRes] = react.useState(null)
+      const [busy, setBusy] = react.useState(false)
+
+      const enabled = fv('search.enabled') !== false
+      const picked = Array.isArray(fv('search.sources')) ? fv('search.sources') : []
+      const toggleSource = (id, on) => {
+        const next = picked.filter((x) => x !== id)
+        if (on) next.push(id)
+        fset('search.sources', next)
+      }
+      /** 源 id ⇒ 中文源名（后端新增的未知 id 原样显示，不做猜测，也不显示成空白） */
+      const sourceLabel = (id) => {
+        const hit = SEARCH_SOURCE_OPTIONS.find((o) => o.id === id)
+        return hit ? hit.t : String(id || '?')
+      }
+
+      /** 数字项（毫秒/次数/条数）：空字符串 ⇒ null（= 删除该字段，回落到默认值） */
+      const numField = (path, label, unit, hint) => h('div', { style: { marginBottom: '10px' } },
+        h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, label + (unit ? '（' + unit + '）' : '')),
+        hint ? h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) }, hint) : null,
+        h('input', {
+          type: 'number', min: 0, step: 1, disabled: off,
+          style: Object.assign({}, S.input, { width: '150px' }),
+          value: fv(path) == null ? '' : fv(path),
+          placeholder: '默认',
+          onChange: (e) => fset(path, e.target.value === '' ? null : Number(e.target.value)),
+        }))
+
+      const runTest = () => {
+        const query = String(q || '').trim()
+        if (!query) { setRes({ ok: false, error: '先输入一个搜索词' }); return }
+        setBusy(true); setRes(null)
+        api('/search/run', { method: 'POST', body: JSON.stringify({ q: query }) })
+          .then((r) => setRes(r))
+          .catch((e) => setRes({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => setBusy(false))
+      }
+
+      return h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '联网搜索'),
+        h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+          '多源真实搜索：受控并发（同时最多 2 个源）、整轮总预算到点就用已拿到的部分结果（超时不算失败）。'),
+        h('div', { style: { marginBottom: '10px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '开启联网搜索'),
+          h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) }, '关掉 = 搜索接口直接回「搜索已关闭」，一个请求都不发。'),
+          h(Toggle, { value: enabled, disabled: off, onChange: (v) => fset('search.enabled', v) })),
+        h('div', { style: { marginBottom: '10px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '用哪些搜索源'),
+          h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) }, '全不选 = 用默认四源。至少留一个可用的源。'),
+          SEARCH_SOURCE_OPTIONS.map((o) => h('div', { key: o.id, style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '2px 0' } },
+            h(Toggle, { value: picked.includes(o.id), disabled: off, onChange: (v) => toggleSource(o.id, v) }),
+            h('span', null, o.t + '（' + o.id + '）')))),
+        numField('search.budgetMs', '单次搜索最多等多久', 'ms', '整轮预算（不是每源预算）；到点就用已拿到的部分结果，不算失败'),
+        numField('search.cacheTtlMs', '结果缓存多久', 'ms', '同一个 URL 在缓存期内不重复抓取'),
+        numField('search.ratePerMin', '每分钟最多搜几次', '次 / 分钟', '按源独立计数桶，防止把源站刷爆'),
+        numField('search.maxResults', '最多返回几条', '条', '融合去重后的条数（后端上限 50）'),
+
+        h('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid rgba(128,128,128,0.18)' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '4px' } }, '测试搜索（真联网）'),
+          h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+            h('input', {
+              style: Object.assign({}, S.input, { width: '240px' }),
+              value: q,
+              placeholder: '输入搜索词（真打源站）',
+              onChange: (e) => setQ(e.target.value),
+            }),
+            h('button', { style: S.btn(true), onClick: runTest, disabled: busy }, busy ? '搜索中…' : '测试搜索')),
+          res ? h('div', { style: { marginTop: '8px' } },
+            h('div', { style: { fontWeight: 600 } },
+              (res.ok ? '✅ 搜索完成' : '❌ 搜索失败') + (res.q ? '：' + res.q : '')),
+            res.error ? h('div', { style: Object.assign({}, S.mono, S.bad) }, res.error) : null,
+            res.timedOut
+              ? h('div', { style: Object.assign({ marginTop: '4px' }, S.dim, S.warn) },
+                  '⚠️ 超时（单次搜索最多等 ' + (res.budgetMs != null ? res.budgetMs + 'ms' : '？') + '，已到点）：下面是已拿到的部分结果')
+              : null,
+            (res.sources || []).length
+              ? h('div', { style: { marginTop: '6px' } },
+                h('div', { style: Object.assign({ fontWeight: 600 }, S.dim) }, '各源状态'),
+                res.sources.map((x, i) => h('div', { key: i, style: S.row },
+                  h('span', null, (x.ok ? '✅ ' : '❌ ') + sourceLabel(x.id)),
+                  h('span', { style: Object.assign({ textAlign: 'right' }, S.dim, x.ok ? null : S.warn) },
+                    x.ok ? ((x.ms || 0) + 'ms · ' + (x.count || 0) + ' 条') : (x.error || '失败')))))
+              : null,
+            (res.results || []).length
+              ? h('div', { style: { marginTop: '8px' } },
+                h('div', { style: Object.assign({ fontWeight: 600 }, S.dim) },
+                  '结果（共 ' + (res.total != null ? res.total : (res.results || []).length) + ' 条'
+                  + ((res.results || []).length > 10 ? '，最多列前 10 条' : '') + '）'),
+                // 后端上限 50 条；页面只列前 10 条，避免一次塞几百行把设置页拖长
+                (res.results || []).slice(0, 10).map((r, i) => h('div', { key: i, style: Object.assign({}, S.row, { alignItems: 'baseline' }) },
+                  h('span', { style: { minWidth: 0, wordBreak: 'break-all' } },
+                    h('a', { href: r.url, target: '_blank', rel: 'noopener noreferrer', style: S.link }, r.title || r.url),
+                    h('span', { style: Object.assign({ marginLeft: '6px' }, S.dim) }, '· 来源 ' + sourceLabel(r.source))),
+                  h('span', { style: Object.assign({}, S.dim, S.mono) }, String(r.url || '').slice(0, 60)))))
+              : (res.ok ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim) }, '（没有结果：换个搜索词，或看上面各源状态）') : null))
+          : null))
+    }
+
+    /** 识图四档（与 config/store.js 的 DEFAULTS.vision.mode 完全一致；顺序 = 由安全到花钱） */
+    const VISION_MODES = [
+      { v: 'off', t: '关闭（不出网）', d: '图片只留在本机，完全不上传。最安全，也最省事。' },
+      { v: 'local', t: '本机模型', d: '用你自己装在本机的视觉模型看图；不出网，但要自己把服务跑起来。' },
+      { v: 'free-cloud', t: '免费云模型（推荐）', d: '把图片发给免费视觉模型识别成文字；免费，但需要你显式同意出网。' },
+      { v: 'paid-cloud', t: '付费云模型', d: '用付费视觉模型看图，效果最好，会产生费用（仍受付费闸门与预算限额约束）。' },
+    ]
+
+    /**
+     * 「识图（集成识图）」卡片（字段路径 vision.*）。
+     * 🔴 mode=off 时下面 5 项**全部置灰（disabled）并提示「当前不出网，以下配置不生效」**——
+     *    关闭档位下还让人填模型/缓存/上限，只会让人以为「填了就出网」。
+     */
+    function VisionSettingsCard(props) {
+      const fv = props.fv
+      const fset = props.fset
+      const locked = props.disabled === true
+      const mode = fv('vision.mode') || 'off'
+      const off = mode === 'off'
+      const subOff = locked || off
+      const consented = fv('vision.consented') === true
+      const needConsent = mode === 'free-cloud' || mode === 'paid-cloud'
+      const bytesRaw = fv('vision.maxImageBytes')
+      const mibVal = bytesRaw == null || bytesRaw === ''
+        ? ''
+        : Math.round((Number(bytesRaw) / 1048576) * 100) / 100
+
+      const numField = (path, label, unit, hint, value, onChange, disabled) => h('div', { style: { marginBottom: '10px' } },
+        h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, label + (unit ? '（' + unit + '）' : '')),
+        hint ? h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) }, hint) : null,
+        h('input', {
+          type: 'number', min: 0, step: 1, disabled,
+          style: Object.assign({}, S.input, { width: '150px' }),
+          value,
+          placeholder: '默认',
+          onChange,
+        }))
+
+      return h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '识图（集成识图）'),
+        h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) },
+          '让看不了图的模型也能获得图片内容：先把图片交给视觉模型转述成文字，再交给主模型。'),
+        h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+          '下面的档位决定图片要不要出网、出到哪一步，以及出网时的上限；关闭档位下图片永不出本机。'),
+        h('div', { style: { marginBottom: '10px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '4px' } }, '识图方式'),
+          VISION_MODES.map((m) => h('div', {
+            key: m.v,
+            onClick: locked ? undefined : () => fset('vision.mode', m.v),
+            style: {
+              cursor: locked ? 'not-allowed' : 'pointer', padding: '6px 8px', marginBottom: '4px', borderRadius: '6px',
+              border: '1px solid ' + (mode === m.v ? 'rgba(64,160,96,0.55)' : 'rgba(128,128,128,0.25)'),
+              background: mode === m.v ? 'rgba(64,160,96,0.10)' : 'transparent',
+              opacity: locked ? 0.6 : 1,
+            },
+          },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+              h('span', { style: { fontWeight: mode === m.v ? 600 : 500 } }, m.t),
+              mode === m.v ? h('span', { style: S.badge('good') }, '当前') : null),
+            h('div', { style: Object.assign({ marginTop: '2px' }, S.dim) }, m.d)))),
+        off
+          ? h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim, S.warn) },
+              '当前不出网，以下配置不生效（改成「本机模型 / 免费云模型 / 付费云模型」后才会用上）。')
+          : null,
+        h('div', { style: { marginBottom: '10px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '允许云端识图（出网同意）'),
+          h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) },
+            needConsent
+              ? '免费/付费云模型必须显式同意才会上传图片；关掉 = 即使选了云模型也不出网。'
+              : '只有选「免费云模型 / 付费云模型」时才有意义（当前档位不出网）。'),
+          h(Toggle, { value: consented, disabled: subOff || !needConsent, onChange: (v) => fset('vision.consented', v) })),
+        h('div', { style: { marginBottom: '10px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '用哪个视觉模型'),
+          h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) },
+            '留空 = 默认 Qwen2.5-VL-72B-Instruct；也可以填你自己的视觉模型名（必须与所配平台的模型 id 完全一致）。'),
+          h('input', {
+            style: Object.assign({}, S.input, { width: '320px', maxWidth: '100%' }),
+            value: fv('vision.model') == null ? '' : String(fv('vision.model')),
+            disabled: subOff,
+            placeholder: '默认 Qwen2.5-VL-72B-Instruct',
+            onChange: (e) => fset('vision.model', e.target.value === '' ? null : e.target.value),
+          })),
+        numField('vision.cacheSize', '结果缓存条数', '条', '同一张图重复识别直接命中缓存，省时省钱',
+          fv('vision.cacheSize') == null ? '' : fv('vision.cacheSize'),
+          (e) => fset('vision.cacheSize', e.target.value === '' ? null : Math.max(0, Math.round(Number(e.target.value)))), subOff),
+        numField('vision.maxImagesPerTurn', '每轮最多几张图', '张', '一次对话里最多识别多少张（多出来的会被跳过）',
+          fv('vision.maxImagesPerTurn') == null ? '' : fv('vision.maxImagesPerTurn'),
+          (e) => fset('vision.maxImagesPerTurn', e.target.value === '' ? null : Math.max(0, Math.round(Number(e.target.value)))), subOff),
+        h('div', { style: { marginBottom: '10px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '单张图片最大（MiB）'),
+          h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) }, '超过就拒绝，不会悄悄压缩后上传'),
+          h('input', {
+            type: 'number', min: 0, step: 0.5, disabled: subOff,
+            style: Object.assign({}, S.input, { width: '150px' }),
+            value: mibVal,
+            placeholder: '5',
+            // 界面上按 MiB 显示，落盘仍是字节（vision.maxImageBytes），避免"单位在两层之间漂移"
+            onChange: (e) => fset('vision.maxImageBytes', e.target.value === ''
+              ? null
+              : Math.round(Number(e.target.value) * 1048576)),
+          })))
+    }
+
+    /** 子智能体路由三选项（契约 E3；顺序 = UI 顺序，不许乱） */
+    const SUBAGENT_MODE_OPTIONS = [
+      {
+        v: 'auto',
+        t: '选项一：不跟随路由，自动切换',
+        d: '子智能体不继承上级授权，由 myfree 按当前可用性自动选路。这是今天的默认行为。',
+      },
+      {
+        v: 'pinned',
+        t: '选项二：不跟随路由，后续仍由全局或单独设置兜底（选定一个模型）',
+        d: '先选定一个模型（如某家免费旗舰）；它不可用时按下面的「兜底」继续走。',
+      },
+      {
+        v: 'follow',
+        t: '选项三：跟随路由，后续仍由全局或单独设置兜底',
+        d: '子智能体跟着主对话的选路结果走；主链都不可用时按下面的「兜底」继续走。',
+      },
+    ]
+
+    /**
+     * 「子智能体路由」卡片（写 subagentRouting.{mode, model, fallback}）。
+     * 🔴 「不跟随」≠「不用全局设置」：三种模式都必须保留兜底层，
+     *    否则 pinned 的模型一挂就直接失败（后端 validateSubagentRouting 同口径）。
+     */
+    function SubagentRoutingCard(props) {
+      const fv = props.fv
+      const fset = props.fset
+      const locked = props.disabled === true
+      const groups = Array.isArray(props.models) ? props.models : []
+      const mode = fv('subagentRouting.mode') || 'auto'
+      const model = fv('subagentRouting.model') || ''
+      const fallback = fv('subagentRouting.fallback') || 'global'
+      const needModel = mode === 'pinned'
+      const needFallback = mode === 'pinned' || mode === 'follow'
+
+      return h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '子智能体路由'),
+        h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) },
+          '选了一个对话后，子智能体默认不跟随上级对话的模型，由 myfree 接手自动切换。'),
+        h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+          '管的是「派出去的子智能体用什么模型」。三选一；后两种都要指定兜底，避免主选不可用时直接失败。'),
+        SUBAGENT_MODE_OPTIONS.map((o) => h('div', {
+          key: o.v,
+          onClick: locked ? undefined : () => fset('subagentRouting.mode', o.v),
+          style: {
+            cursor: locked ? 'not-allowed' : 'pointer', padding: '6px 8px', marginBottom: '4px', borderRadius: '6px',
+            border: '1px solid ' + (mode === o.v ? 'rgba(64,160,96,0.55)' : 'rgba(128,128,128,0.25)'),
+            background: mode === o.v ? 'rgba(64,160,96,0.10)' : 'transparent',
+            opacity: locked ? 0.6 : 1,
+          },
+        },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+            // 视觉上是 radio，语义上是「点整张卡片」——与识图档位、作用域卡片一致
+            h('span', {
+              style: {
+                display: 'inline-block', width: '12px', height: '12px', borderRadius: '50%', flexShrink: 0,
+                border: '2px solid ' + (mode === o.v ? 'var(--dsw-alias-state-success-primary)' : 'rgba(128,128,128,0.6)'),
+                background: mode === o.v ? 'var(--dsw-alias-state-success-primary)' : 'transparent',
+              },
+            }),
+            h('span', { style: { fontWeight: mode === o.v ? 600 : 500 } }, o.t)),
+          h('div', { style: Object.assign({ marginTop: '2px' }, S.dim) }, o.d))),
+
+        needModel
+          ? h('div', { style: { marginTop: '8px' } },
+            h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '固定用哪个模型'),
+            h('select', {
+              style: Object.assign({}, S.input, { width: '300px', maxWidth: '100%' }),
+              value: model,
+              disabled: locked,
+              onChange: (e) => fset('subagentRouting.model', e.target.value || null),
+            },
+              h('option', { value: '' }, '请选择一个模型…'),
+              groups.map((g) => h('optgroup', { key: g.provider, label: g.label },
+                (g.models || []).map((m) => h('option', { key: g.provider + '/' + m.id, value: m.id }, m.name || m.id))))),
+            !model
+              ? h('div', { style: Object.assign({ marginTop: '4px' }, S.dim, S.warn) },
+                  '选了「固定用一个模型」就必须选一个模型，否则后端会拒绝保存。')
+              : null)
+          : null,
+
+        needFallback
+          ? h('div', { style: { marginTop: '8px' } },
+            h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '兜底：主选不可用时怎么办'),
+            h('select', {
+              style: Object.assign({}, S.input, { width: '300px', maxWidth: '100%' }),
+              value: fallback,
+              disabled: locked,
+              onChange: (e) => fset('subagentRouting.fallback', e.target.value),
+            },
+              h('option', { value: 'global' }, '用全局链兜底'),
+              h('option', { value: 'scope' }, '用本层单独设置的链兜底')),
+            h('div', { style: Object.assign({ marginTop: '3px' }, S.dim) },
+              '「本层」= 上面①选中的作用域这一层自己配的链；这一层没配过链的话，仍然回落到全局。'))
+          : null)
+    }
+
+    /**
+     * 「火山方舟余额」卡片（/cs-myfree/cash 的 ark 分支；三分支口径见 src/web/cash.js 文件头）。
+     *
+     * 三分支（顺序不可变）：live（主账号 AK/SK 查询成功）→ estimated（本地账本近 30 天估算）
+     * → error（连推理 Key 都没有）。
+     * 🔴 红线：estimated 分支的**任何**文案里都不许出现「官方 / 实时 / live」——
+     *    那是把估算伪装成账单，属于欺骗性展示。这里连「账单」都只写「账本估算」。
+     */
+    function ArkCard(props) {
+      const ark = props.ark
+      const onRefresh = props.onRefresh
+      const src = ark && ark.source
+      const total = ark && ark.total != null
+        ? (ark.currency === 'CNY' ? '¥' : String(ark.currency || '') + ' ') + Number(ark.total).toFixed(2)
+        : null
+      const fmtTs = (ms) => (ms ? new Date(Number(ms)).toLocaleString('zh-CN', { hour12: false }) : '—')
+
+      let badge = null
+      let note = '加载中…'
+      if (ark) {
+        if (src === 'live') {
+          badge = h('span', { style: S.badge('good') }, '实时')
+          note = '实时查询成功（已配置主账号 AK/SK）· 币种 ' + (ark.currency || '—') + ' · 查询时间 ' + fmtTs(ark.fetchedAt)
+            + (ark.period && ark.period.fromMs ? ' · 统计区间 ' + fmtTs(ark.period.fromMs) + ' 至 ' + fmtTs(ark.period.toMs) : '')
+        } else if (src === 'estimated') {
+          badge = h('span', { style: S.badge('warn') }, '估算')
+          note = '估算值：本地账本近 30 天 ark 渠道消耗合计，不等于账单数字'
+            + (ark.note ? '；' + ark.note : '')
+        } else if (src === 'error') {
+          badge = h('span', { style: S.badge('warn') }, '不可用')
+          note = ark.error || '余额不可用'
+        } else {
+          note = '来源状态未知：' + JSON.stringify(src)
+        }
+      }
+
+      return h('div', { style: S.card },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' } },
+          h('div', { style: { fontWeight: 600 } }, '火山方舟余额', badge),
+          h('span', {
+            style: S.btn(false),
+            onClick: () => (typeof onRefresh === 'function' ? onRefresh() : null),
+          }, ark ? '刷新' : '重新查询')),
+        h('div', {
+          style: {
+            fontSize: '22px', fontWeight: 700, margin: '2px 0 4px',
+            color: total ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-secondary)',
+          },
+        }, total || '—'),
+        h('div', { style: Object.assign({}, S.dim, src === 'error' ? S.warn : null) }, note),
+        src === 'estimated'
+          ? h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) },
+              '口径：' + (ark.basis || 'ledger-30d') + '（只用本插件自己的账本，不读任何外部账单接口）')
+          : null,
+        src === 'error'
+          ? h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) },
+              '需要主账号 AK/SK 才能查真实账单。怎么配：在宿主凭据库（或环境变量）添加 ARK_API_KEY——'
+              + '这是火山方舟的推理 Key，只能用来调模型、查不了账单；要账单级数字，还得加主账号 AK/SK'
+              + '（VOLC_ACCESS_KEY_ID / VOLC_SECRET_ACCESS_KEY）。')
+          : null)
+    }
+
+    /**
+     * 「路由基本规则」区块（契约 B：routing.rules；旧称「复杂路由基本规则」）。
+     *
+     * 🔴 定位：**规则说明 + 统计 + 设置**，不是开关面板 —— 用户明确要求「不要加任何开关」。
+     * 所以这里没有总开关，只有：当前策略 / 排序键 / 权重 / 过滤层 / 空集兜底 / 冷却参数 /
+     * 每家闸门统计 / 可编辑设置项（后端保证每个 path 真能 patch 生效）。
+     */
+    function RoutingRulesCard(props) {
+      const rules = props.rules
+      const [draft, setDraft] = react.useState({})
+      const [msg, setMsg] = react.useState(null)
+      const [busy, setBusy] = react.useState('')
+
+      if (!rules) {
+        return h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '路由基本规则'),
+          h('div', { style: S.dim },
+            '后端未返回 routing.rules（需要较新版本的后端）：规则说明与逐项设置暂时不可用，选路仍按默认策略执行。'))
+      }
+
+      /** 编辑底稿优先，否则用后端给的生效值 */
+      const valOf = (path, fallback) => (Object.prototype.hasOwnProperty.call(draft, path) ? draft[path] : fallback)
+      const setVal = (path, v) => setDraft((p) => Object.assign({}, p, { [path]: v }))
+
+      /** "a.b.c" ⇒ { a: { b: { c: value } } }（POST /settings 的 patch 形状） */
+      const patchOfPath = (path, value) => {
+        const out = {}
+        let cur = out
+        const keys = String(path).split('.')
+        for (let i = 0; i < keys.length - 1; i++) { cur[keys[i]] = {}; cur = cur[keys[i]] }
+        cur[keys[keys.length - 1]] = value
+        return out
+      }
+
+      const savePath = (path, value) => {
+        setBusy(path); setMsg(null)
+        api('/settings', { method: 'POST', body: JSON.stringify({ scope: 'global', patch: patchOfPath(path, value) }) })
+          .then((r) => {
+            if (!r || r.ok === false) setMsg({ ok: false, error: (r && r.error) || '保存失败' })
+            else setMsg({ ok: true, text: '✅ 已保存 ' + path + '（全局层），下次请求生效' })
+          })
+          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => setBusy(''))
+      }
+
+      /** 一项可设置项的控件（select / bool / number；number 可能有多条 paths 逐家渲染） */
+      const controlOf = (item) => {
+        const paths = Array.isArray(item.paths) && item.paths.length ? item.paths : [item.path]
+        if (item.type === 'bool') {
+          return h('div', null,
+            h(Toggle, {
+              value: valOf(item.path, item.value) === true,
+              onChange: (v) => { setVal(item.path, v); savePath(item.path, v) },
+            }),
+            busy === item.path ? h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) }, '保存中…') : null)
+        }
+        if (item.type === 'select') {
+          const opts = Array.isArray(item.options) ? item.options : []
+          return h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+            h('select', {
+              style: Object.assign({}, S.input, { width: '240px' }),
+              value: String(valOf(item.path, item.value) ?? ''),
+              onChange: (e) => { setVal(item.path, e.target.value); savePath(item.path, e.target.value) },
+            }, opts.map((o) => h('option', { key: String(o), value: String(o) }, PRIORITY_TEXT[o] || String(o)))),
+            busy === item.path ? h('span', { style: S.dim }, '保存中…') : null)
+        }
+        // number：sources.limits.<id> 这类「逐家」项 ⇒ 每条 path 一个输入框
+        const multi = paths.length > 1
+        return h('div', { style: multi ? { display: 'flex', flexWrap: 'wrap', gap: '8px 14px' } : null },
+          paths.map((p) => {
+            const short = multi ? String(p).split('.').pop() : null
+            const raw = valOf(p, multi ? (item.value || {})[short] : item.value)
+            return h('div', { key: p, style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+              short ? h('span', { style: S.dim }, short) : null,
+              h('input', {
+                type: 'number', min: 0, step: 1,
+                style: Object.assign({}, S.input, { width: '110px' }),
+                value: raw == null ? '' : raw,
+                onChange: (e) => setVal(p, e.target.value === '' ? null : Number(e.target.value)),
+              }),
+              h('span', {
+                style: Object.assign({}, S.btn(false), busy === p ? { opacity: 0.5 } : null),
+                onClick: () => savePath(p, valOf(p, raw) == null ? null : Number(valOf(p, raw))),
+              }, busy === p ? '…' : '保存'))
+          }))
+      }
+
+      const gateEntries = Object.entries(rules.gate || {})
+      const filters = Array.isArray(rules.filters) ? rules.filters : []
+      const cooldowns = rules.cooldowns || {}
+      const fallbackInfo = rules.emptySetFallback || {}
+      const configurable = Array.isArray(rules.configurable) ? rules.configurable : []
+
+      // ── 各小节先各自算成节点，最后再拼进外层 ──
+      // 为什么要拆：这个区块有 7 张卡，直接嵌套写会让括号深度到 6+，
+      // 一旦错一个 `)` 整个 client bundle 就解析失败（2026-11-05 事故同款后果）。
+      const policyNodes = (rules.policyOptions || []).map((o) => h('div', {
+        key: o.id,
+        // 非 active 的一律压暗（S.dim 的 opacity 口径）：一眼就能看出「当前在用哪条策略」
+        style: {
+          padding: '5px 8px', marginBottom: '4px', borderRadius: '6px', opacity: o.active ? 1 : 0.65,
+          border: '1px solid ' + (o.active ? 'rgba(64,160,96,0.55)' : 'rgba(128,128,128,0.2)'),
+          background: o.active ? 'rgba(64,160,96,0.10)' : 'transparent',
+        },
+      },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+          h('span', { style: { fontWeight: o.active ? 600 : 500 } }, o.label || o.id),
+          o.active ? h('span', { style: S.badge('good') }, '当前') : null),
+        h('div', { style: { marginTop: '2px', fontSize: '12px' } }, o.desc || ''),
+        o.evidence ? h('div', { style: Object.assign({ marginTop: '2px' }, S.dim) }, '实测依据：' + o.evidence) : null))
+
+      const policyCard = h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '策略（当前：' + (rules.policy || '—') + '）'),
+        policyNodes)
+
+      const orderCard = h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '排序键与权重'),
+        h('div', { style: { marginBottom: '4px' } }, rules.orderHuman || '—'),
+        h('div', { style: Object.assign({ marginBottom: '6px' }, S.mono, S.dim) }, (rules.order || []).join(' → ')),
+        h(KV, { k: '拥挤度权重（load）', v: String((rules.weights && rules.weights.load) ?? '—') }),
+        h(KV, { k: '失败率权重（fail）', v: String((rules.weights && rules.weights.fail) ?? '—') }))
+
+      const filterNodes = filters.map((f) => h('div', {
+        key: f.id || String(f.position),
+        style: Object.assign({}, S.row, { alignItems: 'baseline' }),
+      },
+        h('span', { style: { minWidth: 0 } },
+          h('span', { style: S.mono }, '#' + f.position + ' '),
+          h('span', { style: { fontWeight: 500 } }, f.label || f.id),
+          // strict=true ⇒ 黄徽标「严格」；false ⇒ 灰徽标「可放宽」（S.badge 的 dim 档）
+          h('span', { style: S.badge(f.strict ? 'warn' : 'dim') }, f.strict ? '严格' : '可放宽')),
+        h('span', { style: Object.assign({ textAlign: 'right' }, S.dim) }, f.effect || '')))
+
+      const filterCard = h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '过滤层（按 position 依次执行）'),
+        filters.length === 0 ? h('div', { style: S.dim }, '（后端未返回过滤层）') : filterNodes)
+
+      const fallbackCard = h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '空集兜底范围'),
+        h('div', { style: S.dim }, fallbackInfo.note || '—'),
+        (fallbackInfo.appliesTo || []).length
+          ? h('div', { style: Object.assign({ marginTop: '3px' }, S.dim) }, '会兜底：' + (fallbackInfo.appliesTo || []).join(' / '))
+          : null,
+        (fallbackInfo.excludes || []).length
+          ? h('div', { style: Object.assign({ marginTop: '2px' }, S.dim, S.warn) }, '永不放宽：' + (fallbackInfo.excludes || []).join(' / '))
+          : null)
+
+      const cooldownCard = h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '冷却参数（当前生效值）'),
+        h(KV, { k: '并发满后等（busyMs）', v: String(cooldowns.busyMs ?? '—') + ' ms' }),
+        h(KV, { k: '被限流后等（rateMs）', v: String(cooldowns.rateMs ?? '—') + ' ms' }),
+        h(KV, { k: '退避封顶（maxMs）', v: String(cooldowns.maxMs ?? '—') + ' ms' }),
+        cooldowns.note ? h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) }, cooldowns.note) : null)
+
+      // ⑥ 每家闸门统计：手写 flex 表格（本项目没有 <table>，全用 S.row 拼），列宽固定保证对齐
+      const HEAD = { flexShrink: 0, textAlign: 'right' }
+      const gateHead = h('div', { style: { display: 'flex', gap: '6px', padding: '3px 0', borderBottom: '1px solid rgba(128,128,128,0.35)' } },
+        h('span', { style: Object.assign({ flex: '1 1 110px' }, S.dim) }, '渠道'),
+        h('span', { style: Object.assign({}, HEAD, { width: '64px' }, S.dim) }, '活跃/上限'),
+        h('span', { style: Object.assign({}, HEAD, { width: '50px' }, S.dim) }, '占比'),
+        h('span', { style: Object.assign({}, HEAD, { width: '82px' }, S.dim) }, '冷却'),
+        h('span', { style: Object.assign({}, HEAD, { width: '56px' }, S.dim) }, '429连击'),
+        h('span', { style: Object.assign({}, HEAD, { width: '58px' }, S.dim) }, '失败率'),
+        h('span', { style: Object.assign({}, HEAD, { width: '50px' }, S.dim) }, '样本数'))
+
+      const cellStyle = { flexShrink: 0, textAlign: 'right', fontSize: '11px' }
+      const gateRows = gateEntries.map(([id, g]) => {
+        const coolingMs = Number(g.coolingMs) || 0
+        return h('div', {
+          key: id,
+          style: { display: 'flex', gap: '6px', padding: '3px 0', borderBottom: '1px solid rgba(128,128,128,0.10)' },
+        },
+          h('span', { style: { flex: '1 1 110px', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, id),
+          h('span', { style: Object.assign({ width: '64px' }, cellStyle) }, String(g.active ?? 0) + '/' + String(g.limit ?? '—')),
+          h('span', { style: Object.assign({ width: '50px' }, cellStyle) }, g.ratio == null ? '—' : (Math.round(Number(g.ratio) * 100) + '%')),
+          // 冷却中要**明确写「冷却中」**并高亮（只给个 "15s" 用户不知道那是冷却还是耗时）
+          h('span', { style: Object.assign({ width: '82px' }, cellStyle, coolingMs > 0 ? S.warn : null) },
+            coolingMs > 0 ? ('冷却中 ' + Math.round(coolingMs / 100) / 10 + 's') : '—'),
+          h('span', { style: Object.assign({ width: '56px' }, cellStyle) }, String(g.streak429 ?? 0)),
+          h('span', { style: Object.assign({ width: '58px' }, cellStyle) }, g.failRate == null ? '—' : (Math.round(Number(g.failRate) * 1000) / 10 + '%')),
+          h('span', { style: Object.assign({ width: '50px' }, cellStyle) }, String(g.failSamples ?? 0)))
+      })
+
+      const gateCard = h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '各家闸门统计（实时）'),
+        gateEntries.length === 0
+          ? h('div', { style: S.dim }, '暂无闸门数据（还没有渠道参与过选路，或后端未返回 gate）')
+          : h('div', null, gateHead, gateRows))
+
+      // ⑦ 可设置项：每项一个控件 + 一个「保存」（POST /settings 对应 path）
+      const configurableNodes = configurable.map((item) => h('div', { key: item.path, style: { marginBottom: '12px' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+          h('span', { style: { fontWeight: 500 } }, item.label || item.path),
+          h('span', { style: S.badge('good') }, item.source === 'config' ? '已自定义' : '默认值'),
+          h('span', { style: Object.assign({}, S.mono, S.dim) }, item.path + (item.unit ? '（' + item.unit + '）' : ''))),
+        item.effect ? h('div', { style: Object.assign({ margin: '2px 0 4px' }, S.dim) }, item.effect) : null,
+        controlOf(item)))
+
+      const configCard = h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '设置（保存到全局层）'),
+        h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+          '改一项就发一次 patch（只写这一项）；生效值会立即回读显示在「冷却参数」「闸门统计」里。'),
+        configurable.length === 0 ? h('div', { style: S.dim }, '（后端未返回可设置项清单）') : configurableNodes,
+        msg ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, msg.ok ? S.good : S.bad) }, msg.text || msg.error) : null)
+
+      return h('div', { style: { marginTop: '12px' } },
+        h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '路由基本规则（说明 + 统计 + 设置）'),
+        h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+          '这里只解释「现在按什么规则选路、为什么这么选、各家当前状态」，并把可改的几项做成控件。没有总开关：规则本身不是开关。'),
+        policyCard,
+        orderCard,
+        filterCard,
+        fallbackCard,
+        cooldownCard,
+        gateCard,
+        configCard)
+    }
+
+    function SettingsPage(props) {
+      const [s, reload] = useApi('/settings')
+      const [st, reloadSt] = useApi('/state')
+      const [pick, setPick] = react.useState('global')
+      const [form, setForm] = react.useState(null)
+      const [idInput, setIdInput] = react.useState('')
+      const [msg, setMsg] = react.useState(null)
+      const [busy, setBusy] = react.useState(false)
+      const [advOpen, setAdvOpen] = react.useState(false)
+      const [ark, setArk] = react.useState(null)
+      // 方舟余额刷新计数（点「刷新」+1 ⇒ effect 重跑；以前直接 setArk(null) 只会卡在"加载中"）
+      const [arkTick, setArkTick] = react.useState(0)
+      // design/21 §2：作用域下拉选中的真实对象 id（workspace/team；session 固定取当前会话）
+      const [objPick, setObjPick] = react.useState('')
+
+      // 火山方舟余额（/cs-myfree/cash；三分支 live / estimated / error 的口径见 src/web/cash.js）
+      react.useEffect(() => {
+        let alive = true
+        setArk(null)
+        fetch(CASH_PATH, { credentials: 'same-origin' })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+          .then((d) => { if (alive) setArk(d && d.ark ? d.ark : null) })
+          .catch(() => { if (alive) setArk({ provider: 'ark', total: null, source: 'error', error: '余额查询失败（网络或接口异常）' }) })
+        return () => { alive = false }
+      }, [arkTick])
+
+      // 初始表单 = 全局层已存配置（编辑底稿；没存过 = 空表单）
+      react.useEffect(() => {
+        if (s.data && !form) {
+          const item = (s.data.layers || []).find((l) => l.scope === pick)
+          setForm(JSON.parse(JSON.stringify((item && item.config) || {})))
+        }
+      }, [s.data])
+
+      if (s.error) {
+        return h('div', null,
+          h(Err, { error: '设置读取失败：' + s.error }),
+          h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
+            h('button', { style: S.btn(true), onClick: () => { reload(); reloadSt() } }, '重试')))
+      }
+      if (!s.data) return h('div', null, h(Loading, { on: true }))
+
+      const d = s.data
+      const meta = d.meta || {}
+      const layers = Array.isArray(d.layers) ? d.layers : []
+      const effConfig = (d.effective && d.effective.config) || {}
+      const byLayer = (d.effective && d.effective.byLayer) || {}
+      const models = Array.isArray(d.models) ? d.models : []
+      const channels = Array.isArray(d.channels) ? d.channels : []
+      const recent = Array.isArray(d.recent) ? d.recent : []
+      const failures = d.failures || {}
+      const stData = st.data || {}
+      // design/21 §2：真实对象枚举（后端尽力而为；为空 ⇒ 手填兜底）
+      const scopes = d.scopes || {}
+      const wsList = scopes.workspaces || []
+      const teamList = scopes.teams || []
+      const curSess = scopes.session || (meta.context && meta.context.sessionId ? { id: meta.context.sessionId, label: meta.context.sessionId } : null)
+
+      const layerItem = layers.find((l) => l.scope === pick) || { scope: pick, id: null, owner: null, config: {} }
+      // 选中对象 id：workspace/team = 下拉选中或手填；session = 当前会话；global = 无
+      const ctxId = layerItem.id || (meta.context || {})[pick === 'workspace' ? 'workspaceId' : pick === 'team' ? 'teamId' : pick === 'session' ? 'sessionId' : null] || null
+      const chosenId = pick === 'global' ? null
+        : pick === 'session' ? (curSess && curSess.id || ctxId)
+          : (objPick.trim() || idInput.trim() || ctxId || null)
+      const layerId = chosenId
+      const needsId = pick !== 'global' && !layerId
+      // 🔒 锁定态：层 owner=admin 且当前非 admin ⇒ 只读
+      const locked = layerItem.owner === 'admin' && !meta.isAdmin
+      const disabled = locked || needsId || busy
+
+      const sourceOf = (path) => {
+        const keys = String(path).split('.')
+        for (const scope of SETTINGS_SOURCE_ORDER) {
+          const cfg = byLayer[scope]
+          if (!cfg || typeof cfg !== 'object') continue
+          let cur = cfg, found = true
+          for (const k of keys) {
+            if (cur && typeof cur === 'object' && k in cur) cur = cur[k]
+            else { found = false; break }
+          }
+          if (found) return scope
+        }
+        return 'global'
+      }
+      const sourceNote = (path) => h('span', { style: Object.assign({}, S.dim) },
+        '当前生效值来自「' + SETTINGS_LAYER_LABEL[sourceOf(path)] + '」层')
+
+      const fv = (path) => getField(form || {}, path)
+      const fset = (path, v) => setForm((f) => setField(f || {}, path, v))
+
+      // 需求 #5：这一层跟全局哪里不一样（只算已保存值 ⇒ 与保存用的 base 同一份，口径不会漂）
+      const layerCfgForDiff = (layerItem && layerItem.config) || {}
+      const globalCfgForDiff = (byLayer && byLayer.global) || {}
+      const globalDiffs = pick === 'global' ? [] : diffAgainstGlobal(layerCfgForDiff, globalCfgForDiff, sourceOf)
+
+      /**
+       * 恢复全局 = 删掉这一层这个键（PATCH /settings），**不是**把全局值写进这一层。
+       * 成功后同步把编辑底稿里的这个键也删掉，界面立刻跟磁盘一致。
+       */
+      const restoreGlobal = (path) => {
+        setBusy(true); setMsg(null)
+        deleteLayerSetting(pick, layerId, path)
+          .then((r) => {
+            if (r && r.ok === false) { setMsg({ ok: false, error: r.error || '恢复失败' }); return }
+            setForm((f) => dropField(f || {}, path))
+            setMsg({ ok: true, text: '✅ 已恢复全局：删掉了这一层的「' + path + '」' })
+          })
+          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => { setBusy(false); reload() })
+      }
+
+      const loadForm = (scope) => {
+        setPick(scope); setMsg(null); setObjPick('')
+        const item = layers.find((l) => l.scope === scope)
+        setForm(JSON.parse(JSON.stringify((item && item.config) || {})))
+        reload()  // 重新拉取（含 scopes 枚举），保证切换作用域时后端 scopes 最新
+      }
+
+      const save = () => {
+        setBusy(true); setMsg(null)
+        const baseItem = layers.find((l) => l.scope === pick)
+        const base = (baseItem && baseItem.config) || {}
+        const patch = diffPatch(base, form || {})
+        if (Object.keys(patch).length === 0) {
+          setBusy(false); setMsg({ ok: true, warn: '没有改动，无需保存' })
+          return
+        }
+        api('/settings', {
+          method: 'POST',
+          body: JSON.stringify({ scope: pick, id: pick === 'global' ? undefined : layerId, patch }),
+        })
+          .then((r) => {
+            if (!r.ok) setMsg({ ok: false, error: r.error || '保存失败' })
+            else setMsg({ ok: true, text: '✅ 已保存，下次请求生效' })
+          })
+          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+          .then(() => { setBusy(false); reload() })
+      }
+
+      // ── 步骤1 作用域选择器（design/21 §2：下拉选真实对象）──
+      const ctxIdOf = (scope) => (meta.context || {})[scope === 'workspace' ? 'workspaceId' : scope === 'team' ? 'teamId' : scope === 'session' ? 'sessionId' : null] || null
+      // 选择「真实对象」：workspace/team 从枚举下拉选；session 固定当前会话
+      const pickObject = (scope, v) => {
+        setObjPick(v)
+        setMsg(null)
+        if (v && v !== ctxIdOf(scope)) setForm({})   // 选中的不是当前上下文对象 ⇒ 底稿置空（保存将新建该对象层）
+        else {
+          const item = layers.find((l) => l.scope === scope)
+          setForm(JSON.parse(JSON.stringify((item && item.config) || {})))
+        }
+      }
+      const wsPickUI = pick === 'workspace' ? (wsList.length > 0
+        ? h('div', { style: { marginTop: '6px' } },
+            h('div', { style: Object.assign({ marginBottom: '3px' }, S.dim) }, '选择工作区（历史出现过的项目目录）：'),
+            h('select', {
+              style: Object.assign({}, S.input, { width: '320px', maxWidth: '100%' }),
+              value: objPick || ctxIdOf('workspace') || '',
+              onChange: (e) => pickObject('workspace', e.target.value),
+            },
+              h('option', { value: '' }, (objPick ? '' : (ctxIdOf('workspace') || '请选择…'))),
+              wsList.map((w) => h('option', { key: w.id, value: w.id }, w.label))),
+            h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) }, '选中的工作区会读写它自己的那层设置。'))
+        : h('div', { style: { marginTop: '6px' } },
+            h('div', { style: Object.assign({ marginBottom: '3px' }, S.dim, S.warn) }, '当前没有可选的工作区，可手填 ID（如 dev）：'),
+            h('input', {
+              style: Object.assign({}, S.input, { width: '280px' }),
+              value: idInput,
+              placeholder: '如 dev',
+              onChange: (e) => setIdInput(e.target.value),
+            }))) : null
+      const teamPickUI = pick === 'team' ? (teamList.length > 0
+        ? h('div', { style: { marginTop: '6px' } },
+            h('div', { style: Object.assign({ marginBottom: '3px' }, S.dim) }, '选择团队 / 房间：'),
+            h('select', {
+              style: Object.assign({}, S.input, { width: '320px', maxWidth: '100%' }),
+              value: objPick || ctxIdOf('team') || '',
+              onChange: (e) => pickObject('team', e.target.value),
+            },
+              h('option', { value: '' }, (objPick ? '' : (ctxIdOf('team') || '请选择…'))),
+              teamList.map((t) => h('option', { key: t.id, value: t.id }, t.label))),
+            h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) }, '团队层最优先；没设的字段继续用下一层。'))
+        : h('div', { style: { marginTop: '6px' } },
+            h('div', { style: Object.assign({ marginBottom: '3px' }, S.dim, S.warn) }, '当前没有可选的团队，可手填 ID：'),
+            h('input', {
+              style: Object.assign({}, S.input, { width: '280px' }),
+              value: idInput,
+              placeholder: '团队 ID',
+              onChange: (e) => setIdInput(e.target.value),
+            }))) : null
+      const sessPickUI = pick === 'session' ? h('div', { style: { marginTop: '6px' } },
+        curSess
+          ? h('div', { style: Object.assign({}, S.dim) }, '当前会话：' + curSess.label + (curSess.id !== curSess.label ? '（' + curSess.id + '）' : ''))
+          : h('div', { style: Object.assign({ marginBottom: '3px' }, S.dim, S.warn) }, '当前会话未知，可手填会话 ID：'),
+        !curSess ? h('input', {
+          style: Object.assign({}, S.input, { width: '280px' }),
+          value: idInput,
+          placeholder: '会话 ID',
+          onChange: (e) => setIdInput(e.target.value),
+        }) : null) : null
+
+      const step1 = h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '① 这些设置应用在：'),
+        h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, '范围越窄越优先：团队 > 对话 > 工作区 > 全局。只改选中的这一层，没设的字段继续继承上一层。'),
+        h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center', marginBottom: '4px' } },
+          h('select', {
+            style: Object.assign({}, S.input, { width: '220px' }),
+            value: pick,
+            onChange: (e) => loadForm(e.target.value),
+          },
+            h('option', { value: 'global' }, '所有对话（全局）'),
+            h('option', { value: 'workspace' }, '这个工作区'),
+            h('option', { value: 'session' }, '这个对话'),
+            h('option', { value: 'team' }, '这个团队')),
+          layerItem.owner ? h('span', { style: Object.assign({}, S.dim, layerItem.owner === 'admin' ? S.warn : null) },
+            '由' + (layerItem.owner === 'admin' ? '管理员' : '普通用户') + '设置') : null),
+        wsPickUI, teamPickUI, sessPickUI,
+        h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) }, d.hint || ''))
+
+      // ── 步骤2 设置项 ──
+      const modelVal = fv('model.default') ?? ''
+      const allowPaid = fv('billing.allowPaid') === true
+      const confirmEachTurn = fv('billing.confirmEachTurn') !== false
+      const autoSwitch = fv('routing.autoSwitch') !== false
+      const priority = fv('routing.priority') || 'free-first'
+      const budgetP = fv('budget.perCallCNY') == null ? '' : fv('budget.perCallCNY')
+      const budgetD = fv('budget.dailyCNY') == null ? '' : fv('budget.dailyCNY')
+      const budgetM = fv('budget.monthlyCNY') == null ? '' : fv('budget.monthlyCNY')
+
+      // 渠道开关（编辑层语义：sources.disabled 黑名单 / sources.enabled 白名单）
+      const chanOn = (id) => {
+        const src = (form && form.sources) || {}
+        const disabledList = Array.isArray(src.disabled) ? src.disabled : []
+        const enabledList = Array.isArray(src.enabled) ? src.enabled : []
+        if (disabledList.includes(id)) return false
+        if (enabledList.length > 0 && !enabledList.includes(id)) return false
+        return true
+      }
+      const setChan = (id, on) => setForm((f) => {
+        const next = JSON.parse(JSON.stringify(f || {}))   // 深拷贝编辑底稿
+        const src = next.sources = (next.sources || {})
+        const disabledList = (Array.isArray(src.disabled) ? src.disabled : []).filter((x) => x !== id)
+        const enabledList = (Array.isArray(src.enabled) ? src.enabled : []).filter((x) => x !== id)
+        if (on) {
+          if (enabledList.length > 0) src.enabled = enabledList
+          else delete src.enabled
+        } else {
+          disabledList.push(id)
+          src.disabled = disabledList
+          if (enabledList.length > 0) src.enabled = enabledList
+          else delete src.enabled
+        }
+        if (src.disabled.length === 0) delete src.disabled
+        if (!src.disabled && !src.enabled) delete next.sources
+        return next
+      })
+      const chanBadge = (c) => {
+        if (c.state === 'cooling') return h('span', { style: S.badge('warn') }, '冷却中')
+        if (c.state === 'failed') {
+          const reason = c.blacklistKind ? KIND_TEXT[c.blacklistKind] || c.blacklistKind : ('失败 ' + (c.failCount || 0) + ' 次')
+          return h('span', { style: S.badge('warn') }, c.blacklisted ? '已暂停（' + reason + '）' : reason)
+        }
+        return h('span', { style: S.badge('good') }, '正常')
+      }
+
+      // ── 需求 #6：展示开关（sources.hidden）+ 模型选择器过滤 ──
+      // 语义提醒：隐藏 ≠ 禁用。隐藏只影响「选模型的列表」，路由链/自动切换仍然可用这个渠道。
+      const effSources = (effConfig && effConfig.sources) || {}
+      /** 当前生效的「不展示」清单（编辑底稿优先，还没动过就用后端生效值） */
+      const hiddenNow = () => {
+        const src = (form && form.sources) || null
+        if (src && Array.isArray(src.hidden)) return src.hidden
+        return Array.isArray(effSources.hidden) ? effSources.hidden : []
+      }
+      const hiddenOn = (id) => !hiddenNow().includes(id)
+      const setHidden = (id, on) => setForm((f) => {
+        const next = JSON.parse(JSON.stringify(f || {}))
+        const src = next.sources = (next.sources || {})
+        const base = (Array.isArray(src.hidden) ? src.hidden : (Array.isArray(effSources.hidden) ? effSources.hidden : []))
+          .filter((x) => x !== id)
+        const list = on ? base : base.concat([id])
+        // 🔴 「全部展示」必须写成**显式空数组 `[]`**，不能删键。
+        //    后端约定（store.js#resolveHiddenSources）：键不存在 ⇒ 套用默认隐藏集合；
+        //    键存在 ⇒ 绝对口径（`[]` = 全部展示）。删键会让用户刚点开的渠道
+        //    立刻又被默认集合盖回去（点了没反应 = 最难查的一类 bug）。
+        src.hidden = list
+        return next
+      })
+      // 只把「选择器里允许出现」的来源喂给模型下拉（hidden:true 的条目在这里就被挡掉）
+      const modelsVisible = visibleModelSources(models, hiddenNow())
+
+      /** 通用小开关（40×20）：on 绿 off 灰；禁用时**不给 onClick**（不装假按钮） */
+      const minToggle = (on, onClick, off, key) => h('span', {
+        onClick: off ? undefined : onClick,
+        style: {
+          cursor: off ? 'not-allowed' : 'pointer', userSelect: 'none', display: 'inline-flex', alignItems: 'center',
+          width: '40px', height: '20px', borderRadius: '10px', flexShrink: 0, opacity: off ? 0.5 : 1,
+          background: on ? 'var(--dsw-alias-state-success-primary)' : 'rgba(128,128,128,0.35)',
+        },
+        'data-toggle': key,
+      }, h('span', {
+        style: {
+          display: 'block', width: '16px', height: '16px', borderRadius: '50%',
+          background: '#fff', margin: '2px',
+          transform: on ? 'translateX(20px)' : 'translateX(0)',
+        },
+      }))
+
+      const lockedBanner = locked
+        ? h('div', { style: Object.assign({}, S.card, { borderColor: 'rgba(220,160,40,0.5)', background: 'rgba(220,160,40,0.08)' }) },
+            h('div', { style: { fontWeight: 600 } }, '🔒 此设置由管理员统一管理'),
+            h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) }, '这一层是管理员写的，普通用户只能查看，不能修改。如需调整请联系管理员。'))
+        : null
+
+      const step2 = h('div', { style: S.card },
+        h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '② 设置项（只改这一层：' + SETTINGS_LAYER_LABEL[pick] + '）'),
+        lockedBanner,
+        needsId && !locked ? h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim, S.warn) },
+          '先在上方填写该层的 ID，才能编辑并保存。') : null,
+
+        // 默认模型
+        h('div', { style: { marginBottom: '14px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '默认用哪个模型'),
+          h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) }, '不选 = 跟随自动路由。选了以后这一层优先用它。'),
+          h('select', {
+            style: Object.assign({}, S.input, { width: '320px', maxWidth: '100%' }),
+            value: modelVal,
+            disabled: disabled,
+            onChange: (e) => fset('model.default', e.target.value || null),
+          },
+            h('option', { value: '' }, '跟随路由（不指定）'),
+            modelsVisible.map((g) => h('optgroup', { key: g.provider, label: g.label },
+              (g.models || []).map((m) => h('option', { key: g.provider + '/' + m.id, value: m.id }, m.name || m.id))))),
+          h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) },
+            '这里只列 deepseek 系 / 自加 API / 免费可用渠道 / 华为云；其它渠道包不在这里出现'
+            + (modelsVisible.length < models.length ? '（已按「不展示」过滤 ' + (models.length - modelsVisible.length) + ' 个）' : '') + '。'),
+          sourceNote('model.default')),
+
+        // 允许付费
+        h('div', { style: { marginBottom: '14px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '允许用付费模型吗'),
+          h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) }, '关掉 = 永远只用免费模型，不会花一分钱。'),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+            h('span', {
+              onClick: disabled ? undefined : () => fset('billing.allowPaid', !allowPaid),
+              style: Object.assign({
+                cursor: disabled ? 'not-allowed' : 'pointer', userSelect: 'none', display: 'inline-flex', alignItems: 'center',
+                width: '44px', height: '22px', borderRadius: '11px', flexShrink: 0, opacity: disabled ? 0.5 : 1,
+                background: allowPaid ? 'var(--dsw-alias-state-success-primary)' : 'rgba(128,128,128,0.35)',
+              },
+              ),
+            }, h('span', {
+              style: {
+                display: 'block', width: '18px', height: '18px', borderRadius: '50%',
+                background: '#fff', margin: '2px',
+                transform: allowPaid ? 'translateX(22px)' : 'translateX(0)',
+              },
+            })),
+            h('span', { style: { fontWeight: 600, color: allowPaid ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-secondary)' } },
+              allowPaid ? '已开启' : '已关闭')),
+          allowPaid ? h('div', { style: { marginTop: '8px' } },
+            h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '付费前要确认吗'),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+              h('span', {
+                onClick: disabled ? undefined : () => fset('billing.confirmEachTurn', !confirmEachTurn),
+                style: Object.assign({
+                  cursor: disabled ? 'not-allowed' : 'pointer', userSelect: 'none', display: 'inline-flex', alignItems: 'center',
+                  width: '44px', height: '22px', borderRadius: '11px', flexShrink: 0, opacity: disabled ? 0.5 : 1,
+                  background: confirmEachTurn ? 'var(--dsw-alias-state-success-primary)' : 'rgba(128,128,128,0.35)',
+                }),
+              }, h('span', {
+                style: {
+                  display: 'block', width: '18px', height: '18px', borderRadius: '50%',
+                  background: '#fff', margin: '2px',
+                  transform: confirmEachTurn ? 'translateX(22px)' : 'translateX(0)',
+                },
+              })),
+              h('span', { style: { fontWeight: 600, color: confirmEachTurn ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-secondary)' } },
+                confirmEachTurn ? '每次都要问我' : '不问，直接用'))) : null,
+          sourceNote('billing.allowPaid')),
+
+        // 自动切换
+        h('div', { style: { marginBottom: '14px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '模型用不上时自动换吗'),
+          h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) }, '开着 = 当前渠道失败时自动试下一个（省钱优先）。'),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+            h('span', {
+              onClick: disabled ? undefined : () => fset('routing.autoSwitch', !autoSwitch),
+              style: Object.assign({
+                cursor: disabled ? 'not-allowed' : 'pointer', userSelect: 'none', display: 'inline-flex', alignItems: 'center',
+                width: '44px', height: '22px', borderRadius: '11px', flexShrink: 0, opacity: disabled ? 0.5 : 1,
+                background: autoSwitch ? 'var(--dsw-alias-state-success-primary)' : 'rgba(128,128,128,0.35)',
+              }),
+            }, h('span', {
+              style: {
+                display: 'block', width: '18px', height: '18px', borderRadius: '50%',
+                background: '#fff', margin: '2px',
+                transform: autoSwitch ? 'translateX(22px)' : 'translateX(0)',
+              },
+            })),
+            h('span', { style: { fontWeight: 600, color: autoSwitch ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-secondary)' } },
+              autoSwitch ? '自动换' : '不换，失败就报错')),
+          autoSwitch ? h('div', { style: { marginTop: '8px' } },
+            h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '自动换时优先顺序'),
+            h('select', {
+              style: Object.assign({}, S.input, { width: '260px' }),
+              value: priority, disabled: disabled,
+              onChange: (e) => fset('routing.priority', e.target.value),
+            }, PRIORITY_OPTIONS.map((o) => h('option', { key: o.v, value: o.v }, o.t)))) : null,
+          sourceNote('routing.autoSwitch')),
+
+        // 预算
+        h('div', { style: { marginBottom: '14px' } },
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '预算上限（元；超出就停）'),
+          h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '6px' } },
+            h('div', null,
+              h('div', { style: Object.assign({ marginBottom: '2px' }, S.dim) }, '单次请求'),
+              h('input', { type: 'number', min: 0, step: 0.1, style: Object.assign({}, S.input, { width: '100px' }), value: budgetP, disabled, placeholder: '1', onChange: (e) => fset('budget.perCallCNY', e.target.value === '' ? null : Number(e.target.value)) })),
+            h('div', null,
+              h('div', { style: Object.assign({ marginBottom: '2px' }, S.dim) }, '每天'),
+              h('input', { type: 'number', min: 0, step: 0.1, style: Object.assign({}, S.input, { width: '100px' }), value: budgetD, disabled, placeholder: '10', onChange: (e) => fset('budget.dailyCNY', e.target.value === '' ? null : Number(e.target.value)) })),
+            h('div', null,
+              h('div', { style: Object.assign({ marginBottom: '2px' }, S.dim) }, '每月'),
+              h('input', { type: 'number', min: 0, step: 0.1, style: Object.assign({}, S.input, { width: '100px' }), value: budgetM, disabled, placeholder: '100', onChange: (e) => fset('budget.monthlyCNY', e.target.value === '' ? null : Number(e.target.value)) }))),
+          sourceNote('budget.perCallCNY')),
+
+        // 渠道清单：状态 / 可用 / 是否展示（需求 #6：设置页表格要能看清「可用 / 是否展示 / 状态」）
+        h('div', null,
+          h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '哪些渠道可用'),
+          h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
+            '「可用」关掉 = 不再被自动调用；「展示」关掉 = 只是不在选模型的列表里出现（隐藏 ≠ 禁用，链路照旧可用这个渠道）。状态是实时体检结果。'),
+          channels.length === 0
+            ? h('div', { style: S.dim }, '（后端未返回渠道清单）')
+            : h('div', null,
+                h('div', { style: Object.assign({}, S.row, { fontWeight: 600 }) },
+                  h('span', { style: { flex: '1 1 42%' } }, '渠道'),
+                  h('span', { style: { flex: '1 1 30%' } }, '状态'),
+                  h('span', { style: { flex: '0 0 76px', textAlign: 'right' } }, '可用'),
+                  h('span', { style: { flex: '0 0 76px', textAlign: 'right' } }, '展示')),
+                channels.map((c) => h('div', {
+                  key: c.id, style: Object.assign({}, S.row, { alignItems: 'center' }),
+                  'data-channel-row': c.id,
+                },
+                  h('span', { style: { flex: '1 1 42%', display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' } },
+                    h('span', null, c.name || c.label || c.id),
+                    chanBadge(c),
+                    (!c.loggedIn && c.loginVerified !== true) ? h('span', { style: S.badge('warn') }, '未登录') : null,
+                    c.hidden === true && hiddenOn(c.id) ? h('span', { style: S.badge() }, '默认不展示') : null),
+                  h('span', { style: Object.assign({ flex: '1 1 30%' }, S.dim) },
+                    (typeof c.status === 'string' && c.status ? c.status : (c.available === false ? '不可用' : '可用'))
+                    + (c.available === false && c.reason ? '（' + c.reason + '）' : '')),
+                  h('span', { style: { flex: '0 0 76px', display: 'flex', justifyContent: 'flex-end' } },
+                    minToggle(chanOn(c.id), () => setChan(c.id, !chanOn(c.id)), disabled, 'usable:' + c.id)),
+                  h('span', { style: { flex: '0 0 76px', display: 'flex', justifyContent: 'flex-end' } },
+                    minToggle(hiddenOn(c.id), () => setHidden(c.id, !hiddenOn(c.id)), disabled, 'hidden:' + c.id)))),
+                h('div', { style: Object.assign({ marginTop: '6px' }, S.dim) },
+                  '「展示」写进这一层的 sources.hidden（对话里的选模型列表按它过滤）。')),
+          sourceNote('sources.disabled')),
+
+        // 新增三张卡（都在本层表单里，保存走统一的 diffPatch → POST /settings）
+        h('div', { style: { marginTop: '14px' } },
+          h(SearchSettingsCard, { fv, fset, disabled, sourceNote })),
+        h('div', { style: { marginTop: '12px' } },
+          h(VisionSettingsCard, { fv, fset, disabled })),
+        h('div', { style: { marginTop: '12px' } },
+          h(SubagentRoutingCard, { fv, fset, disabled, models: modelsVisible })),
+      )
+
+      // ── 步骤3 实时状态（只读）──
+      const chainTiers = (stData.chain && stData.chain.tiers) || []
+      const gate = (stData.routing && stData.routing.gate) || {}
+      const coolingChannels = Object.entries(gate)
+        .filter(([, g]) => Number(g.coolingMs) > 0)
+        .map(([id, g]) => ({ id, coolingMs: Number(g.coolingMs) }))
+      const failCodes = failures.byCode || {}
+
+      const step3 = h('div', null,
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '最近 5 次请求'),
+          recent.length === 0
+            ? h('div', { style: S.dim }, '还没有调用记录（用本插件跑一次对话后这里会有数据）')
+            : recent.map((r, i) => h('div', { key: i, style: Object.assign({}, S.row, { fontSize: '12px' }) },
+                h('span', null,
+                  (r.ok ? '✅ ' : '❌ ') + (r.provider || '?') + (r.model ? ' / ' + r.model : ''),
+                  r.ok ? null : h('span', { style: Object.assign({ marginLeft: '6px' }, S.warn) }, KIND_TEXT[r.code] || r.code || '失败')),
+                h('span', { style: S.dim }, (r.ms != null ? r.ms + 'ms' : '—') + ' · ' + (r.at ? new Date(r.at).toLocaleTimeString() : ''))))),
+
+        // 火山方舟余额（三分支：实时 / 估算 / 查询失败；文案由 ArkCard 统一管，避免两处口径漂移）
+        h(ArkCard, { ark: ark, onRefresh: () => setArkTick((n) => n + 1) }),
+
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, cursor: 'pointer' }, onClick: () => setAdvOpen(!advOpen) },
+            (advOpen ? '▾ ' : '▸ ') + '高级（技术细节）'),
+          advOpen ? h('div', { style: { marginTop: '8px' } },
+            h('div', { style: { fontWeight: 500, marginBottom: '4px' } }, '降级链'),
+            chainTiers.length === 0
+              ? h('div', { style: S.dim }, '（无候选链数据；到「降级链」页查看）')
+              : chainTiers.map((t, i) => h('div', { key: i, style: S.row },
+                  h('span', null, '第 ' + t.tier + ' 层'),
+                  h('span', { style: S.dim }, (t.providers || []).join(' → ') || '—'))),
+            h('div', { style: { fontWeight: 500, margin: '10px 0 4px' } }, '冷却中的渠道'),
+            coolingChannels.length === 0
+              ? h('div', { style: S.dim }, '（当前没有渠道在冷却）')
+              : coolingChannels.map((c) => h('div', { key: c.id, style: S.row },
+                  h('span', null, c.id),
+                  h('span', { style: S.dim }, Math.round(c.coolingMs / 1000) + ' 秒后恢复'))),
+            h('div', { style: { fontWeight: 500, margin: '10px 0 4px' } }, '失败分类（按原因）'),
+            Object.keys(failCodes).length === 0
+              ? h('div', { style: S.dim }, '（账本暂无失败记录）')
+              : Object.entries(failCodes).map(([code, n]) => h('div', { key: code, style: S.row },
+                  h('span', null, KIND_TEXT[code] || code),
+                  h('span', { style: S.dim }, n + ' 次'))),
+            h('div', { style: { marginTop: '10px' } },
+              typeof props.onGoTab === 'function'
+                ? h('button', { style: S.btn(false), onClick: () => props.onGoTab('diag') }, '去「诊断」页一键体检')
+                : h('a', { style: S.link, href: API }, '打开诊断（另开设置页）')))
+          : null),
+      )
+
+      // ── 保存条 + 步骤3 ──
+      // 需求 #5：工作区/对话/团队作用域顶部先给「与全局不同（N 项）」；全局层自己没有"跟谁不同"
+      const diffPanel = pick === 'global' ? null : h(GlobalDiffPanel, {
+        scope: pick,
+        diffs: globalDiffs,
+        sourceOf,
+        onRestore: restoreGlobal,
+        busy,
+        disabled: locked || needsId || busy,
+      })
+      return h('div', null,
+        diffPanel,
+        step1,
+        step2,
+        h('div', { style: Object.assign({}, S.card, { borderColor: 'rgba(64,160,96,0.4)', background: 'rgba(64,160,96,0.06)', position: 'sticky', bottom: '8px', zIndex: 5 }) },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } },
+            h('button', {
+              style: Object.assign({}, S.primaryBtn, disabled ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+              disabled: disabled,
+              onClick: disabled ? undefined : save,
+            }, busy ? '保存中…' : '保存这一层'),
+            h('span', { style: Object.assign({}, S.dim, msg && msg.ok ? S.good : (msg && !msg.ok ? S.bad : null)) },
+              msg ? (msg.text || msg.warn || msg.error) : '改动只写进这一层；没改的字段继续继承上一层的值。'))),
+        h('div', { style: { marginTop: '12px' } }, step3),
+
+        // ── design/21 §4：并发与冷却（人类语言；未设 = 用各渠道默认）──
+        h('div', { style: { marginTop: '16px', borderTop: '1px solid rgba(128,128,128,0.18)', paddingTop: '12px' } },
+          h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '并发与冷却'),
+          h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, '不填 = 用默认值。改完点上面的「保存这一层」。'),
+          h('div', { style: S.card },
+            h('div', { style: { fontWeight: 500, marginBottom: '3px' } }, '同时最多几个请求（按渠道）'),
+            h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) }, '限制并发，避免上游「会话已满」。数字越小越保守。'),
+            channels.length === 0
+              ? h('div', { style: S.dim }, '（后端未返回渠道清单）')
+              : channels.map((c) => h('div', { key: c.id, style: Object.assign({}, S.row, { alignItems: 'center' }) },
+                  h('span', null, c.label || c.id),
+                  h('input', {
+                    type: 'number', min: 1, step: 1,
+                    style: Object.assign({}, S.input, { width: '72px' }),
+                    value: (form && form.sources && form.sources.limits && form.sources.limits[c.id] != null) ? form.sources.limits[c.id] : '',
+                    disabled: disabled,
+                    placeholder: '默认',
+                    onChange: (e) => fset('sources.limits.' + c.id, e.target.value === '' ? null : Math.max(1, Math.round(Number(e.target.value)))),
+                  }))),
+            h('div', { style: { fontWeight: 500, margin: '10px 0 3px' } }, '失败后等多久再试（秒）'),
+            h('input', {
+              type: 'number', min: 0, step: 1,
+              style: Object.assign({}, S.input, { width: '140px' }),
+              value: fv('routing.cooldownMs') == null ? '' : fv('routing.cooldownMs'),
+              disabled: disabled,
+              placeholder: '默认 15',
+              onChange: (e) => fset('routing.cooldownMs', e.target.value === '' ? null : Number(e.target.value)),
+            }),
+            h('div', { style: { fontWeight: 500, margin: '10px 0 3px' } }, '被限流后等多久（秒）'),
+            h('input', {
+              type: 'number', min: 0, step: 1,
+              style: Object.assign({}, S.input, { width: '140px' }),
+              value: fv('routing.rateCooldownMs') == null ? '' : fv('routing.rateCooldownMs'),
+              disabled: disabled,
+              placeholder: '默认 4',
+              onChange: (e) => fset('routing.rateCooldownMs', e.target.value === '' ? null : Number(e.target.value)),
+            }))),
+
+        // ── design/21 §1：保护策略 / 预算付费 / 省Token / 备份与恢复 并入设置（复用旧组件）──
+        h('div', { style: { marginTop: '16px', borderTop: '1px solid rgba(128,128,128,0.18)', paddingTop: '12px' } },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '保护策略'),
+          h(PolicyZone)),
+        h('div', { style: { marginTop: '16px', borderTop: '1px solid rgba(128,128,128,0.18)', paddingTop: '12px' } },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '预算与付费'),
+          h(BudgetZone)),
+        h('div', { style: { marginTop: '16px', borderTop: '1px solid rgba(128,128,128,0.18)', paddingTop: '12px' } },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '省 Token'),
+          h(SaverZone)),
+        h('div', { style: { marginTop: '16px', borderTop: '1px solid rgba(128,128,128,0.18)', paddingTop: '12px' } },
+          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '备份与恢复'),
+          h(IoZone)),
+      )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // W2 模型与路由（design/21 §3）：自动路由可视化 + 手动降级链 + 渠道模型清单
+    // ═══════════════════════════════════════════════════════════════════════
+    // · 自动路由（只读展示生效值；调整入口在「设置」页）
+    // · 手动降级链（复用旧 ChainZone；标注「自动路由开着时仅作候选排序参考」）
+    // · 渠道模型清单：默认只显示 codearts + 免密源（kilo/ovh/pollinations），
+    //   开关「显示全部渠道」展开其余账号渠道；每渠道带状态徽标。
+    const MODELS_DEFAULT_PROVIDERS = new Set(['codearts', 'kilo', 'ovh', 'pollinations'])
+    const PRIORITY_TEXT = {
+      'free-first': '先免费（省钱优先）',
+      balanced: '均衡（免费 + 付费混用）',
+      'reliability-first': '稳定优先（多用付费）',
+    }
+    function ModelsZone(props) {
+      const [st, reload] = useApi('/state')
+      const [s, reloadS] = useApi('/settings')
+      const [showAll, setShowAll] = react.useState(false)
+
+      if (s.error) {
+        return h('div', null,
+          h(Err, { error: '读取失败：' + s.error }),
+          h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
+            h('button', { style: S.btn(true), onClick: () => { reload(); reloadS() } }, '重试')))
+      }
+      if (!s.data) return h('div', null, h(Loading, { on: true }))
+
+      const eff = (st.data && st.data.config) || {}
+      const autoOn = !(eff.routing && eff.routing.autoSwitch === false)
+      const priority = (eff.routing && eff.routing.priority) || 'free-first'
+      const priorityText = PRIORITY_TEXT[priority] || priority
+      const groups = Array.isArray(s.data.models) ? s.data.models : []
+      const statusById = {}
+      for (const c of s.data.channels || []) statusById[c.id] = c
+      // 需求 #6：后端判定的 hidden + 用户「不展示」一律不渲染（渲染兜底：展开「显示全部渠道」也不显示）
+      const effCfg = (s.data.effective && s.data.effective.config) || {}
+      const hiddenIds = Array.isArray(effCfg.sources && effCfg.sources.hidden) ? effCfg.sources.hidden : []
+      const visibleGroups = visibleModelSources(groups, hiddenIds)
+      // 「被『不展示』挡掉」≠「被白名单挡掉」：只数前者（如实说明，不把两种口径混成一句话）
+      const hiddenCount = groups.length - groups.filter((g) => !isModelSourceHidden(g, hiddenIds)).length
+      const shown = showAll
+        ? visibleGroups
+        : visibleGroups.filter((g) => g.kind === 'keyless' || MODELS_DEFAULT_PROVIDERS.has(g.provider))
+      const stBadge = (id) => {
+        const c = statusById[id]
+        if (!c) return null
+        if (c.state === 'ok') return h('span', { style: S.badge('good') }, '正常')
+        if (c.state === 'cooling') return h('span', { style: S.badge('warn') }, '冷却中')
+        return h('span', { style: S.badge('warn') },
+          c.blacklisted ? '已暂停' + (c.blacklistKind ? '（' + (KIND_TEXT[c.blacklistKind] || c.blacklistKind) + '）' : '')
+            : '失败 ' + (c.failCount || 0) + ' 次')
+      }
+
+      return h('div', null,
+        // 自动路由卡片（只读展示生效值）
+        h('div', { style: S.card },
+          h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '自动路由'),
+          h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
+            '开着 = 每次调用根据当前可用情况自动选渠道（免费优先、失败冷却、自动跳过不可用）。'),
+          h('div', { style: S.row },
+            h('span', null, '状态'),
+            h('span', { style: { fontWeight: 600 } }, autoOn ? '开（自动选路）' : '关（按手动链）')),
+          h('div', { style: S.row },
+            h('span', null, '优先顺序'),
+            h('span', { style: { fontWeight: 600 } }, priorityText)),
+          typeof props.onGoTab === 'function'
+            ? h('div', { style: { marginTop: '6px' } },
+                h('button', { style: S.btn(false), onClick: () => props.onGoTab('settings') }, '去「设置」页调整'))
+            : null),
+
+        // 手动降级链（复用旧 ChainZone；标注语义）
+        h('div', { style: { marginTop: '12px' } },
+          h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '手动降级链（覆盖）'),
+          h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
+            autoOn
+              ? '自动路由开着时，这份链只作为候选排序参考；关掉自动路由后按这份链逐个尝试。'
+              : '自动路由已关：按这份链逐个尝试。'),
+          h(ChainZone)),
+
+        // 渠道与模型清单（默认过滤 + 显示全部开关）
+        h('div', { style: { marginTop: '12px' } },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' } },
+            h('div', { style: { fontWeight: 600 } }, '渠道模型'),
+            h('button', { style: S.btn(false), onClick: () => setShowAll(!showAll) },
+              showAll ? '只显示默认（华为 + 免密源）' : '显示全部渠道')),
+          h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+            (showAll ? '已展开全部账号渠道的模型。' : '默认只显示华为云与免密源；点「显示全部渠道」可查看其它账号渠道。')
+            + (hiddenCount > 0 ? '另有 ' + hiddenCount + ' 个渠道被「不展示」挡掉了（去「设置」页的「展示」开关里改）。' : '')),
+          shown.length === 0
+            ? h('div', { style: S.dim }, '（没有可显示的模型数据）')
+            : shown.map((g) => h('div', { key: g.provider, style: S.card },
+                h('div', { style: { display: 'flex', alignItems: 'center', marginBottom: '4px' } },
+                  h('span', { style: { fontWeight: 600 } }, g.label),
+                  stBadge(g.provider),
+                  g.kind === 'channel-unlogged' ? h('span', { style: S.badge('warn') }, '未登录') : null),
+                (g.models || []).length === 0
+                  ? h('div', { style: S.dim }, '（暂无模型数据' + (g.error ? '；' + g.error : '') + '）')
+                  : (g.models || []).map((m) => h('div', { key: m.id, style: Object.assign({}, S.row, { padding: '2px 0' }) },
+                      h('span', { style: S.mono }, m.name || m.id),
+                      h('span', { style: S.dim }, g.kind === 'channel-unlogged' ? '未登录' : '可用')))))),
+        // 复杂路由基本规则（契约 B）：规则说明 + 实时统计 + 可编辑设置项。
+        // ⚠️ 刻意**没有总开关**——这是解释面板，不是开关面板（用户明确要求）。
+        // 放在页面最下面：上面三块是「要动手的事」，这一块是「想弄懂的时候看」。
+        h(RoutingRulesCard, { rules: (st.data && st.data.routing && st.data.routing.rules) || null }),
+      )
+    }
+
+    const ZONE_VIEWS = {
+      overview: OverviewZone,
+      sources: SourcesZone,
+      models: ModelsZone,
+      settings: SettingsPage,
+    }
+    // design/21 §1：旧组件源码保留（可复用/防回归），只是不再进 ZONES；
+    // SettingsZone 即改造后的 SettingsPage（别名，供测试/外部引用）
+    const SettingsZone = SettingsPage
+
+    // ── 主设置页（含 Tab；design/21 §1：5 区）──
     function MyfreeSection() {
-      const [tab, setTab] = react.useState('overview')
+      // 默认入口 = 「设置」页（design/19 §2 延续：作用域设置是主入口）
+      const [tab, setTab] = react.useState('settings')
       const View = ZONE_VIEWS[tab] || SourcesZone
       return h('div', { style: S.root },
         h('div', { style: S.h2 }, 'Myfree'),
@@ -2382,7 +4420,8 @@ window.__ModuleLoader__.load({
           key: z.id, style: S.tab(tab === z.key), onClick: () => setTab(z.key), title: z.id,
         }, z.label))),
         // key=tab：切分区时重建错误边界，避免一个分区崩了让所有分区一直显示错误页
-        h(Safe, { scope: tab, View: View }),
+        // viewProps.onGoTab：设置页「高级」区的诊断入口跳转
+        h(Safe, { scope: tab, View: View, viewProps: { onGoTab: setTab } }),
       )
     }
 
@@ -2446,8 +4485,37 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     exports.ZONES = ZONES
     exports.MyfreeSection = MyfreeSection
+    exports.SettingsPage = SettingsPage
+    exports.SettingsZone = SettingsZone
+    exports.ModelsZone = ModelsZone
     exports.CashCard = CashCard
+    // design/21 §6：旧组件源码保留（供复用/防回归），一并导出便于测试断言
+    exports.CatalogZone = CatalogZone
+    exports.ChainZone = ChainZone
+    exports.PinZone = PinZone
+    exports.HealthZone = HealthZone
+    exports.PolicyZone = PolicyZone
+    exports.BudgetZone = BudgetZone
+    exports.SaverZone = SaverZone
+    exports.ObserveZone = ObserveZone
+    exports.IoZone = IoZone
+    exports.ScopeZone = ScopeZone
+    exports.DiagZone = DiagZone
     exports.CashChip = CashChip
+    // 2026-11 新增的四张设置卡 + 路由规则区块（导出便于 UI 单测直接断言文案与禁用态）
+    exports.ArkCard = ArkCard
+    exports.SearchSettingsCard = SearchSettingsCard
+    exports.VisionSettingsCard = VisionSettingsCard
+    exports.SubagentRoutingCard = SubagentRoutingCard
+    exports.RoutingRulesCard = RoutingRulesCard
+    // 需求 #5/#6：差异面板 + 模型选择器可见性（导出便于 UI 单测直接断言）
+    exports.GlobalDiffPanel = GlobalDiffPanel
+    exports.diffAgainstGlobal = diffAgainstGlobal
+    exports.dropField = dropField
+    exports.isModelSourceVisible = isModelSourceVisible
+    exports.visibleModelSources = visibleModelSources
+    exports.Toggle = Toggle
+    exports.spendRow = spendRow
     exports.ErrorBoundary = ErrorBoundary
     exports.Safe = Safe
     exports.ChannelCard = ChannelCard

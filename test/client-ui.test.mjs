@@ -10,7 +10,7 @@
  *      looksLikeCredential，保证前后端契约一致）
  *   · 可点：按文案找最近的 onClick 祖先节点、改 input、触发 onPaste、切 tab
  *
- * 覆盖 13 面板（W0-W12）渲染/字段/空态/错误态/回调注册，以及 8 条真人流程。
+ * 覆盖 14 面板（W13+W0-W12）渲染/字段/空态/错误态/回调注册，以及 8 条真人流程。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -20,6 +20,7 @@ import vm from 'node:vm'
 
 import { validateOverrides, mergeChain, chainSummary } from '../src/adapter/chain-overrides.js'
 import { captureCredential, looksLikeCredential } from '../src/pools/channels/capture.js'
+import { applyPatch } from '../src/web/settings.js'
 
 const CLIENT_PATH = fileURLToPath(new URL('../src/client.js', import.meta.url))
 const CLIENT_SRC = readFileSync(CLIENT_PATH, 'utf8')
@@ -83,6 +84,58 @@ const FIX = {
     },
     probe: { at: 1793666655972, anyOk: true, okCount: 2 },
     checkin: { supported: ['codearts', 'buddy', 'lobsterai'], note: '签到由宿主渠道层执行；本插件只展示可签到渠道' },
+    // 契约 A/B：切换成功计量 + 复杂路由基本规则（后端 buildRoutingRules 的真实形状）
+    routing: {
+      gate: {
+        codearts: { active: 1, limit: 2, ratio: 0.5, coolingMs: 0, streak429: 0, failRate: 0.1, failSamples: 10 },
+        kilo: { active: 0, limit: 3, ratio: 0, coolingMs: 15000, streak429: 2, failRate: 0.5, failSamples: 4 },
+      },
+      switches: {
+        at: 1793690401174,
+        total: 4,
+        byProvider: { kilo: 4 },
+        byModel: { 'kilo/kilo-auto/free': 4 },
+        attempts: { total: 6, byProvider: { kilo: 5, ovh: 1 } },
+        switchSuccessRate: 0.6667,
+        last: { at: 1793690401000, from: 'ovh', to: 'kilo' },
+      },
+      rules: {
+        policy: 'free-first',
+        policyOptions: [
+          { id: 'free-first', label: '免费优先', desc: '先试免密源，再试付费渠道', active: true, evidence: '实测免密源成功率更高' },
+          { id: 'balanced', label: '均衡', desc: '按拥挤度与失败率均衡打分' },
+          { id: 'reliability-first', label: '稳定优先', desc: '优先历史成功率高的渠道' },
+        ],
+        order: ['impl', 'free', 'load', 'fail'],
+        orderHuman: '先过严格过滤层，再过免费过滤层，然后比拥挤度，最后比失败率。',
+        weights: { load: 0.6, fail: 0.4 },
+        filters: [
+          { id: 'impl', position: 1, label: '渠道已实现', strict: true, effect: '未实现的渠道直接剔除（空集也不放宽）' },
+          { id: 'free', position: 2, label: '免费可见', strict: false, effect: '空集时放行付费渠道' },
+        ],
+        emptySetFallback: { note: '所有过滤都空时放开「免费可见」这一层', appliesTo: ['免费可见'], excludes: ['渠道已实现'] },
+        cooldowns: { busyMs: 2000, rateMs: 60000, maxMs: 600000, note: '指数退避，封顶 10 分钟' },
+        gate: {
+          codearts: { active: 1, limit: 2, ratio: 0.5, coolingMs: 0, streak429: 0, failRate: 0.1, failSamples: 10 },
+          // 冷却中的一家：验证「冷却中 Xs」+ 高亮（不只是冷冰冰一个秒数）
+          kilo: { active: 0, limit: 3, ratio: 0, coolingMs: 15000, streak429: 2, failRate: 0.5, failSamples: 4 },
+        },
+        configurable: [
+          { path: 'routing.priority', label: '优先策略', type: 'select', options: ['free-first', 'balanced', 'reliability-first'], value: 'free-first', source: 'default', effect: '决定排序时的权重偏向' },
+          { path: 'routing.autoSwitch', label: '自动选路', type: 'bool', value: true, source: 'config', effect: '关掉后只按手动链逐个尝试' },
+          { path: 'routing.cooldowns.rateMs', label: '被限流后冷却', type: 'number', unit: 'ms', value: 60000, source: 'default', effect: '命中 429 后等多久再试' },
+          {
+            path: 'sources.limits',
+            paths: ['sources.limits.codearts', 'sources.limits.kilo'],
+            label: '每家并发上限',
+            type: 'number',
+            value: { codearts: 2, kilo: 3 },
+            source: 'config',
+            effect: '同一家同时最多几个请求',
+          },
+        ],
+      },
+    },
   },
   chain: {
     ok: true,
@@ -167,8 +220,12 @@ const FIX = {
       chain: { overrides: [] },
       budget: { perCallCNY: 1, dailyCNY: 10, monthlyCNY: 100 },
       paid: { enabled: false, allowAutoCall: false, confirmEachTurn: true },
-      vision: { mode: 'off' },
-      search: { sources: ['bing-rss', 'bing-html', 'sogou', 'mwmbl'], budgetMs: 15000 },
+      vision: { mode: 'off', consented: false, model: 'Qwen2.5-VL-72B-Instruct', cacheSize: 200, maxImagesPerTurn: 4, maxImageBytes: 5242880 },
+      search: {
+        enabled: true, sources: ['bing-rss', 'bing-html', 'sogou', 'mwmbl'],
+        budgetMs: 15000, cacheTtlMs: 300000, ratePerMin: 20, maxResults: 8,
+      },
+      subagentRouting: { mode: 'auto', model: null, fallback: 'global' },
       sources: { disabled: [] },
     },
     defaults: {},
@@ -189,12 +246,36 @@ const FIX = {
     spend: {
       ok: true, empty: false, file: '/home/ubuntu/.dsh/cs-myfree/ledger.jsonl', total: 10, failed: 1, paidCount: 0, costTotalCNY: 0, costUnknown: 0,
       days: [{ date: '2026-11-03', calls: 10, costCNY: 0, costUnknown: 0, in: 0, out: 0, paid: 0, providers: ['pollinations', 'ovh', 'kilo'] }],
-      providers: [{ provider: 'kilo', calls: 6, in: 0, out: 0, failed: 0, costCNY: 0 }, { provider: 'ovh', calls: 3, in: 0, out: 0, failed: 1, costCNY: 0 }],
+      providers: [
+        {
+          provider: 'kilo', calls: 6, in: 1200, out: 3400, failed: 0, costCNY: 0, switched: 2,
+          models: {
+            'kilo-auto/free': { model: 'kilo-auto/free', calls: 5, failed: 0, in: 1000, out: 3000, switched: 2 },
+            'kilo-pro': { model: 'kilo-pro', calls: 1, failed: 0, in: 200, out: 400, switched: 0 },
+          },
+        },
+        { provider: 'ovh', calls: 3, in: 0, out: 0, failed: 1, costCNY: 0, switched: 1 },
+      ],
+      // 契约 A：切换成功（口径 A，分母 = 真正发出请求的候选尝试）
+      switches: { total: 3, byProvider: { kilo: 2, ovh: 1 }, byModel: { 'kilo/kilo-auto/free': 2 }, switchSuccessRate: 0.75 },
     },
     token: { ok: true, days: [] },
     summary: { todayCNY: 0, monthCNY: 0, todayCalls: 10, totalCalls: 10, failedCalls: 1, paidCalls: 0, costUnknown: 0, lastAt: 1793689675044 },
   },
-  cash: { ok: true, deepseek: { available: true, balances: [{ currency: 'CNY', total: 11, granted: 0, topped: 11 }] }, errors: [] },
+  cash: {
+    ok: true,
+    deepseek: { available: true, balances: [{ currency: 'CNY', total: 11, granted: 0, topped: 11 }] },
+    // 火山方舟三分支（live / estimated / error）：fixture 用 estimated，因为本机没配主账号 AK/SK
+    ark: {
+      provider: 'ark', total: 3.5, currency: 'CNY', source: 'estimated', error: null,
+      fetchedAt: 1793690401174,
+      period: { fromMs: 1791098400000, toMs: 1793690400000 },
+      note: '真实账单需主账号 AK/SK 签名查询',
+      basis: 'ledger-30d',
+      billingQuery: null,
+    },
+    errors: [],
+  },
   checkinStatus: {
     ok: true, enabled: true, alive: true, running: false, at_time: '10:05',
     nextAt: 1793745900000, lastAt: 1793664300000, lastDate: '2026-11-03',
@@ -545,9 +626,24 @@ function makeBackend(overrides = {}) {
     bulkDelayOk: true,
     scopeFiles: [],
     legacyRejectColon: false, // true ⇒ 模拟旧后端 capture 拒绝 AK:SK
+    // 需求 #5/#6：作用域层夹具（key = `${scope}:${id||''}`）+ 可选模型/渠道清单
+    settingsLayers: {},       // 各层已存配置（global 仍走 runtimeConfig）
+    settingsContext: null,    // meta.context 覆盖（workspaceId / sessionId / teamId）
+    settingsModels: null,     // /settings.models 覆盖（不给 ⇒ 用默认三条）
+    settingsChannels: null,   // /settings.channels 覆盖（不给 ⇒ 用默认两条）
+    rejectSettingsConj: null, // 形如 'PATCH' / 'POST'：模拟旧后端不支持该方法（405）
     fail: {},
     log: [],
     ...overrides,
+  }
+  const layerKey = (scope, id) => scope + ':' + (id || '')
+  const layerCfg = (scope, id) => (scope === 'global'
+    ? clone(db.runtimeConfig)
+    : clone(db.settingsLayers[layerKey(scope, id)] || {}))
+  const setLayerCfg = (scope, id, cfg) => {
+    if (scope === 'global') db.runtimeConfig = clone(cfg)
+    else if (Object.keys(cfg || {}).length === 0) delete db.settingsLayers[layerKey(scope, id)]
+    else db.settingsLayers[layerKey(scope, id)] = clone(cfg)
   }
   const eff = () => mergeChain(db.builtin, db.overrides)
   const stateBody = () => {
@@ -560,7 +656,7 @@ function makeBackend(overrides = {}) {
   }
   async function backend(url, req) {
     const base = url.split('?')[0]
-    db.log.push({ url: base, method: req.method })
+    db.log.push({ url: base, method: req.method, body: req.body ? clone(req.body) : undefined })
     if (db.fail[base]) return { status: db.fail[base], body: { ok: false, error: 'mock failure ' + db.fail[base] } }
     if (req.method === 'GET') {
       switch (base) {
@@ -586,6 +682,42 @@ function makeBackend(overrides = {}) {
             effective: { config: {}, layers: { global: Object.keys(db.runtimeConfig).length, preset: 0, session: 0 }, ids: {} },
             hint: FIX.scope.hint,
           },
+        }
+        case '/cs-myfree/settings': {
+          const ctx = db.settingsContext || { workspaceId: null, sessionId: null, teamId: null }
+          const layers = [
+            { scope: 'global', id: null, owner: null, setKeys: Object.keys(db.runtimeConfig).length, config: clone(db.runtimeConfig) },
+            { scope: 'workspace', id: ctx.workspaceId || null, owner: null, setKeys: Object.keys(layerCfg('workspace', ctx.workspaceId)).length, config: layerCfg('workspace', ctx.workspaceId) },
+            { scope: 'session', id: ctx.sessionId || null, owner: null, setKeys: Object.keys(layerCfg('session', ctx.sessionId)).length, config: layerCfg('session', ctx.sessionId) },
+            { scope: 'team', id: ctx.teamId || null, owner: null, setKeys: Object.keys(layerCfg('team', ctx.teamId)).length, config: layerCfg('team', ctx.teamId) },
+          ]
+          const scopes = db.scopes || { workspaces: [{ id: 'dev', label: 'dev' }, { id: 'pa', label: 'pa' }], teams: [{ id: 'room-0077fb14', label: 'test-room' }], session: { id: 's1', label: '测试会话' } }
+          const byLayer = { global: clone(db.runtimeConfig) }
+          for (const scope of ['workspace', 'session', 'team']) {
+            const cfg = layerCfg(scope, ctx[scope + 'Id'])
+            if (Object.keys(cfg).length > 0) byLayer[scope] = cfg
+          }
+          return {
+            body: {
+              ok: true, at: Date.now(),
+              layers,
+              effective: { config: clone(db.runtimeConfig), layers: { global: 1, workspace: 0, session: 0, team: 0 }, ids: {}, byLayer },
+              scopes,
+              meta: { isAdmin: true, context: ctx, note: 'isAdmin=false 时，owner=admin 的层只读' },
+              models: db.settingsModels || [
+                { provider: 'kilo', label: 'Kilo 免费池', models: [{ id: 'kilo-auto/free', name: 'kilo-auto/free' }] },
+                { provider: 'ovh', label: 'OVH 免费视觉', models: [{ id: 'Qwen3.5-397B-A17B', name: 'Qwen3.5-397B-A17B' }] },
+                { provider: 'codearts', label: 'CodeArts（华为云）', models: [{ id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' }] },
+              ],
+              channels: db.settingsChannels || [
+                { id: 'kilo', label: 'Kilo 免费池', loggedIn: false, state: 'ok', failCount: 0, coolingMs: 0, blacklisted: false, usable: true },
+                { id: 'codearts', label: 'CodeArts（华为云）', loggedIn: true, state: 'ok', failCount: 0, coolingMs: 0, blacklisted: false, usable: true },
+              ],
+              recent: [],
+              failures: null,
+              hint: '优先级：全局 ← 工作区 ← 会话 ← 团队（团队最窄最优先）。',
+            },
+          }
         }
         case '/cs-myfree/login/status': return { body: clone(FIX.loginStatus) }
         case '/cs-myfree/checkin/status': return { body: clone(FIX.checkinStatus) }
@@ -629,6 +761,20 @@ function makeBackend(overrides = {}) {
         const name = b.scope === 'global' ? 'config.json' : `config.${b.scope}.${b.id}.json`
         if (!db.scopeFiles.find((f) => f.name === name)) db.scopeFiles.push({ name, scope: b.scope })
         return { body: { ok: true, scope: b.scope, layers: { global: 1, preset: b.scope === 'preset' ? 1 : 0, session: b.scope === 'session' ? 1 : 0 }, hint: '已写入 ' + b.scope + ' 作用域' } }
+      }
+      case '/cs-myfree/settings': {
+        const b = req.body || {}
+        // 旧后端兼容用例：显式拒绝某种方法（前端应降级到另一种）
+        if (db.rejectSettingsConj && db.rejectSettingsConj === req.method) {
+          return { status: 405, body: { ok: false, error: 'method not allowed' } }
+        }
+        if (!['global', 'workspace', 'session', 'team'].includes(b.scope)) return { body: { ok: false, error: '未知作用域：' + b.scope } }
+        if (b.scope !== 'global' && !b.id) return { body: { ok: false, error: b.scope + ' 作用域需要 id' } }
+        if (!b.patch || typeof b.patch !== 'object') return { body: { ok: false, error: '缺少 patch' } }
+        // 真实语义（与 src/web/settings.js 一致）：patch 里 null ⇒ 删掉该层该键（恢复继承）
+        const next = applyPatch(layerCfg(b.scope, b.id), b.patch)
+        setLayerCfg(b.scope, b.id, next)
+        return { body: { ok: true, scope: b.scope, id: b.id ?? null, owner: 'admin', setKeys: Object.keys(next).length, hint: '已保存，下次请求生效' } }
       }
       case '/cs-myfree/channels/parse': {
         const r = captureCredential(req.body?.text)
@@ -719,6 +865,26 @@ function makeBackend(overrides = {}) {
         db.probe = { at: Date.now(), results: [{ id: 'kilo', ok: true, ms: 100, sample: 'pong' }, { id: 'ovh', ok: false, ms: 20000, error: 'timeout' }], anyOk: true, okCount: 1 }
         return { body: { ok: true, ...db.probe } }
       }
+      // 「测试搜索」：真联网端点（POST /search/run {q}）；这里返回多源 + 部分超时的真实形状
+      case '/cs-myfree/search/run': {
+        const q = (req.body && req.body.q) || ''
+        if (db.searchDisabled) return { body: { ok: false, error: '搜索已关闭（设置里打开）', results: [], sources: [] } }
+        return {
+          body: {
+            ok: true, q, at: Date.now(), total: 2, budgetMs: 15000, timedOut: true,
+            results: [
+              { title: 'DeepSeek Harness 文档', url: 'https://example.com/dsh', snippet: '插件与技能', source: 'bing-rss', rank: 1 },
+              { title: 'Cordis 组合说明', url: 'https://example.com/cordis', snippet: 'bundle patch', source: 'mwmbl', rank: 2 },
+            ],
+            sources: [
+              { id: 'bing-rss', ok: true, ms: 820, count: 1 },
+              { id: 'bing-html', ok: false, ms: 15000, count: 0, error: 'timeout' },
+              { id: 'sogou', ok: true, ms: 640, count: 0 },
+              { id: 'mwmbl', ok: true, ms: 310, count: 1 },
+            ],
+          },
+        }
+      }
       case '/cs-myfree/diag': return { body: clone(FIX.diag) }
     }
     return { status: 404, body: { ok: false, error: 'not found ' + base } }
@@ -736,31 +902,24 @@ async function waitFor(c, pred, { timeout = 9000, label = '' } = {}) {
   throw new Error('等待超时' + (label ? '：' + label : '') + '\n实际：' + c.text().slice(-900))
 }
 
+// design/21 §1：5 Tab 信息架构 → 4 个可见 tab（W4 预留不占位）
 const PANELS = [
-  { tab: '总览', must: ['一眼看懂当前状态', '2 条候选', '1/18 家已登录', '免密源 3 个（Kilo 免费池 / OVH 免费视觉 / Pollinations）', '默认降级链 2 条：kilo → ovh', '默认全关（不会自动花钱）'] },
-  { tab: '供给源', must: ['探测免密源', '全部测试', '全部续期', '免密源（无需登录）', '账号渠道（18 家 · 已登录 1 家', '暂不可用', '已验证', '未验证', '需代理', '厂商官网', '一键登录'] },
-  { tab: '模型目录', must: ['免密源默认模型', 'kilo-auto/free', 'Qwen3.5-397B-A17B', '✅ 860ms', '❌ timeout', '已登录渠道的模型（4 个）', 'codearts · 4 个', 'codearts/deepseek-v4.1-flash', '来源：内置清单', 'text 输入模态'] },
-  { tab: '降级链 ★', must: ['内置链2 条', '覆盖层1 条', '生效链2 条', '生效链来源', '内置 2 + 覆盖 1 ⇒ 合并 2 条', '+ 加一条', '保存覆盖层', '清空草稿', '页面这份链 = 运行时实际选路'] },
-  { tab: '钉选', must: ['生效链里 tier 最小的就是当前首选', '★ kilo / kilo-auto/free', 'ovh / Qwen3.5-397B-A17B'] },
-  { tab: '额度健康', must: ['自动签到 / 领积分', '立即签到（全部渠道）', '定时器', '✅ 运行中', '积分 / 余额（按渠道）', '2000 积分', '未实现/未登录：需 OAuth token，未实现', '签到 / 续期开关', '免密源状态', '最近探测', '可签到渠道'] },
-  { tab: '保护策略', must: ['当前生效值', '识图档位', '搜索预算', '15000 ms', '只声明了 text 模态'] },
-  { tab: '预算付费', must: ['当前生效值', '① 付费源', '④ 单次限额', '¥1', '¥10', '¥100', '五道闸门', '禁止付费'] },
-  { tab: '省 Token', must: ['RTK 工具输出压缩', '取决于宿主是否调用', '诚实说明'] },
-  { tab: '可观测', must: ['花费汇总', '今日调用10', '累计调用10', '按渠道', 'kilo6 次', 'ledger.jsonl'] },
-  { tab: '导入导出', must: ['导出链覆盖层', '"provider": "kilo"', '导入链覆盖层', '复制 JSON', '导入并覆盖'] },
-  { tab: '作用域', must: ['已有作用域文件：', '已设 0 个顶层键', '「全局」范围的设置', '生效顺序', '撤销修改'] },
-  { tab: '诊断', must: ['一键体检', '检查路由 / 状态目录 / 链 / 免密源 / 余额 / 渠道'] },
+  { tab: '总览', must: ['一眼看懂当前状态', '2 条候选', '1/18 家已登录', '现在能用什么', '一键体检', '检查路由 / 状态目录', '花费与用量', '花费汇总', '今日调用10', 'ledger.jsonl'] },
+  { tab: '供给源', must: ['探测免密源', '全部测试', '全部续期', '免密源（无需登录）', '账号渠道（18 家 · 已登录 1 家', '暂不可用', '已验证', '未验证', '额度与签到', '自动签到 / 领积分', '2000 积分'] },
+  { tab: '模型与路由', must: ['自动路由', '开（自动选路）', '优先顺序', '手动降级链（覆盖）', '内置链2 条', '渠道模型', '显示全部渠道', 'CodeArts（华为云）', 'kilo-auto/free', '正常'] },
+  { tab: '设置', must: ['① 这些设置应用在', '所有对话（全局）', '这个工作区', '这个对话', '这个团队', '默认用哪个模型', '允许用付费模型吗', '哪些渠道可用', '最近 5 次请求', '火山方舟余额', '并发与冷却', '同时最多几个请求（按渠道）', '失败后等多久再试（秒）', '被限流后等多久（秒）', '保护策略', '预算与付费', '省 Token', '备份与恢复', '保存这一层'] },
 ]
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ① 13 面板：渲染、字段、回调、与真实 API 快照一致
+// ① 14 面板：渲染、字段、回调、与真实 API 快照一致
 // ─────────────────────────────────────────────────────────────────────────────
-test('ZONES 是 W0..W12 共 13 个分区，且与 tab 视图一一对应', async () => {
+test('ZONES 是 W0..W3 共 4 个分区（design/21 §1：总览/供给源/模型与路由/设置，W4 预留）', async () => {
   const c = await mount({ backend: makeBackend().backend })
   const ids = c.mod.ZONES.map((z) => z.id)
-  assert.equal(c.mod.ZONES.length, 13)
+  assert.equal(c.mod.ZONES.length, 4)
   assert.equal(ids[0], 'W0')
-  for (let i = 1; i <= 12; i++) assert.ok(ids.includes('W' + i), '缺少 W' + i)
+  assert.equal(ids.join(','), 'W0,W1,W2,W3')
+  assert.equal(c.mod.ZONES.map((z) => z.key).join(','), 'overview,sources,models,settings')
   c.unmount()
 })
 
@@ -779,19 +938,10 @@ for (const p of PANELS) {
 
 test('每个面板的按钮/开关都注册了回调（不走纯文本假按钮）', async () => {
   const expectButtons = {
-    '总览': ['刷新'],
-    '供给源': ['探测免密源', '全部测试', '全部续期', '再加一个', '一键登录'],
-    '模型目录': ['刷新', '重新拉取渠道模型'],
-    '降级链 ★': ['+ 加一条', '保存覆盖层', '清空草稿'],
-    '钉选': [],
-    '额度健康': ['立即签到（全部渠道）', '刷新状态', '保存', '重新加载'],
-    '保护策略': ['保存', '重新加载'],
-    '预算付费': ['保存', '重新加载'],
-    '省 Token': [],
-    '可观测': ['刷新'],
-    '导入导出': ['复制 JSON', '导入并覆盖', '清空'],
-    '作用域': ['全局', '预设', '会话', '保存', '撤销修改'],
-    '诊断': ['一键体检'],
+    '总览': ['刷新', '一键体检'],
+    '供给源': ['探测免密源', '全部测试', '全部续期', '再加一个', '一键登录', '立即签到（全部渠道）', '刷新状态', '重新加载'],
+    '模型与路由': ['+ 加一条', '保存覆盖层', '清空草稿', '显示全部渠道', '去「设置」页调整'],
+    '设置': ['保存这一层', '复制 JSON', '导入并覆盖', '清空'],
   }
   const c = await mount({ backend: makeBackend().backend })
   try {
@@ -808,7 +958,7 @@ test('每个面板的按钮/开关都注册了回调（不走纯文本假按钮�
   } finally { c.unmount() }
 })
 
-test('全部 13 面板在接口 500 时都有错误文案（不静默假装加载中）', async () => {
+test('全部 4 个面板在接口 500 时都有错误文案（不静默假装加载中）', async () => {
   const be = makeBackend()
   const failAll = async (url) => ({ status: 500, body: { ok: false, error: 'boom' } })
   const c = await mount({ backend: failAll })
@@ -817,28 +967,17 @@ test('全部 13 面板在接口 500 时都有错误文案（不静默假装加�
     const expect = {
       '总览': '状态接口读取失败',
       '供给源': '出错了',
-      '模型目录': '读取失败',
-      '降级链 ★': '出错了',
-      '钉选': '出错了',
-      '额度健康': '状态接口读取失败',
-      '保护策略': '配置读取失败',
-      '预算付费': '配置读取失败',
-      '可观测': '出错了',
-      '导入导出': '链路读取失败',
-      '作用域': '出错了',
+      '模型与路由': '读取失败',
+      '设置': '设置读取失败',
     }
     for (const [tab, needle] of Object.entries(expect)) {
       await c.openTab(tab)
       assert.ok(c.text().includes(needle), `${tab} 错误态缺少「${needle}」：${c.text().slice(0, 400)}`)
     }
-    // 诊断页：点体检才请求，失败要有 ❌
-    await c.openTab('诊断')
-    await c.click('一键体检')
-    assert.ok(c.text().includes('HTTP 500'), '诊断失败应显示 HTTP 状态：' + c.text().slice(-300))
   } finally { c.unmount() }
 })
 
-test('空数据时 13 面板有明确空态（不崩、不显示假数据）', async () => {
+test('空数据时 4 个面板有明确空态（不崩、不显示假数据）', async () => {
   const empty = {
     '/cs-myfree/state': { ok: true, sources: { keyless: [], channels: [], counts: { keyless: 0, channels: 0, checkin: 0, manualRefresh: 0, proxyRequired: 0 } }, chain: { builtinCount: 0, overrideCount: 0, effectiveCount: 0, tiers: [] }, config: { vision: 'off', search: [], budget: {}, paid: {} }, probe: null, checkin: { supported: [], note: '无' } },
     '/cs-myfree/chain': { ok: true, builtin: [], overrides: [], effective: [], tiers: [], applied: true },
@@ -847,6 +986,7 @@ test('空数据时 13 面板有明确空态（不崩、不显示假数据）', a
     '/cs-myfree/channels/models': { ok: true, total: 0, models: [], byChannel: {} },
     '/cs-myfree/config': { ok: true, config: {}, defaults: {} },
     '/cs-myfree/scope': { ok: true, files: [], effective: { layers: { global: 0, preset: 0, session: 0 } }, hint: '' },
+    '/cs-myfree/settings': { ok: true, layers: [{ scope: 'global', id: null, owner: null, setKeys: 0, config: {} }, { scope: 'workspace', id: null, owner: null, setKeys: 0, config: {} }, { scope: 'session', id: null, owner: null, setKeys: 0, config: {} }, { scope: 'team', id: null, owner: null, setKeys: 0, config: {} }], effective: { config: {}, layers: {}, ids: {}, byLayer: {} }, scopes: { workspaces: [], teams: [], session: null }, meta: { isAdmin: true, context: {} }, models: [], channels: [], recent: [], failures: null, hint: '' },
     '/cs-myfree/ledger': { ok: true, summary: {}, spend: { ok: false, days: [], providers: [] }, token: { days: [] } },
     '/cs-myfree/cash': { ok: true, deepseek: null, errors: ['未配置 DEEPSEEK_API_KEY'] },
     '/cs-myfree/diag': { ok: true, summary: '全部通过', checks: [] },
@@ -858,22 +998,17 @@ test('空数据时 13 面板有明确空态（不崩、不显示假数据）', a
       await c.openTab(p.tab)
       assert.equal(c.text().includes('这个区域渲染失败了'), false, `${p.tab} 空数据时崩溃`)
     }
-    assert.ok(c.text().includes('0 条候选（空 ⇒ 必失败）') || true) // 总览空链提示在下面单独断言
-    await c.openTab('降级链 ★')
-    assert.ok(c.text().includes('（空 —— 保存后完全使用内置链）'), c.text().slice(0, 400))
-    await c.openTab('钉选')
-    assert.ok(c.text().includes('（生效链为空）'))
-    await c.openTab('模型目录')
-    assert.ok(c.text().includes('（后端没有返回任何免密源）'))
-    assert.ok(c.text().includes('暂无渠道模型'))
+    // 模型与路由：无渠道/无模型时的空态
+    await c.openTab('模型与路由')
+    assert.ok(c.text().includes('（没有可显示的模型数据）'), c.text().slice(0, 400))
+    // 供给源：0 渠道 + 签到无数据
     await c.openTab('供给源')
     assert.ok(c.text().includes('账号渠道（0 家'))
-    await c.openTab('作用域')
-    assert.ok(c.text().includes('已设 0 个顶层键'))
-    await c.openTab('可观测')
-    assert.ok(c.text().includes('今日花费') && c.text().includes('¥0'))
-    await c.openTab('额度健康')
     assert.ok(c.text().includes('暂无已登录渠道的积分数据'), c.text().slice(-500))
+    // 总览：空链提示 + 花费 ¥0
+    await c.openTab('总览')
+    assert.ok(c.text().includes('0 条候选（空 ⇒ 必失败）'), c.text().slice(0, 400))
+    assert.ok(c.text().includes('今日花费') && c.text().includes('¥0'), c.text().slice(0, 400))
   } finally { c.unmount() }
 })
 
@@ -951,17 +1086,18 @@ test('流程② 改降级链：内置条目可见可删（禁用）→ 加一条
   const c = await mount({ backend: be.backend })
   try {
     await c.start()
-    await c.openTab('降级链 ★')
+    await c.openTab('模型与路由')
 
     // 🔴 初始：覆盖层 1 条(kilo) + 内置里未被覆盖的 1 条(ovh) ⇒ 2 行可见
-    assert.equal(c.selects().length, 6, '初始应显示 2 行（共 6 个下拉）')
+    // 每行 3 个下拉（平台 / 跨平台搜模型是 input / 模型 / 层）；末尾 1 个是「复杂路由基本规则」里的策略下拉
+    assert.equal(c.selects().length, 7, '初始应显示 2 行（6 个下拉）+ 路由规则 1 个')
     // 内置条目必须可见（否则用户「删不掉」——这是用户实测的原始 bug）
     assert.ok(c.text().includes('Qwen3.5-397B-A17B'), '内置的 ovh 必须作为一行显示')
     assert.ok(c.text().includes('kilo-auto/free'), '覆盖层的 kilo 必须显示')
 
     // 加一条新行
     await c.click('+ 加一条')
-    assert.equal(c.selects().length, 9, '3 行 × 3 下拉')
+    assert.equal(c.selects().length, 10, '3 行 × 3 下拉 + 路由规则 1 个')
 
     // 把新增行改成 codearts + 模型 + T2
     let sels = c.selects()
@@ -989,7 +1125,7 @@ test('流程② 改降级链：内置条目可见可删（禁用）→ 加一条
 
     // 重载后 3 行（kilo 已禁用但作为规则保留 + ovh + codearts），每行 3 下拉
     const afterReload = c.selects().length
-    assert.equal(afterReload, 9, '重载后应仍显示 3 行（每行 3 下拉）：实际 ' + afterReload)
+    assert.equal(afterReload, 10, '重载后应仍显示 3 行（每行 3 下拉）+ 路由规则 1 个：实际 ' + afterReload)
 
     // 旧后端 applied=false ⇒ 必须提示需重启，不能假装已生效
     be.db.chainApplied = false
@@ -1010,8 +1146,11 @@ test('流程③ 探测免密源：逐源显示结果，并刷新额度健康', a
     assert.ok(c.text().includes('100ms'), '应显示耗时')
     assert.ok(c.text().includes('❌ ovh'))
     assert.ok(c.text().includes('timeout'), '应显示失败原因')
-    await c.openTab('额度健康')
-    assert.ok(c.text().includes('1 个（只探测默认优先源'), '不能把没探测的源算进分母：' + c.text().slice(-400))
+    // 额度健康并入供给源：切走再切回，HealthZone 重新挂载并读到探测后的范围（okCount=1，不含没探测的源）
+    await c.openTab('总览')
+    await c.openTab('供给源')
+    await c.waitFor(() => c.text().includes('可用1 个（只探测默认优先源'), { label: '刷新后探测范围' })
+    assert.ok(c.text().includes('只探测默认优先源 Kilo/OVH'), '不能把没探测的源算进分母：' + c.text().slice(-400))
   } finally { c.unmount() }
 })
 
@@ -1020,16 +1159,24 @@ test('流程④ 改预算：后端热更新则显示已保存；只写盘不热�
   const c = await mount({ backend: be.backend })
   try {
     await c.start()
-    await c.openTab('预算付费')
-    const nums = c.inputs('number')
-    await c.change(nums[1], '5')                   // dailyCNY
-    await c.click('保存')
+    await c.openTab('设置')
+    // BudgetZone 的「⑤ 日限额 (¥)」：按 label 定位其后第一个数字输入（设置页内输入多，不能按顺序猜）
+    const all = c.nodes()
+    const labelIdx = all.findIndex((n) => n.props && n.props.children === '⑤ 日限额 (¥)')
+    assert.ok(labelIdx >= 0, '设置页应包含 BudgetZone 的日限额 label：' + c.text().slice(0, 500))
+    const daily = all.slice(labelIdx + 1).find((n) => n.type === 'input' && n.props.type === 'number')
+    assert.ok(daily, '日限额 label 后应有数字输入')
+    await c.change(daily, '5')
+    // BudgetZone 自己的「保存」按钮（按组件 path 区分，避免点到保护策略的保存）
+    const saveBtn = c.nodes().find((n) => n.type === 'button' && String(n.props.children).includes('保存') && n.path.includes('BudgetZone'))
+    assert.ok(saveBtn, 'BudgetZone 应有保存按钮')
+    await c.click(saveBtn)
     assert.ok(c.text().includes('运行时仍是旧值'), '必须抓到「写盘成功但运行时没变」：' + c.text().slice(-600))
     assert.ok(c.text().includes('budget.dailyCNY'), '要指出具体字段')
     assert.ok(c.text().includes('需重启插件/宿主'), '要给出修复动作')
 
     be.db.staleConfig = false                       // 新后端：热更新
-    await c.click('保存')
+    await c.click(saveBtn)
     assert.ok(c.text().includes('✅ 已保存'), c.text().slice(-400))
   } finally { c.unmount() }
 })
@@ -1039,7 +1186,7 @@ test('流程⑤ 一键体检：正常显示 6 项；接口失败显示错误', a
   const c = await mount({ backend: be.backend })
   try {
     await c.start()
-    await c.openTab('诊断')
+    await c.openTab('总览')
     await c.click('一键体检')
     assert.ok(c.text().includes('全部通过'))
     for (const name of ['HTTP 路由', '状态目录', '降级链', '免密源', 'DeepSeek 余额', '渠道协议']) {
@@ -1051,25 +1198,86 @@ test('流程⑤ 一键体检：正常显示 6 项；接口失败显示错误', a
   } finally { c.unmount() }
 })
 
-test('流程⑥ 作用域：全局保存如实提示；预设用输入框（不再 window.prompt）并能写入', async () => {
-  const be = makeBackend({ staleConfig: true })
+test('流程⑥ 设置作用域：下拉选真实对象 → 保存对应层；枚举为空时手填兜底', async () => {
+  const be = makeBackend()
   const c = await mount({ backend: be.backend })
   try {
     await c.start()
-    await c.openTab('作用域')
-    const nums = c.inputs('number')
-    await c.change(nums[1], '5')
-    await c.click('保存')
-    assert.ok(c.text().includes('已写入全局配置文件') && c.text().includes('需重启'), c.text().slice(-600))
+    await c.openTab('设置')
+    // 重渲染后 select 是新对象 ⇒ 一律按「选项内容」识别，不靠对象身份比较
+    const optVals = (s) => {
+      const out = []
+      const walk = (node) => {
+        for (const ch of (Array.isArray(node) ? node : [node])) {
+          if (!ch || !ch.props) continue
+          if (typeof ch.props.value === 'string' && ch.props.value) out.push(ch.props.value)
+          if (Array.isArray(ch.props.children)) walk(ch.props.children)
+          if (Array.isArray(ch.children)) walk(ch.children)
+        }
+      }
+      walk(s && s.props && s.props.children)
+      return out
+    }
+    const selBy = (pred) => c.selects().find((s) => pred(optVals(s)))
+    const scopeDropdown = () => selBy((v) => v.includes('global') && v.includes('team'))
+    const wsDropdown = () => selBy((v) => v.includes('dev') || v.includes('pa'))
+    const teamDropdown = () => selBy((v) => v.some((x) => /^room-/.test(x)))
+    const modelDropdown = () => selBy((v) => v.includes('deepseek-v4.1-flash') || v.includes('kilo-auto/free'))
 
-    await c.click('预设')
-    const idInput = c.nodes().find((n) => n.type === 'input' && /dev-steward/.test(n.props.placeholder || ''))
-    assert.ok(idInput, '预设卡片应出现 id 输入框，而不是弹 window.prompt')
-    await c.change(idInput, 'dev-steward')
-    await c.click('保存')
-    assert.ok(c.text().includes('已写入「preset」作用域文件'), c.text().slice(-500))
-    assert.ok(be.db.scopeFiles.some((f) => f.name === 'config.preset.dev-steward.json'))
-    assert.ok(c.text().includes('config.preset.dev-steward.json'), '重载后应展示已有作用域文件')
+    // ① 作用域下拉：4 个选项（所有对话/这个工作区/这个对话/这个团队）
+    const scopeSel = scopeDropdown()
+    assert.ok(scopeSel, '应有作用域下拉：' + c.text().slice(0, 300))
+    assert.deepEqual(optVals(scopeSel), ['global', 'workspace', 'session', 'team'], '作用域下拉选项固定 4 项')
+    assert.ok(c.text().includes('所有对话（全局）'), '选项文案人类化：' + c.text().slice(0, 300))
+
+    // ② 全局层保存：改默认模型 → 保存这一层 → POST /settings scope=global
+    await c.waitFor(() => modelDropdown(), { label: '模型下拉出现' })
+    const modelSel = modelDropdown()
+    assert.ok(modelSel, '应有模型下拉')
+    await c.change(modelSel, 'deepseek-v4.1-flash')
+    await c.click('保存这一层')
+    await c.waitFor(() => c.text().includes('✅ 已保存'), { label: '全局保存反馈' })
+    const gPost = be.db.log.filter((x) => x.url === '/cs-myfree/settings' && x.method === 'POST').pop()
+    assert.ok(gPost, 'DEBUG settings log=' + JSON.stringify(be.db.log.filter((x) => x.url.includes('/settings')).map((x) => x.url + ':' + x.method)).slice(-300) + ' text=' + c.text().slice(-200))
+    assert.ok(gPost.body.scope === 'global', '应 POST scope=global：' + JSON.stringify(gPost.body))
+
+    // ③ 切 workspace → 出现工作区下拉（枚举来自 GET /settings scopes.workspaces）→ 选 pa → 保存带 id=pa
+    await c.change(scopeDropdown(), 'workspace')
+    await c.waitFor(() => wsDropdown(), { label: '工作区下拉出现' })
+    const wsSel = wsDropdown()
+    const wsOpts = optVals(wsSel)
+    assert.ok(wsOpts.includes('dev') && wsOpts.includes('pa'), '工作区枚举应来自后端 scopes：' + JSON.stringify(wsOpts))
+    await c.change(wsSel, 'pa')
+    // 选非当前上下文对象 ⇒ 表单置空；改默认模型制造一个改动再保存（空 patch 会提示「无需保存」不发请求）
+    await c.waitFor(() => modelDropdown(), { label: '模型下拉仍在' })
+    const modelSel2 = modelDropdown()
+    assert.ok(modelSel2, '模型下拉应存在')
+    await c.change(modelSel2, 'deepseek-v4.1-flash')
+    await c.click('保存这一层')
+    await c.waitFor(() => c.text().includes('✅ 已保存'), { label: '工作区保存反馈' })
+    const wPost = be.db.log.filter((x) => x.url === '/cs-myfree/settings' && x.method === 'POST').pop()
+    assert.ok(wPost, 'DEBUG log=' + JSON.stringify(be.db.log.map(x => x.url + ':' + x.method)).slice(-400) + ' text=' + c.text().slice(-260))
+    assert.ok(wPost && wPost.body.scope === 'workspace' && wPost.body.id === 'pa', '应 POST workspace/pa：' + JSON.stringify(wPost && wPost.body))
+
+    // ④ 切 team → 团队下拉选项来自 scopes.teams（label 用房间名）
+    await c.change(scopeDropdown(), 'team')
+    await c.waitFor(() => teamDropdown(), { label: '团队下拉出现' })
+    const tmSel = teamDropdown()
+    assert.ok(tmSel, '团队下拉应出现')
+    const tmOpts = optVals(tmSel)
+    assert.ok(tmOpts.includes('room-0077fb14'), '团队枚举应来自后端 scopes：' + JSON.stringify(tmOpts))
+    assert.ok(JSON.stringify(tmSel.props.children).includes('test-room'), '团队 label 应展示房间名')
+
+    // ⑤ 切 session → 显示当前会话（不可选别的会话）
+    await c.change(scopeDropdown(), 'session')
+    await c.waitFor(() => c.text().includes('当前会话：'), { label: '会话显示' })
+    assert.ok(c.text().includes('测试会话'), '应显示当前会话 label：' + c.text().slice(-300))
+
+    // ⑥ 枚举为空 → 手填兜底（不崩、给出可手填的输入框）
+    be.db.scopes = { workspaces: [], teams: [], session: null }
+    await c.change(scopeDropdown(), 'workspace')
+    await c.waitFor(() => c.text().includes('当前没有可选的工作区'), { label: '手填兜底' })
+    assert.ok(c.text().includes('可手填 ID'), c.text().slice(-300))
   } finally { c.unmount() }
 })
 
@@ -1078,7 +1286,7 @@ test('流程⑦ 导入导出：剪贴板不可用要报错；导入 JSON 真的�
   const c = await mount({ backend: be.backend, clipboard: { writeText: () => Promise.reject(new Error('denied')) } })
   try {
     await c.start()
-    await c.openTab('导入导出')
+    await c.openTab('设置')
     await c.click('复制 JSON')
     assert.ok(c.text().includes('复制失败'), '非安全上下文必须诚实报错：' + c.text().slice(-300))
     c.setClipboard({ writeText: () => Promise.resolve() })
@@ -1128,7 +1336,7 @@ test('诚实性：链面板同时展示 builtin / overrides / effective 三个�
   const c = await mount({ backend: makeBackend().backend })
   try {
     await c.start()
-    await c.openTab('降级链 ★')
+    await c.openTab('模型与路由')
     for (const s of ['内置链2 条', '覆盖层1 条', '生效链2 条', '生效链来源', '内置 2 + 覆盖 1 ⇒ 合并 2 条']) {
       assert.ok(c.text().includes(s), '缺少：' + s)
     }
@@ -1140,7 +1348,7 @@ test('诚实性：配置/链保存的结果必须区分「立即生效 / 需重�
   const c = await mount({ backend: be.backend })
   try {
     await c.start()
-    await c.openTab('降级链 ★')
+    await c.openTab('模型与路由')
     await c.click('保存覆盖层')
     assert.ok(c.text().includes('✅ 已保存并立即生效'), 'applied=true 口径')
     be.db.chainApplied = false
@@ -1149,7 +1357,7 @@ test('诚实性：配置/链保存的结果必须区分「立即生效 / 需重�
   } finally { c.unmount() }
 })
 
-test('诚实性：13 个 tab 全部挂载时没有 Render 错误被 ErrorBoundary 吞掉', async () => {
+test('诚实性：4 个 tab 全部挂载时没有 Render 错误被 ErrorBoundary 吞掉', async () => {
   const c = await mount({ backend: makeBackend().backend })
   try {
     await c.start()
@@ -1182,7 +1390,7 @@ test('额度健康：自动签到状态 + 积分真实数据 + 立即签到结�
   const c = await mount({ backend: be.backend })
   try {
     await c.start()
-    await c.openTab('额度健康')
+    await c.openTab('供给源')
     // 状态来自 /checkin/status（不是硬编码）
     for (const s of ['自动签到 / 领积分', '✅ 已开启（每天 10:05）', '✅ 运行中', '下次运行', '上次运行', '领取 2 个账号（+2000 积分）']) {
       assert.ok(c.text().includes(s), '缺少签到状态：' + s + '\n' + c.text().slice(-700))
@@ -1209,5 +1417,415 @@ test('额度健康：自动签到状态 + 积分真实数据 + 立即签到结�
     assert.ok(saved.length >= 1, '应 POST /config')
     assert.equal(be.db.config.checkin?.enabled, false, '配置应写入 checkin.enabled=false')
     assert.ok(be.db.config.checkin, '配置里必须有 checkin 对象')
+  } finally { c.unmount() }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑤ 2026-11 第三轮：路由基本规则 / 子智能体路由 / 联网搜索 / 识图 / 火山方舟
+//    （需求原文：规则说明 + 统计 + 设置三合一，且**不许**加「启用/关闭路由规则」总开关）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** select 的所有 option.value（含 optgroup 里的），用于「按选项内容」而不是对象身份找控件 */
+function optValsOf(sel) {
+  const out = []
+  const walk = (node) => {
+    for (const ch of (Array.isArray(node) ? node : [node])) {
+      if (!ch || !ch.props) continue
+      if (typeof ch.props.value === 'string' && ch.props.value) out.push(ch.props.value)
+      if (Array.isArray(ch.props.children)) walk(ch.props.children)
+      if (Array.isArray(ch.children)) walk(ch.children)
+    }
+  }
+  walk(sel && sel.props && sel.props.children)
+  return out
+}
+
+test('文案存在性：切换成功 / 路由基本规则 / 子智能体路由 / 联网搜索 / 识图（用户点名要的五处）', async () => {
+  const c = await mount({ backend: makeBackend().backend })
+  try {
+    await c.start()
+    await c.openTab('总览')
+    assert.ok(c.text().includes('切换成功'), '总览页缺「切换成功」：' + c.text().slice(0, 900))
+    await c.openTab('模型与路由')
+    assert.ok(c.text().includes('路由基本规则'), '模型与路由页缺「路由基本规则」：' + c.text().slice(-900))
+    await c.openTab('设置')
+    const t = c.text()
+    for (const s of ['联网搜索', '识图', '子智能体路由', '火山方舟余额']) {
+      assert.ok(t.includes(s), '设置页缺「' + s + '」：' + t.slice(-1500))
+    }
+  } finally { c.unmount() }
+})
+
+test('路由基本规则：策略/排序/权重/过滤层/空集兜底/冷却/闸门统计/设置项齐全', async () => {
+  const c = await mount({ backend: makeBackend().backend })
+  try {
+    await c.start()
+    await c.openTab('模型与路由')
+    const t = c.text()
+    for (const s of [
+      '路由基本规则',
+      '策略（当前：free-first）',
+      // ① 策略：label + desc + evidence（实测依据），非 active 压暗
+      '免费优先', '先试免密源，再试付费渠道', '实测依据：实测免密源成功率更高',
+      '均衡', '按拥挤度与失败率均衡打分',
+      // ② 排序：人话 + 等宽小字数组
+      '先过严格过滤层，再过免费过滤层，然后比拥挤度，最后比失败率。',
+      'impl → free → load → fail',
+      // ③ 权重
+      '拥挤度权重（load）', '失败率权重（fail）',
+      // ④ 过滤层：位置 + 名称 + 严格/可放宽 + effect
+      '#1 渠道已实现', '严格', '未实现的渠道直接剔除（空集也不放宽）',
+      '#2 免费可见', '可放宽', '空集时放行付费渠道',
+      // ⑤ 空集兜底
+      '空集兜底范围', '所有过滤都空时放开「免费可见」这一层', '永不放宽：渠道已实现',
+      // ⑥ 冷却参数
+      '冷却参数（当前生效值）', 'busyMs', 'rateMs', 'maxMs', '指数退避，封顶 10 分钟',
+      // ⑦ 闸门统计（7 列）
+      '各家闸门统计（实时）', '活跃/上限', '占比', '冷却', '429连击', '失败率', '样本数',
+      'codearts', '1/2', '50%', '冷却中 15s',
+      // ⑧ 设置项（控件 + effect + 来源）
+      '设置（保存到全局层）', '优先策略', '默认值', '已自定义', '每家并发上限',
+    ]) assert.ok(t.includes(s), '缺少文案：' + s + '\n' + t.slice(-1500))
+
+    // 🔴 定位红线：这是「说明 + 统计 + 设置」面板，不许出现任何总开关
+    assert.equal(/启用.{0,6}路由|关闭.{0,6}路由|路由.{0,4}(总开关|总用|启用|关闭)/.test(t), false,
+      '路由基本规则不许有「启用/关闭路由规则」总开关：' + t.slice(-1200))
+  } finally { c.unmount() }
+})
+
+test('路由基本规则：闸门无数据显示「暂无闸门数据」；严格=黄徽标、可放宽=灰徽标；冷却高亮', async () => {
+  const baseRules = {
+    policy: 'blended',
+    policyOptions: [
+      { id: 'blended', label: '混合', desc: '当前生效', active: true, evidence: '实测更稳' },
+      { id: 'free-first', label: '免费优先', desc: '先免费', active: false, evidence: '实测免费源会挂' },
+    ],
+    order: ['tier', 'billing'],
+    orderHuman: '先分层，再看计费。',
+    weights: { load: 1, fail: 1 },
+    filters: [
+      { id: 'a', label: '渠道已实现', position: 1, strict: true, effect: '硬剔除' },
+      { id: 'b', label: '免费可见', position: 2, strict: false, effect: '空集放宽' },
+    ],
+    emptySetFallback: { appliesTo: ['免费可见'], excludes: ['渠道已实现'], note: '空集时放开免费层' },
+    cooldowns: { busyMs: 1000, rateMs: 2000, maxMs: 3000, note: '指数退避' },
+    gate: {},
+    configurable: [],
+  }
+  const c = await mount({ backend: makeBackend().backend })
+  try {
+    await c.start(c.mod.RoutingRulesCard, { rules: baseRules })
+    assert.ok(c.text().includes('暂无闸门数据'), '无闸门数据时必须明确说「暂无闸门数据」：' + c.text().slice(-600))
+
+    // 徽标档位靠背景色断言（warn = 黄，dim = 灰）——比断言文案更硬的证据
+    const spanOf = (s) => c.nodes().find((n) => n.type === 'span' && n.children.length === 1 && n.children[0].text === s)
+    assert.ok((spanOf('严格').props.style.background || '').includes('220,160,40'), '严格必须是 warn 档（黄）徽标')
+    assert.ok((spanOf('可放宽').props.style.background || '').includes('128,128,128'), '可放宽必须是 dim 档（灰）徽标')
+
+    // 冷却中：既要写「冷却中 Xs」，又要高亮（warn 前景色）
+    await c.start(c.mod.RoutingRulesCard, {
+      rules: Object.assign({}, baseRules, {
+        gate: { kilo: { active: 0, limit: 3, ratio: 0, coolingMs: 15000, streak429: 2, failRate: 0.5, failSamples: 4 } },
+      }),
+    })
+    assert.ok(c.text().includes('冷却中 15s'), '冷却中的渠道必须写「冷却中 15s」：' + c.text().slice(-600))
+    const cool = spanOf('冷却中 15s')
+    assert.ok(cool, '找不到冷却单元格')
+    assert.equal(cool.props.style.color, 'var(--dsw-alias-state-warn-primary)', '冷却中必须高亮（warn 色）')
+    // 失败率 + 样本数必须同时给出（只有百分比没有样本数 = 不可信）
+    assert.ok(c.text().includes('50%'), c.text().slice(-400))
+    assert.ok(c.text().includes('样本数'), c.text().slice(-400))
+  } finally { c.unmount() }
+})
+
+test('子智能体路由：三选项 + 人话说明；pinned 展开模型下拉与兜底，保存写 subagentRouting', async () => {
+  const be = makeBackend()
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start()
+    await c.openTab('设置')
+    const t0 = c.text()
+    for (const s of [
+      '子智能体路由',
+      '选了一个对话后，子智能体默认不跟随上级对话的模型，由 myfree 接手自动切换。',
+      '不跟随路由，自动切换',
+      '不跟随路由，后续仍由全局或单独设置兜底（选定一个模型）',
+      '跟随路由，后续仍由全局或单独设置兜底',
+    ]) assert.ok(t0.includes(s), '缺少文案：' + s + '\n' + t0.slice(-1600))
+    // 默认 auto：不展开模型下拉/兜底（否则「选了一个模型」这张表单看起来像必填）
+    assert.equal(t0.includes('固定用哪个模型'), false, 'auto 模式不该展开模型下拉')
+
+    // 选 pinned ⇒ 展开模型下拉（选项来自 GET /settings 的 models）+ 兜底两选
+    // ⚠️ 必须带「选项二：」前缀：clickableByText 是**子串**匹配，
+    //    '跟随路由，后续仍由全局或单独设置兜底' 恰是「不跟随路由，…」的子串 ⇒ 选项三会误点成选项二。
+    await c.click('选项二：不跟随路由，后续仍由全局或单独设置兜底')
+    await c.waitFor(() => c.text().includes('固定用哪个模型'), { label: 'pinned 展开模型下拉' })
+    assert.ok(c.text().includes('兜底：主选不可用时怎么办'), c.text().slice(-800))
+    // ⚠️ 「默认用哪个模型」下拉的选项也是同一份模型列表 ⇒ 子智能体卡片里的那个在 DOM 里更靠后（取最后一个）；
+    //    取第一个会误改 model.default（本用例第一版就踩了这个坑）
+    const modelSels = c.selects().filter((s) => optValsOf(s).includes('kilo-auto/free'))
+    assert.ok(modelSels.length >= 2, '应有「默认模型」与「子智能体固定模型」两个模型下拉：' + JSON.stringify(modelSels.map(optValsOf)))
+    const modelSel = modelSels[modelSels.length - 1]
+    await c.change(modelSel, 'kilo-auto/free')
+    const fbSel = c.selects().find((s) => { const v = optValsOf(s); return v.includes('global') && v.includes('scope') })
+    assert.ok(fbSel, '兜底必须是 global / scope 两选')
+    await c.change(fbSel, 'scope')
+
+    await c.click('保存这一层')
+    await c.waitFor(() => c.text().includes('✅ 已保存'), { label: '保存反馈' })
+    const post = be.db.log.filter((x) => x.url === '/cs-myfree/settings' && x.method === 'POST').pop()
+    assert.ok(post, '应 POST /settings')
+    assert.deepEqual(post.body.patch.subagentRouting,
+      { mode: 'pinned', model: 'kilo-auto/free', fallback: 'scope' },
+      '必须按 subagentRouting.{mode,model,fallback} 落盘：' + JSON.stringify(post.body.patch))
+
+    // 选 follow ⇒ 模型下拉收起，兜底仍在（follow 也要兜底，否则主链全挂直接失败）
+    // ⚠️ 同上：必须用「选项三：」前缀消歧义
+    await c.click('选项三：跟随路由，后续仍由全局或单独设置兜底')
+    await c.waitFor(() => !c.text().includes('固定用哪个模型'), { label: 'follow 收起模型下拉' })
+    assert.ok(c.text().includes('兜底：主选不可用时怎么办'), c.text().slice(-800))
+  } finally { c.unmount() }
+})
+
+test('火山方舟：live/estimated/error 三分支徽标与口径；估算分支绝不出现「官方/实时/live」', async () => {
+  const c = await mount({ backend: makeBackend().backend })
+  try {
+    // ① live：徽标「实时」+ total + currency + period + fetchedAt（本地时间）
+    await c.start(c.mod.ArkCard, {
+      ark: {
+        provider: 'ark', total: 12.5, currency: 'CNY', source: 'live', error: null,
+        fetchedAt: 1793690401174, period: { fromMs: 1791098400000, toMs: 1793690400000 }, billingQuery: 'q',
+      },
+      onRefresh: () => {},
+    })
+    let t = c.text()
+    for (const s of ['火山方舟余额', '实时', '¥12.50', '币种 CNY', '查询时间', '统计区间']) {
+      assert.ok(t.includes(s), 'live 分支缺少：' + s + '\n' + t)
+    }
+
+    // ② estimated：徽标「估算」+ total + note/basis；🔴 不许出现 官方/实时/live
+    await c.start(c.mod.ArkCard, {
+      ark: {
+        provider: 'ark', total: 3.5, currency: 'CNY', source: 'estimated', error: null,
+        note: '真实账单需主账号 AK/SK 签名查询', basis: 'ledger-30d', fetchedAt: 1793690401174,
+      },
+      onRefresh: () => {},
+    })
+    t = c.text()
+    for (const s of ['估算', '¥3.50', '本地账本近 30 天', '不等于账单数字', '口径：ledger-30d']) {
+      assert.ok(t.includes(s), 'estimated 分支缺少：' + s + '\n' + t)
+    }
+    for (const bad of ['官方', '实时', 'live']) {
+      assert.equal(t.includes(bad), false, '估算分支的文案里绝不许出现「' + bad + '」：' + t)
+    }
+
+    // ③ error：徽标「不可用」+ error + 「需要主账号 AK/SK 才能查真实账单」
+    await c.start(c.mod.ArkCard, {
+      ark: { provider: 'ark', total: null, currency: 'CNY', source: 'error', error: 'ARK 查询失败：未配置凭据', fetchedAt: null },
+      onRefresh: () => {},
+    })
+    t = c.text()
+    for (const s of ['不可用', 'ARK 查询失败：未配置凭据', '需要主账号 AK/SK 才能查真实账单', 'VOLC_ACCESS_KEY_ID']) {
+      assert.ok(t.includes(s), 'error 分支缺少：' + s + '\n' + t)
+    }
+    assert.equal(t.includes('¥'), false, 'error 分支不该显示金额（没数字就显示 —）')
+  } finally { c.unmount() }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 需求 #5：设置完工作区/对话后，展示「哪些地方和全局不一样」
+// ─────────────────────────────────────────────────────────────────────────────
+/** 收集一个 select 下所有 option 的 value（optgroup 递归） */
+function optionValues(node, out = []) {
+  for (const ch of (node && node.children) || []) {
+    if (ch && ch.type === 'option' && ch.props && ch.props.value != null) out.push(ch.props.value)
+    optionValues(ch, out)
+  }
+  return out
+}
+
+/** 页面上「模型下拉」（带 optgroup 的那个 select） */
+function modelSelect(c) {
+  return c.selects().find((s) => (s.children || []).some((ch) => ch && ch.type === 'optgroup'))
+}
+
+/** 页面上「作用域下拉」（选项固定 4 个） */
+function scopeSelect(c) {
+  return c.selects().find((s) => optionValues(s).join(',') === 'global,workspace,session,team')
+}
+
+test('需求 #5 差异面板：工作区层逐项列出「配置路径/全局值/当前值/来源层」，无差异时显示「与全局一致」', async () => {
+  const be = makeBackend({
+    settingsContext: { workspaceId: 'dev', sessionId: 's1', teamId: null },
+    runtimeConfig: { model: { default: 'kilo-auto/free' }, routing: { autoSwitch: true } },
+    settingsLayers: {
+      'workspace:dev': { model: { default: 'deepseek-v4.1-flash' }, sources: { hidden: ['qoder'] } },
+    },
+  })
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start(c.mod.SettingsPage)
+    // 全局层：面板不出现（没有"跟谁不一样"这回事）
+    assert.equal(c.text().includes('与全局不同'), false, '全局层不该出现差异面板：' + c.text().slice(0, 400))
+
+    await c.change(scopeSelect(c), 'workspace')
+    await c.waitFor(() => c.text().includes('与全局不同'), { label: '工作区差异面板' })
+    const t = c.text()
+    assert.ok(t.includes('与全局不同（2 项）'), '应显示差异项数：' + t.slice(0, 700))
+    for (const s of ['配置路径', '全局值', '当前值', '来源层', '恢复全局']) {
+      assert.ok(t.includes(s), '差异面板缺少列/按钮：' + s + '\n' + t.slice(0, 800))
+    }
+    // 逐行：路径 + 全局值 + 当前值 + 来源层
+    assert.ok(t.includes('model.default'), '缺少差异路径 model.default：' + t.slice(0, 800))
+    assert.ok(t.includes('kilo-auto/free'), '缺少全局值：' + t.slice(0, 800))
+    assert.ok(t.includes('deepseek-v4.1-flash'), '缺少当前值：' + t.slice(0, 800))
+    assert.ok(t.includes('sources.hidden'), '数组型差异也要列出：' + t.slice(0, 800))
+    assert.ok(t.includes('工作区'), '来源层应标「工作区」：' + t.slice(0, 800))
+    // 面板挂在页面顶部（先于「① 这些设置应用在」）
+    assert.ok(t.indexOf('与全局不同') < t.indexOf('① 这些设置应用在'), '面板应在设置项上方：' + t.slice(0, 400))
+
+    // 无差异的层（对话层还没写过）：显示「与全局一致」
+    await c.change(scopeSelect(c), 'session')
+    await c.waitFor(() => c.text().includes('与全局一致'), { label: '对话层无差异' })
+    assert.ok(c.text().includes('这一层还没有任何设置跟全局不同'), c.text().slice(0, 600))
+    assert.equal(c.text().includes('与全局不同'), false, '无差异时不该出现「与全局不同」')
+  } finally { c.unmount() }
+})
+
+test('需求 #5 恢复全局：PATCH /settings 删掉该层该键（不是把全局值拷进来），成功后差异消失', async () => {
+  const be = makeBackend({
+    settingsContext: { workspaceId: 'dev', sessionId: 's1', teamId: null },
+    runtimeConfig: { model: { default: 'kilo-auto/free' }, routing: { autoSwitch: true } },
+    settingsLayers: {
+      'workspace:dev': { model: { default: 'deepseek-v4.1-flash' }, sources: { hidden: ['qoder'] } },
+    },
+  })
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start(c.mod.SettingsPage)
+    await c.change(scopeSelect(c), 'workspace')
+    await c.waitFor(() => c.text().includes('与全局不同（2 项）'), { label: '两项差异' })
+
+    // 点 model.default 那行的「恢复全局」
+    const btn = c.nodes().find((n) => n.props && n.props['data-diff-restore'] === 'model.default')
+    assert.ok(btn, '找不到 model.default 的恢复按钮：' + c.text().slice(0, 700))
+    assert.equal(typeof btn.props.onClick, 'function', '恢复按钮必须有 onClick')
+    await c.click(btn)
+    await c.waitFor(() => c.text().includes('✅ 已恢复全局'), { label: '恢复反馈' })
+
+    const patchReq = c.requests.filter((r) => r.url.includes('/settings') && r.method === 'PATCH').pop()
+    assert.ok(patchReq, '恢复全局必须走 PATCH /settings，实际请求：' + JSON.stringify(c.requests.map((r) => r.method + ' ' + r.url).slice(-6)))
+    assert.equal(patchReq.body.scope, 'workspace', 'scope 必须是当前层：' + JSON.stringify(patchReq.body))
+    assert.equal(patchReq.body.id, 'dev', '必须带该层 id：' + JSON.stringify(patchReq.body))
+    assert.deepEqual(patchReq.body.patch, { model: { default: null } },
+      'patch 必须是「删除该键」（null），不是把全局值写进去：' + JSON.stringify(patchReq.body.patch))
+    assert.equal(JSON.stringify(patchReq.body).includes('kilo-auto/free'), false, 'patch 里绝不许出现全局值')
+
+    // 后端真的删了 ⇒ 差异从 2 项变成 1 项
+    assert.equal(be.db.settingsLayers['workspace:dev'].model, undefined, '这一层的 model 应被删掉')
+    await c.waitFor(() => c.text().includes('与全局不同（1 项）'), { label: '差异数下降' })
+    assert.ok(c.text().includes('✅ 已恢复全局：删掉了这一层的「model.default」'), c.text().slice(0, 600))
+  } finally { c.unmount() }
+})
+
+test('需求 #5 恢复全局：后端不支持 PATCH（405）时降级 POST，patch 语义不变', async () => {
+  const be = makeBackend({
+    settingsContext: { workspaceId: 'dev', sessionId: 's1', teamId: null },
+    runtimeConfig: { model: { default: 'kilo-auto/free' } },
+    settingsLayers: { 'workspace:dev': { model: { default: 'deepseek-v4.1-flash' } } },
+    rejectSettingsConj: 'PATCH',
+  })
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start(c.mod.SettingsPage)
+    await c.change(scopeSelect(c), 'workspace')
+    await c.waitFor(() => c.text().includes('与全局不同（1 项）'), { label: '差异一项' })
+    const btn = c.nodes().find((n) => n.props && n.props['data-diff-restore'] === 'model.default')
+    await c.click(btn)
+    await c.waitFor(() => c.text().includes('✅ 已恢复全局'), { label: '降级后仍成功' })
+    const methods = c.requests.filter((r) => r.url.includes('/settings')).map((r) => r.method)
+    assert.ok(methods.includes('PATCH'), '先试 PATCH：' + JSON.stringify(methods))
+    const post = c.requests.filter((r) => r.url.includes('/settings') && r.method === 'POST').pop()
+    assert.ok(post, '405 后应降级 POST：' + JSON.stringify(methods))
+    assert.deepEqual(post.body, { scope: 'workspace', id: 'dev', patch: { model: { default: null } } },
+      '降级后 patch 必须一致：' + JSON.stringify(post.body))
+  } finally { c.unmount() }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 需求 #6：对话里选模型只展示 deepseek 系 / 自加 API / 免费可用 / 华为云
+// ─────────────────────────────────────────────────────────────────────────────
+const MODEL_FIXTURE = [
+  { kind: 'keyless', provider: 'kilo', label: 'Kilo 免费池', models: [{ id: 'kilo-auto/free', name: 'kilo-auto/free' }] },
+  { kind: 'channel', provider: 'deepseek', label: 'DeepSeek 官方', models: [{ id: 'deepseek-chat', name: 'deepseek-chat' }] },
+  { kind: 'channel', provider: 'officeace', label: '华为云 MaaS', models: [{ id: 'maas-qwen3', name: 'MaaS Qwen3' }] },
+  { kind: 'channel', provider: 'codearts', label: 'CodeArts（华为云）', models: [{ id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' }] },
+  { kind: 'channel', provider: 'qoder', label: 'Qoder', models: [{ id: 'qoder-max', name: 'Qoder Max' }] },
+  { kind: 'channel-unlogged', provider: 'loomy', label: 'Loomy', models: [{ id: 'loomy-1', name: 'Loomy 1' }] },
+  { kind: 'channel', provider: 'kilo-paid', label: 'Kilo 付费包', models: [{ id: 'kilo-pro', name: 'Kilo Pro' }], billing: 'free' },
+  { kind: 'channel', provider: 'buddy', label: 'Buddy', models: [{ id: 'buddy-1', name: 'Buddy 1' }], hidden: true },
+]
+
+test('需求 #6 选择器过滤：只留 deepseek 系/自加 API/免费可用/华为云；其它渠道包与 hidden:true 不渲染', async () => {
+  const be = makeBackend({ settingsModels: clone(MODEL_FIXTURE) })
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start(c.mod.SettingsPage)
+    await c.waitFor(() => modelSelect(c), { label: '模型下拉' })
+    const vals = optionValues(modelSelect(c))
+    for (const keep of ['kilo-auto/free', 'deepseek-chat', 'maas-qwen3', 'deepseek-v4.1-flash', 'kilo-pro']) {
+      assert.ok(vals.includes(keep), '白名单来源应保留：' + keep + '；实际 ' + JSON.stringify(vals))
+    }
+    for (const drop of ['qoder-max', 'loomy-1', 'buddy-1']) {
+      assert.equal(vals.includes(drop), false, '非白名单渠道包不该出现在选模型列表：' + drop + '；实际 ' + JSON.stringify(vals))
+    }
+    assert.ok(c.text().includes('这里只列 deepseek 系 / 自加 API / 免费可用渠道 / 华为云'), c.text().slice(0, 800))
+
+    // 渲染兜底：hidden:true 的渠道连「渠道模型」清单里也不许出现（含展开全部）
+    await c.start(c.mod.ModelsZone)
+    await c.waitFor(() => c.text().includes('渠道模型'), { label: '渠道模型清单' })
+    assert.equal(c.text().includes('Buddy'), false, 'hidden:true 的渠道不该渲染：' + c.text().slice(0, 600))
+    await c.click('显示全部渠道')
+    assert.equal(c.text().includes('Buddy'), false, '展开「显示全部渠道」也不渲染 hidden:true：' + c.text().slice(0, 800))
+    assert.ok(c.text().includes('1 个渠道被「不展示」挡掉'), '应如实说明被挡掉的数量：' + c.text().slice(0, 800))
+  } finally { c.unmount() }
+})
+
+test('需求 #6 展示开关：sources.hidden 里的渠道不出现在选择器，取消「展示」后立刻消失并随保存写入 sources.hidden', async () => {
+  const be = makeBackend({
+    settingsModels: clone(MODEL_FIXTURE),
+    runtimeConfig: { sources: { hidden: ['codearts'] } },
+    settingsChannels: [
+      { id: 'codearts', label: 'CodeArts（华为云）', available: true, loginVerified: true, status: '正常', hidden: false, reason: null },
+      { id: 'qoder', label: 'Qoder', available: false, loginVerified: false, status: '未登录', hidden: true, reason: '没有可用账号' },
+    ],
+  })
+  const c = await mount({ backend: be.backend })
+  try {
+    await c.start(c.mod.SettingsPage)
+    await c.waitFor(() => modelSelect(c), { label: '模型下拉' })
+    assert.equal(optionValues(modelSelect(c)).includes('deepseek-v4.1-flash'), false,
+      'sources.hidden 里的渠道不该出现在选模型列表：' + JSON.stringify(optionValues(modelSelect(c))))
+
+    // 表格状态列：可用 / 是否展示 / 状态 三件事都看得见
+    const t0 = c.text()
+    assert.ok(t0.includes('可用') && t0.includes('展示') && t0.includes('状态'), t0.slice(0, 900))
+    assert.ok(t0.includes('没有可用账号'), '不可用渠道要显示原因：' + t0.slice(0, 900))
+
+    // 打开 codearts 的「展示」⇒ 立刻回到选模型列表
+    const hiddenToggle = c.nodes().find((n) => n.props && n.props['data-toggle'] === 'hidden:codearts')
+    assert.ok(hiddenToggle && typeof hiddenToggle.props.onClick === 'function', '应有「展示」开关：' + t0.slice(0, 900))
+    await c.click(hiddenToggle)
+    await c.waitFor(() => optionValues(modelSelect(c)).includes('deepseek-v4.1-flash'), { label: '重新展示' })
+
+    // 再关掉 qoder 的展示 ⇒ sources.hidden 里含 qoder，保存走 POST
+    const qoderToggle = c.nodes().find((n) => n.props && n.props['data-toggle'] === 'hidden:qoder')
+    await c.click(qoderToggle)
+    await c.click('保存这一层')
+    await c.waitFor(() => c.text().includes('✅ 已保存'), { label: '保存展示开关' })
+    const post = c.requests.filter((r) => r.url.includes('/settings') && r.method === 'POST').pop()
+    assert.ok(post, '应 POST /settings')
+    assert.deepEqual(post.body.patch.sources.hidden, ['qoder'],
+      '展示开关写 sources.hidden（codearts 已被移除、qoder 加进来）：' + JSON.stringify(post.body.patch))
   } finally { c.unmount() }
 })

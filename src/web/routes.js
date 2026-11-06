@@ -4,7 +4,7 @@
  * 所有路由统一过 guard（见 web/guard.js）。路径前缀 `/cs-myfree`。
  *
  *   GET  /cs-myfree/health    健康检查（也用于诊断「路由通不通」）
- *   GET  /cs-myfree/state     综合状态（源/链/配置/账本）
+ *   GET  /cs-myfree/state     综合状态（源/链/配置/账本 + routing 路由快照）
  *   GET  /cs-myfree/chain     链（内置 + 覆盖 = 生效）
  *   POST /cs-myfree/chain     写覆盖层（整表覆盖）
  *   POST /cs-myfree/probe     探测免密源（**真实推理请求**）
@@ -39,6 +39,9 @@ import { getSharedGate, BUSY_CODE } from '../adapter/concurrency.js'
 import { maskCredential } from '../pools/channels/accounts.js'
 import { builtinModelsOf } from '../pools/channels/builtin-models.js'
 import { chat } from '../pools/channels/driver.js'
+import { readSettings, updateSettings } from './settings.js'
+import { filterVisibleCatalog } from './routing.js'
+import { webFetch, createSearchCache, createRateLimiter, runMultiSourceSearch } from './search.js'
 
 export const PREFIX = '/cs-myfree'
 
@@ -120,7 +123,9 @@ export function registerRoutes(webServer, opts = {}) {
           }
           try {
             const url = new URL(req.url ?? '/', 'http://localhost')
-            const body = req.method === 'POST' ? await readBody(req) : undefined
+            // 写类方法都要读 body：PATCH/PUT 若不读，PATCH /settings 会被当成 GET
+            // 静默返回设置（不报错、但写不进去），属于最难查的一类失效。
+            const body = ['POST', 'PATCH', 'PUT'].includes(req.method) ? await readBody(req) : undefined
             const out = await handler({ req, res, query: url.searchParams, body })
             if (out !== undefined) sendJson(res, 200, out)
           } catch (err) {
@@ -154,6 +159,16 @@ export function registerRoutes(webServer, opts = {}) {
     const merged = view.effective
 
     const probe = await state?.readProbe?.(null)
+    // 🔴 路由快照（契约 §3 / Lead 验证指标口径）：
+    //    默认授权 + 最近一次准入 stats（逐条去留）+ 每家闸门 {active,limit,ratio,coolingMs,streak429,last429At}
+    //    老版本/未装配时返回 null（**字段缺失向后兼容**，页面不得因此报错）
+    const routing = (() => {
+      try {
+        return typeof opts.routingSnapshot === 'function' ? opts.routingSnapshot() : null
+      } catch (err) {
+        return { ok: false, error: safeErrorText(err) }
+      }
+    })()
     return {
       ok: true,
       at: now(),
@@ -189,6 +204,8 @@ export function registerRoutes(webServer, opts = {}) {
         paid: { enabled: cfg.paid?.enabled === true },
         disabledSources: cfg.sources?.disabled ?? [],
       },
+      // 路由：授权默认值 / 最近准入 / 候选成本视图 / 并发闸门
+      routing,
       probe: probe ? { at: probe.at, anyOk: probe.anyOk, okCount: probe.okCount } : null,
       checkin: {
         supported: checkinSources().map((s) => s.id),
@@ -203,7 +220,11 @@ export function registerRoutes(webServer, opts = {}) {
   // 返回三类可入链的候选：
   //   keyless  — 免密源（kilo / ovh …）及其默认模型
   //   channel  — 已登录渠道 + 其可用模型（远端拉取过就用真实清单，否则用内置兜底）
-  route('/chain/catalog', async () => {
+  //   channel-unlogged — 未登录但已登记的渠道（允许配置，只是会 AUTH 失败）
+  //
+  // 提取为独立函数：/chain/catalog 与 /settings（模型下拉）共用同一份目录，
+  // 保证「页面选的模型 = 后端认识的模型」（铁律2 同源）。
+  const chainCatalogSources = async () => {
     const sources = []
     // ① 免密源
     for (const src of keylessSources()) {
@@ -234,6 +255,9 @@ export function registerRoutes(webServer, opts = {}) {
         label: ch.label ?? provider,
         models,
         accounts: logged.filter((a) => a.provider === provider).length,
+        // 🔴 T3b：拉取失败如实透传（error 字段；UI 显示「拉取失败：<原因>」）
+        error: cache?.[provider]?.error ?? null,
+        source: cache?.[provider]?.source ?? null,
       })
     }
     // ③ 未登录但已登记的渠道（允许配置，只是会 AUTH 失败；UI 会提示）
@@ -249,7 +273,22 @@ export function registerRoutes(webServer, opts = {}) {
         accounts: 0,
       })
     }
-    return { ok: true, at: now(), sources }
+    return sources
+  }
+
+  // ── 对话模型选择器目录（需求 #6）──
+  // 只过滤「展示用目录」，**不动**链/准入/降级（隐藏 ≠ 禁用）。
+  route('/chain/catalog', async ({ query }) => {
+    const sources = await chainCatalogSources()
+    const ctx = typeof opts.getSettingsContext === 'function' ? opts.getSettingsContext() : {}
+    const eff = await effectiveConfig({
+      dshHome: opts.dshHome,
+      sessionId: String(query?.get('sessionId') ?? ctx.sessionId ?? '') || undefined,
+      workspaceId: String(query?.get('workspaceId') ?? ctx.workspaceId ?? '') || undefined,
+      teamId: String(query?.get('teamId') ?? ctx.teamId ?? '') || undefined,
+    })
+    const v = filterVisibleCatalog(sources, eff.config)
+    return { ok: true, at: now(), sources: v.sources, hidden: v.hidden, hiddenSource: v.source }
   })
 
   route('/chain', async ({ body }) => {
@@ -313,6 +352,17 @@ export function registerRoutes(webServer, opts = {}) {
   // ── 模型目录（来自探测缓存 + 内置源定义）──
   route('/models', async () => {
     const probe = await state?.readProbe?.(null)
+    // 🔴 T3b：自定义渠道拉取失败必须可见（不再静默回落内置清单）。
+    //    读模型缓存，每个渠道带 error（有就透传）+ source（remote/builtin/…）。
+    const cache = await readCachedModels(opts.dshHome)
+    const channels = Object.entries(cache ?? {}).map(([id, info]) => ({
+      id,
+      ok: info?.ok === true,
+      error: info?.error ?? null,
+      source: info?.source ?? null,
+      at: info?.at ?? null,
+      modelCount: Array.isArray(info?.models) ? info.models.length : 0,
+    }))
     return {
       ok: true,
       at: now(),
@@ -326,6 +376,7 @@ export function registerRoutes(webServer, opts = {}) {
         probeId: resolveSourceId(s.id),
         probed: probe?.results?.find((r) => r.id === resolveSourceId(s.id)) ?? null,
       })),
+      channels,
       note: '完整模型清单需渠道层登录后由宿主暴露；本页展示免密源可用的默认模型',
     }
   })
@@ -604,9 +655,11 @@ export function registerRoutes(webServer, opts = {}) {
     const id = String(body?.id ?? '').trim()
     let provider = String(body?.provider ?? '').trim()
     let account = null
+    let accountId = null
     if (id) {
       account = await accounts.get(id)
       if (!account) return { ok: false, error: '账号不存在：' + id }
+      accountId = id
       provider = provider || account.provider
     }
     if (!provider) return { ok: false, error: '缺少 provider 或 id' }
@@ -615,9 +668,12 @@ export function registerRoutes(webServer, opts = {}) {
       // 按 provider 找第一条账号（多账号池场景取第一个）
       const list = await accounts.list()
       const one = list.find((a) => a.provider === provider)
-      if (one) account = await accounts.get(one.id)
+      if (one) { account = await accounts.get(one.id); accountId = one.id }
     }
-    return { ok: true, id: provider, account }
+    // 🔴 磁盘记录本身不带 id 字段（键即 id）；账号级功能（验证/并发）必须有它，
+    //    在解析层统一补上，避免每个调用方各写一遍。
+    if (account && accountId) account = { ...account, id: accountId }
+    return { ok: true, id: provider, accountId, account }
   }
 
   /** 取结构化凭据（内部用；绝不回给 UI） */
@@ -785,25 +841,36 @@ export function registerRoutes(webServer, opts = {}) {
     return { ok: cancelled === true, cancelled: cancelled === true, sessionId, hint: cancelled ? '已取消（会话即销毁）' : '会话不存在或已结束' }
   })
 
-  // ── 连通性测试（真发一条最小推理）──
-  route('/login/test', async ({ body }) => {
-    const provider = await resolveProvider(body)
-    if (!provider.ok) return provider
-    const { id: p, account } = provider
+  /**
+   * 真发一条最小推理，判定「这条凭据到底通不通」。
+   *
+   * 🔴 为什么必须抽成函数：`/login/test`（连通性测试）与 `/channels/verify`
+   *    （账号级真机验证，需求 #3）必须是**同一条代码路径**。两处各写一份，
+   *    迟早漂移成「测试说通、验证说失败」——这类「同源」纪律本项目已经踩过坑。
+   *
+   * @param {{provider:string, account:object|null, model?:string, timeoutMs?:number, withAccount?:boolean}} o
+   *   withAccount=true ⇒ 拿并发名额时带上账号（账号级并发，需求 #2 同口径）
+   * @returns {Promise<object>} 与旧 /login/test 响应同形状（ok/provider/model/ms/at/hint/error/kind）
+   */
+  const probeChannel = async ({ provider: p, account = null, model: modelIn = null, timeoutMs = null, withAccount = false }) => {
     const ch = CHANNELS[p]
+    if (!ch) return { ok: false, provider: p, model: null, ms: 0, error: '未知渠道：' + p }
     const cred = await secretOfProvider(p, account)
     if (!cred) return { ok: false, provider: p, model: null, ms: 0, error: '该渠道未登录（无可用凭据）', kind: 'AUTH' }
 
-    const model = String(body?.model ?? builtinModelsOf(p)?.[0]?.id ?? '').trim()
+    const model = String(modelIn ?? builtinModelsOf(p)?.[0]?.id ?? '').trim()
     if (!model) return { ok: false, provider: p, model: null, ms: 0, error: '该渠道没有已知模型，请在 body.model 指定', kind: 'MODEL_NOT_FOUND' }
 
     const started = now()
+    const capMs = Math.min(Number(timeoutMs) || 20_000, 40_000)
 
-    // 🔴 连通性测试也必须拿并发名额：它直接调 driver.chat，绕过 adapter；
+    // 🔴 探测也必须拿并发名额：它直接调 driver.chat，绕过 adapter；
     //    若不拿名额，测试请求会和真实对话抢上游会话（实测 5 并发全部
     //    「并发会话已满」⇒ 闸门形同虚设）。
+    //    账号级（withAccount）时名额按 `provider#accountId` 计，避免「验证别人的账号
+    //    却占用了本账号的名额」。
     const gate = getSharedGate()
-    const slot = await gate.acquire(p)
+    const slot = await gate.acquire(p, withAccount && account?.id ? account.id : undefined)
     if (!slot.ok) {
       return {
         ok: false,
@@ -817,11 +884,11 @@ export function registerRoutes(webServer, opts = {}) {
       }
     }
 
-    // 🔴 连通性测试必须用**流式**：腾讯系（buddy/workbuddy）明确拒绝非流式
+    // 🔴 必须用**流式**：腾讯系（buddy/workbuddy）明确拒绝非流式
     //    （实测 400 code:11101 "Non-stream chat request is currently not supported"）。
     //    流式只读首帧就 abort，不发完整请求 ⇒ 既快又不浪费额度。
     const ctrl = new AbortController()
-    const timer = setTimeout(() => ctrl.abort(), Math.min(Number(body?.timeoutMs) || 20_000, 40_000))
+    const timer = setTimeout(() => ctrl.abort(), capMs)
     try {
       const res = await chat({
         channelId: p,
@@ -833,7 +900,7 @@ export function registerRoutes(webServer, opts = {}) {
         stream: true,
         fetchImpl,
         signal: ctrl.signal,
-        timeoutMs: Math.min(Number(body?.timeoutMs) || 20_000, 40_000),
+        timeoutMs: capMs,
       })
       const ms = now() - started
       // 读一小段流确认「真的开始出数据」（第一个非空 data 帧 = 链路通）
@@ -871,6 +938,7 @@ export function registerRoutes(webServer, opts = {}) {
         provider: p,
         model,
         ms,
+        at: now(),
         error: safeErrorText(err),
         kind: v.kind,
         // 人话说明 + 建议（用户要求「每次中断的提示语要尽量明确」）
@@ -881,6 +949,50 @@ export function registerRoutes(webServer, opts = {}) {
     } finally {
       clearTimeout(timer)
       try { slot.release() } catch { /* ignore */ }
+    }
+  }
+
+  // ── 连通性测试（真发一条最小推理）──
+  route('/login/test', async ({ body }) => {
+    const provider = await resolveProvider(body)
+    if (!provider.ok) return provider
+    const { id: p, account } = provider
+    return await probeChannel({ provider: p, account, model: body?.model, timeoutMs: body?.timeoutMs })
+  })
+
+  // ── 账号级真机验证（需求 #3）──
+  //
+  // 用户原话：「CodeBuddy 和 WorkBuddy、Qoder、OfficeAce 都是已登录未验证，排查处理一下」。
+  // 这里的立场是**不撒谎**：
+  //   · 绝不把 loginVerified 直接置 true 充数（端点对拍 ≠ 真机跑通）；
+  //   · 提供一条「点一下就用真实最小推理验一次」的路径，把**证据（时间戳/原因）**写进账号；
+  //   · 验证失败也照实落盘（verifyError），UI 能说清「为什么没验过」。
+  route('/channels/verify', async ({ body }) => {
+    const provider = await resolveProvider(body)
+    if (!provider.ok) return provider
+    const { id: p, account } = provider
+    if (!account) return { ok: false, provider: p, error: '该渠道没有已登录账号，无从验证（先登录）', kind: 'AUTH' }
+
+    const r = await probeChannel({
+      provider: p,
+      account,
+      model: body?.model,
+      timeoutMs: body?.timeoutMs,
+      withAccount: true,          // 验证的是「这个账号」，名额也按这个账号算
+    })
+    // 只有**真的跑出结论**才写盘：CHANNEL_BUSY / 未登录这类「没发出请求」不写
+    const wrote = r.kind !== BUSY_CODE && r.error !== '该渠道未登录（无可用凭据）'
+      ? await accounts.markVerified(account.id, { ok: r.ok === true, at: r.at ?? now(), error: r.error ?? null })
+      : null
+    return {
+      ...r,
+      accountId: account.id,
+      maskedAccount: account.masked ?? null,
+      verifiedAt: wrote?.verifiedAt ?? account.verifiedAt ?? null,
+      verifyError: r.ok === true ? null : (wrote?.verifyError ?? r.error ?? null),
+      note: r.ok === true
+        ? '已用真实最小推理跑通，已记下验证时间'
+        : (wrote ? '验证未通过，已如实记下原因（不会伪造成已验证）' : '没发出请求（并发满/无凭据），本次不写验证结果'),
     }
   })
 
@@ -1054,6 +1166,27 @@ export function registerRoutes(webServer, opts = {}) {
     }
   })
 
+  // ── 设置页 API（design/19 §1.3；四层作用域 + 权限 meta + patch 语义）──
+  //
+  // 依赖注入：
+  //   · isAdmin           宿主身份服务（缺省 ⇒ 视为 admin，fail-open）
+  //   · getSettingsContext 当前会话/工作区/团队上下文（拿不到返回 {}，UI 可传 query 覆盖）
+  //   · modelCatalog      = chainCatalogSources（与 /chain/catalog 同源）
+  route('/settings', async ({ query, body }) => {
+    const deps = {
+      dshHome: opts.dshHome,
+      isAdmin: typeof opts.isAdmin === 'function' ? opts.isAdmin : () => true,
+      getContext: typeof opts.getSettingsContext === 'function' ? opts.getSettingsContext : () => ({}),
+      modelCatalog: chainCatalogSources,
+      routingSnapshot: typeof opts.routingSnapshot === 'function' ? opts.routingSnapshot : () => null,
+      ledger: () => collectLedger({ dshHome: opts.dshHome }),
+      channels: channelList,
+      now,
+    }
+    if (body === undefined) return await readSettings(deps, query)
+    return await updateSettings(deps, body)
+  })
+
   // ── 一键删除账号（URL 语义更直白；/channels/remove 保留兼容）──
   route('/accounts/remove', async ({ body }) => {
     const id = String(body?.id ?? '').trim()
@@ -1102,6 +1235,69 @@ export function registerRoutes(webServer, opts = {}) {
   } catch (err) {
     logger.warn?.(`注册 ${CALLBACK_PATH} 失败：${safeErrorText(err)}`)
   }
+
+  // ── web 工具：轻量 fetch + 缓存 + 限流 ──
+  //
+  // 契约 C2：缓存 TTL 与限流阈值**从配置读**（cfg.search.cacheTtlMs / cfg.search.ratePerMin），
+  // 不再写死模块默认值。配置是热改的（设置页保存后下次请求生效），所以这里用
+  // 「键变了就重建」的惰性容器：旧 TTL 不会继续作用到新设置上。
+  // （重建会清空缓存与计数桶 —— 这是预期语义：改了设置就该按新设置算。）
+  let _searchCache = null
+  let _searchLimiter = null
+  let _searchToolsKey = ''
+  const searchTools = (cfg) => {
+    const ttlMs = Number(cfg?.search?.cacheTtlMs) || DEFAULTS.search.cacheTtlMs
+    const perMin = Number(cfg?.search?.ratePerMin) || DEFAULTS.search.ratePerMin
+    const key = `${ttlMs}/${perMin}`
+    if (!_searchCache || _searchToolsKey !== key) {
+      _searchCache = createSearchCache({ ttlMs })
+      _searchLimiter = createRateLimiter({ perMin })
+      _searchToolsKey = key
+    }
+    return { cache: _searchCache, limiter: _searchLimiter }
+  }
+
+  // 现有端点（单 URL fetch）**语义与响应形状不变**，只是缓存/限流参数改从配置取（默认值与旧写死值相同）
+  // 🐞 顺手修掉一个既有 bug：route() 包装器传的是**一个上下文对象**
+  //    `{ req, res, query, body }`，原来这里写成位置参数 `(req, res)` ⇒ req 拿到的是
+  //    上下文对象本身 ⇒ readBody(req) 里 `req.on is not a function` ⇒ /search 永远 500
+  //    （无单测覆盖，故一直没暴露）。改成解构后即为原设计的意图，语义不变。
+  route('/search', async ({ req, res }) => {
+    const b = await readBody(req)
+    const url = b && b.url
+    const { cache, limiter } = searchTools(withDefaults(getConfig()))
+    const r = await webFetch({ url, fetchImpl, cache, limiter, timeoutMs: (b && b.timeoutMs) || 10000 })
+    return sendJson(res, r.ok ? 200 : 400, r)
+  }, { method: 'POST' })
+
+  // ── 多源真实搜索（契约 C3）──
+  //
+  // 供设置页「搜索测试」按钮与排障用：显式暴露**每个源**的 ok/ms/count/error，
+  // 让用户能分辨「源挂了」还是「我配错了」。与 POST /search 并存，互不影响。
+  //   请求：{ q, maxResults?, sources? }
+  //   响应：{ ok:true, at, q, sources:[{id,ok,ms,count,error}], results:[{title,url,snippet,source}],
+  //           total, budgetMs, timedOut }
+  // 语义选择（写清楚免得后人以为是漏了）：
+  //   · 返回体一律 200 + ok:false（不像 /search 用 400）：这是**体检结果**，
+  //     前端按 ok 分支渲染即可；HTTP 层失败只留给真正的异常（500）。
+  //   · 不读 body-cache：这是调试端点，用户点一次就该真打一次源站；
+  //     缓存只服务 /search。限流沿用（按源独立桶），避免被连点刷爆源站。
+  route('/search/run', async ({ body }) => {
+    const cfg = withDefaults(getConfig())
+    // 开关关闭 ⇒ 契约 C3 原样文案（UI 直接显示这句话，引导去设置页打开）
+    if (cfg.search?.enabled === false) return { ok: false, error: '搜索已关闭（设置里打开）' }
+    const { limiter } = searchTools(cfg)
+    return await runMultiSourceSearch({
+      q: body?.q,
+      // 请求显式给了就用请求的；否则回落配置（契约 C1 的 search.maxResults）
+      maxResults: body?.maxResults ?? cfg.search?.maxResults,
+      sources: Array.isArray(body?.sources) && body.sources.length ? body.sources : cfg.search?.sources,
+      fetchImpl,
+      budgetMs: cfg.search?.budgetMs,
+      limiter,
+      now,
+    })
+  }, { method: 'POST' })
 
   return registered
 }

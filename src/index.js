@@ -22,8 +22,8 @@ import { preprocessImages, createDescribeCache } from './vision/pipeline.js'
 import { fuseResults, toHostSources } from './search/fuse.js'
 import { PARSERS } from './search/sources.js'
 import { readJson, atomicWrite, withDefaults, DEFAULTS, stripSensitive } from './config/store.js'
-import { guardApply, makeLogger, safeInject, safeEffect, safeRegisterAdapter, safeRegisterSearch, detectHostVersion } from './compat.js'
-import { registerCashRoute, CASH_PATH, queryCash } from './web/cash.js'
+import { guardApply, makeLogger, safeInject, safeEffect, safeProvide, safeRegisterAdapter, safeRegisterSearch, detectHostVersion } from './compat.js'
+import { registerCashRoute, CASH_PATH, queryCash, queryArkOfficial, resolveVolcAkSk } from './web/cash.js'
 import { judge, sendJson } from './web/guard.js'
 import { registerRoutes, PREFIX as API_PREFIX } from './web/routes.js'
 import { appendRecord } from './audit/sources.js'
@@ -33,6 +33,10 @@ import { createAccountStore } from './pools/channels/accounts.js'
 import { readCachedModels, channelModelsAsList, parseModelId, makeModelId, refreshAll } from './pools/channels/catalog.js'
 import { streamChat as channelStream } from './pools/channels/driver.js'
 import { CHANNELS, AUTH } from './pools/channels/protocols.js'
+import { createHintRegistry, installGlobalHints, HINTS_VERSION } from './adapter/routing-hints.js'
+import { getSharedGate, snapshotStats, DEFAULT_LIMITS } from './adapter/concurrency.js'
+import { createRoutingSnapshot } from './web/routing.js'
+import { getSharedBlacklist } from './adapter/blacklist.js'
 import {
   createCheckinScheduler, createCheckinExecutor, readCheckinState, writeCheckinState,
 } from './pools/channels/checkin.js'
@@ -45,6 +49,29 @@ const VERSION = '1.9.20'
 
 export const name = NAME
 export const version = VERSION
+
+/**
+ * 从宿主配置组装并发闸门覆盖参数（design/21 §4）。
+ * 缺省/非法值一律忽略 ⇒ 走 concurrency.js 默认（fail-open，默认行为零变化）。
+ * @param {object} cfg 插件配置（可能无 sources/routing 段）
+ * @returns {{limits?:object, busyCooldownMs?:number, rateLimitCooldownMs?:number}}
+ */
+export function concurrencyGateOpts(cfg = {}) {
+  const out = {}
+  const limits = cfg?.sources?.limits
+  if (limits && typeof limits === 'object' && !Array.isArray(limits)) {
+    const entries = Object.entries(limits).filter(([, v]) => Number.isFinite(Number(v)) && Number(v) > 0)
+    if (entries.length > 0) {
+      // 部分覆盖也安全：基于默认表浅合并（未列的渠道仍走默认上限/default:2）
+      out.limits = { ...DEFAULT_LIMITS, ...Object.fromEntries(entries.map(([k, v]) => [k, Number(v)])) }
+    }
+  }
+  const c = Number(cfg?.routing?.cooldownMs)
+  if (Number.isFinite(c) && c >= 0) out.busyCooldownMs = c
+  const r = Number(cfg?.routing?.rateCooldownMs)
+  if (Number.isFinite(r) && r >= 0) out.rateLimitCooldownMs = r
+  return out
+}
 
 /**
  * 传输层：默认实现用全局 fetch（Node 18+ 内置，零依赖）。
@@ -548,8 +575,37 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     log.info(`自动签到：${st.enabled ? '开启' : '关闭'}（每日 ${st.at}，${st.alive ? '定时器已排程' : '尚未排程'}）`)
   }
 
+  // ── 路由 hint 旁路注册表（授权的唯一实际通道）──
+  //
+  // 宿主把请求对象 `Object.freeze` 后交给 adapter（只能读），平台侧没法往请求里塞
+  // 「这一轮可以付费」。所以走旁路：注册表按 `options.sessionId` 存 hint，
+  // adapter 在准入前查一次；同时挂到 globalThis 符号上供 cs-bots 发现。
+  // 两者都没有 ⇒ adapter 走 free_only（fail-closed）。
+  // 🔴 终态失败黑名单（buddy/qoder 这类 100% 全败渠道不再每次请求都撞一遍）
+  const denyList = getSharedBlacklist()
+
+  const hintRegistry = createHintRegistry()
+  const hintsInstalled = installGlobalHints(hintRegistry)
+  if (!hintsInstalled) {
+    // 契约名缺失 ⇒ 明说缺什么（对方按 setRequestHint 探测，缺了就是「未安装」）
+    log.warn('routing hints 未能挂到 globalThis（契约方法 setRequestHint/getRequestHint/clearRequestHint 不齐）——将只走 cordis 服务')
+  }
+
   let lastFailure = null
   let adapter
+
+  // ── 并发感知参数（design/21 §4）：「配置覆盖」而非改默认值 ──
+  //    cfg.sources.limits.<id>        → 渠道并发上限（人类问法「同时最多几个请求」）
+  //    cfg.routing.cooldownMs         → 失败冷却基值（busyCooldownMs，指数退避起点）
+  //    cfg.routing.rateCooldownMs     → 429 退避基值（rateLimitCooldownMs）
+  //    未配置 ⇒ 完全走 concurrency.js 默认值（fail-open，harness 零回归）。
+  //    在 createAdapter 之前预初始化进程级共享闸门，adapter 会复用同一份（getSharedGate 单例）。
+  const gateOpts = concurrencyGateOpts(cfg)
+  if (Object.keys(gateOpts).length > 0) {
+    getSharedGate(gateOpts)
+    log.info(`并发感知配置已生效：${JSON.stringify(gateOpts).slice(0, 160)}`)
+  }
+
   try {
     adapter = createAdapter({
       extraModels,
@@ -563,6 +619,19 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
       },
       send: cfg.transportBaseUrl ? send : sendDispatch,
       budget: cfg.budgetTurns ?? {},
+      // 契约 B：路由配置**必须传函数**而不是快照 —— `cfg` 是热更的 `let` 变量
+      //（见下方 applyConfig：`cfg = withDefaults(next)`），函数形态下 adapter 每次请求
+      // 重新求值 ⇒ 设置页改完 routing.* **不必重启**就生效。
+      routingConfig: () => cfg,
+      // 契约 E：子智能体路由策略（三选项 auto/pinned/follow）。
+      // 可能为 undefined（老配置文件/未接线时）⇒ adapter 侧按『无配置』兜底（= 今天的行为）。
+      // 与 routingConfig 同理传函数而非快照：adapter 的 subagentRoutingOf() 认两种形态，
+      // 函数形态 ⇒ 设置改完即时生效（不必重启）。
+      subagentRouting: () => cfg.subagentRouting,
+      // 旁路授权通道（同一份注册表：cordis 服务与 globalThis 符号指向它）
+      routingHints: hintRegistry,
+      // 终态失败黑名单（进程级共享：adapter 与 /state 看到同一份）
+      blacklist: denyList,
       onEvent: (e) => {
         if (e?.type === 'failure') lastFailure = { kind: e.kind, provider: e.provider, model: e.model, at: Date.now() }
         log.debug(`${e.type}`, e)
@@ -575,6 +644,48 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
   } catch (err) {
     log.error(`adapter 创建失败（跳过注册）：${err?.message ?? err}`)
   }
+
+  /**
+   * 路由诊断快照（`/state.routing` 与 cs-bots 服务共用**同一份**口径）。
+   * 实现见 `web/routing.js`（唯一实现，可单测）：
+   *   defaultBillingTier / lastAdmission.stats / chain[] / gate{} / hints
+   */
+  const buildRoutingSnapshot = createRoutingSnapshot({
+    adapterOf: () => adapter,
+    hintRegistry,
+    gateOf: () => getSharedGate(),
+    blacklistSnapshot: () => { try { return denyList.snapshot() } catch { return [] } },
+    now: () => Date.now(),
+  })
+
+  // cordis 服务（可发现面；契约 §3）。拿不到就靠 globalThis 符号，再拿不到 ⇒ free_only。
+  //
+  // ⚠️ 命名纪律：这里的 `setRequestHint/getRequestHint/clearRequestHint` 与 globalThis
+  //    符号上的 `api` **必须是同一组名字**（直接委托注册表，禁止两套命名）。
+  //    cs-bots 两个通道都按契约名探测，名字漂移一次就会让授权链路静默空转。
+  const routingApi = {
+    version: HINTS_VERSION,
+    defaultBillingTier: 'free_only',
+    setRequestHint: (sessionId, hint) => hintRegistry.setRequestHint(sessionId, hint),
+    getRequestHint: (sessionId) => hintRegistry.getRequestHint(sessionId),
+    clearRequestHint: (sessionId) => hintRegistry.clearRequestHint(sessionId),
+    // 兼容旧名（同一实现；插件内部/老调用方用）
+    set: (sessionId, hint) => hintRegistry.set(sessionId, hint),
+    get: (sessionId) => hintRegistry.get(sessionId),
+    clear: (sessionId) => hintRegistry.clear(sessionId),
+    hintsSnapshot: () => hintRegistry.snapshot(),
+    chainSnapshot: () => adapter?.chainSnapshot?.() ?? [],
+    admissionSnapshot: () => adapter?.admissionSnapshot?.() ?? null,
+    gateSnapshot: () => snapshotStats(getSharedGate()),
+    // 黑名单：诊断 + 手动解除（用户点了"重新启用"就走这里）
+    blacklistSnapshot: () => denyList.snapshot(),
+    // 黑名单是 provider 级：clear(provider) 清掉该渠道的条目（成功自动解除也走同一语义）
+    clearBlacklist: (provider) => denyList.clear(provider),
+    routingSnapshot: () => buildRoutingSnapshot(),
+  }
+  const routingProvided = safeProvide(ctx, 'csMyfreeRouting', routingApi)
+  if (routingProvided) log.info('路由服务已提供：csMyfreeRouting（hint 注册表 + 准入/闸门快照）')
+  else log.debug('宿主无 provide：路由服务未注册（仍可走 globalThis 符号）')
 
   // ── 注册到宿主（全部走安全调用）──
   if (adapter) {
@@ -621,9 +732,16 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
     }
 
     // 余额（独立路径，保持与本机 myfree 一致的手感）
+    // 契约 D3 接线：默认官方计费查询实现 + 主账号 AK/SK 解析器。
+    //   无 AK/SK ⇒ queryArkOfficial 立刻回 {ok:false, code:'NO_AK_SK'}（零网络），
+    //   cash.js 落到 estimated 分支（本地账本近 30 天估算，如实标注「估算」）。
+    //   🔴 AK/SK 只在内存里传，本文件**不打任何日志、不进响应**。
     const cashRegistered = registerCashRoute(ws, ctx, {
       trustedHosts: cfg.trustedHosts ?? [],
+      dshHome: cfg.dshHome,
       logger: log,
+      volcBalance: (o) => queryArkOfficial(o),
+      resolveVolcAkSk,
       helpers: { judge: (req, o = {}) => judge(req, { ...o, getConnection }), sendJson },
     })
     if (cashRegistered) log.info(`余额路由：${CASH_PATH}`)
@@ -640,6 +758,39 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
         accountStore,
         trustedHosts: cfg.trustedHosts ?? [],
         getConnection,
+        // 设置页权限（design/19 §1.1）：宿主身份服务；缺省 ⇒ 视为 admin（fail-open 最宽松）
+        isAdmin: () => {
+          try {
+            const auth = ctx?.get?.('auth', false)
+            if (auth && typeof auth.isAdmin === 'function') return auth.isAdmin() === true
+          } catch { /* 无身份服务 ⇒ fail-open */ }
+          return true
+        },
+        // 设置页「当前上下文」：会话 ID（含可读 label）/ 工作区名 / 团队 ID（尽力而为；拿不到返回 {}，UI 可传 query 覆盖）
+        getSettingsContext: () => {
+          const out = {}
+          try {
+            const sess = ctx?.get?.('session', false)
+            if (sess && typeof sess.id === 'string' && sess.id) {
+              out.sessionId = sess.id
+              // 会话的可读名（尽力而为；宿主没给就用 id 本身）
+              const label = sess.name || sess.title || sess.id
+              out.session = { id: sess.id, label: typeof label === 'string' && label ? label : sess.id }
+            }
+          } catch { /* ignore */ }
+          try {
+            const cwd = typeof process !== 'undefined' && typeof process.cwd === 'function' ? process.cwd() : ''
+            if (cwd) {
+              const parts = String(cwd).split('/').filter(Boolean)
+              out.workspaceId = parts.length ? parts[parts.length - 1] : cwd
+            }
+          } catch { /* ignore */ }
+          try {
+            const team = ctx?.get?.('team', false)
+            if (team && typeof team.id === 'string' && team.id) out.teamId = team.id
+          } catch { /* ignore */ }
+          return out
+        },
         // 🔴 OAuth 回调必须落在宿主**公网地址**（用户浏览器在另一台机器）
         publicBase: cfg.publicBase ?? (Array.isArray(cfg.trustedHosts) && cfg.trustedHosts.length
           ? `http://${String(cfg.trustedHosts.find((h) => !/^(localhost|127\.|0\.0\.0\.0)/.test(String(h))) ?? cfg.trustedHosts[0]).replace(/:80$/, '')}`
@@ -647,6 +798,8 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
         logger: log,
         // 🔴 页面展示的链 = adapter 实际生效的链（同一份内存数据，不是另一份推算）
         getChain: () => defaultChain,
+        // /state.routing：授权默认值 + 最近准入 stats + 闸门快照（验证指标口径）
+        routingSnapshot: buildRoutingSnapshot,
         // /diag：adapter 注册与派发 + 签到/续期定时器是否活着
         getRuntime: () => ({
           adapterReady: Boolean(adapter),

@@ -71,6 +71,10 @@ export function normalizeChainAliases(list = [], resolve = (x) => x) {
     seen.add(key)
     const next = { provider, model: n.model, tier: n.tier }
     if (n.paid === true) next.paid = true
+    // 🔴 disabled 必须透传：本函数用于「启动时读磁盘链 → adapter」，若在此丢弃，
+    //    mergeChain() 收不到禁用标记 ⇒ 用户禁用的源（kilo/buddy/qoder）重启后又回到链里，
+    //    首次失败就会降级到坏源（2026-11-06 09:36 对话输出污染事故）。
+    if (n.disabled === true) next.disabled = true
     if (n.note) next.note = n.note
     out.push(next)
   }

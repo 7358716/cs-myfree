@@ -183,7 +183,19 @@ export async function listChannels(store) {
       note: ch.note ?? null,
       proxyRequired: ch.proxyRequired === true,
       // 已登录账号（掩码）
-      accounts: mine.map((a) => ({ id: a.id, label: a.label, masked: a.masked, addedAt: a.addedAt, expiresAt: a.expiresAt })),
+      // 🔴 账号级验证字段必须带出去（需求 #3）：漏了的话 UI 永远显示「未验证」，
+      //    用户点了「验证」也看不到结果 —— 数据在 store 里有、在这里被扔掉，最难查。
+      accounts: mine.map((a) => ({
+        id: a.id,
+        label: a.label,
+        masked: a.masked,
+        addedAt: a.addedAt,
+        expiresAt: a.expiresAt,
+        verifiedAt: a.verifiedAt ?? null,
+        verifyError: a.verifyError ?? null,
+        verifyErrorAt: a.verifyErrorAt ?? null,
+        expired: a.expired === true,
+      })),
       loggedIn: mine.length > 0,
     }
   })

@@ -135,3 +135,37 @@ test('空覆盖层不报错', async () => {
   assert.equal(r.changed, false)
   assert.equal(r.before, 0)
 })
+
+// ══════════════════════════════════════════════════════════════════════════
+// 账号级验证字段必须能从 store 一路带进 /channels（需求 #3 的「链路完整性」）
+//
+// 🔴 这条测的是一类真实事故：数据在 store 里有、在中间层被丢弃 ——
+//    表现是「点了验证，页面永远显示未验证」，而每一层单独看都「没毛病」。
+// ══════════════════════════════════════════════════════════════════════════
+test('🔴 listChannels 透传账号级验证字段（verifiedAt / verifyError / expired）', async () => {
+  const home = await tmpHome()
+  const store = createAccountStore(home)
+  const r = await store.save({ provider: 'loomy', credential: 'TOKEN-abcdefghijklmnop' })
+  await store.markVerified(r.id, { ok: true, at: 1793000000000 })
+  const list = await listChannels(store)
+  const loomy = list.find((c) => c.id === 'loomy')
+  const acct = (loomy.accounts || []).find((a) => a.id === r.id)
+  assert.ok(acct, '账号行必须存在')
+  for (const k of ['verifiedAt', 'verifyError', 'verifyErrorAt', 'expired']) {
+    assert.ok(k in acct, '账号行缺字段 ' + k + '（中间层把 store 的字段吃掉了）')
+  }
+  assert.equal(acct.verifiedAt, 1793000000000, '验证时间戳必须透传（否则 UI 永远显示未验证）')
+  assert.equal(acct.verifyError, null)
+  assert.equal(acct.expired, false)
+})
+
+test('未验证账号如实为 null（不预设已验证）', async () => {
+  const home = await tmpHome()
+  const store = createAccountStore(home)
+  await store.save({ provider: 'qoder', credential: 'TOKEN-abcdefghijklmnop' })
+  const list = await listChannels(store)
+  const qoder = list.find((c) => c.id === 'qoder')
+  const acct = qoder.accounts[0]
+  assert.equal(acct.verifiedAt, null, '没跑过就必须是 null')
+  assert.equal(acct.verifyError, null)
+})

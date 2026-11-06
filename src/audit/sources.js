@@ -7,7 +7,12 @@
  *   · 没装其它插件的新机器上，一切功能照常
  *
  * 记录格式（每行一条 JSON）：
- *   { at, day, provider, model, in, out, cost, paid, ok, code, ms }
+ *   { at, day, provider, model, in, out, cost, paid, ok, code, ms, billingTier, billing }
+ *
+ * 分账口径（契约 §3）：
+ *   · `billingTier`：这一笔发生在**什么授权**下（'free_only' | 'paid_allowed'）
+ *   · `billing`：这个候选本身是**免费还是付费**（'free' | 'paid' | 'unknown'）
+ *   · 历史行没有这两个字段 ⇒ 归 'unknown'，**不计入 paid 占比的分子/分母**（口径透明）
  *
  * @module cs-myfree/audit/sources
  */
@@ -37,6 +42,18 @@ export function dateKeyCN(at) {
   return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`
 }
 
+/** 账本里的授权标签归一（非法/缺失 ⇒ 'unknown'，**不默认成 free_only**：那会把未知算成免费） */
+export function normalizeLedgerTier(v) {
+  const s = typeof v === 'string' ? v.trim().toLowerCase() : ''
+  return s === 'free_only' || s === 'paid_allowed' ? s : 'unknown'
+}
+
+/** 账本里的候选成本属性归一（非法/缺失 ⇒ 'unknown'） */
+export function normalizeLedgerBilling(v) {
+  const s = typeof v === 'string' ? v.trim().toLowerCase() : ''
+  return s === 'free' || s === 'paid' ? s : 'unknown'
+}
+
 /**
  * 记一条调用（追加写，失败不影响主流程）。
  * @param {object} rec
@@ -59,6 +76,13 @@ export async function appendRecord(rec, { dshHome } = {}) {
       ok: rec.ok !== false,
       code: rec.code ?? null,
       ms: Number(rec.ms) || null,
+      // 分账字段：每条记录都带（上游没给 ⇒ 'unknown'，绝不猜）
+      billingTier: normalizeLedgerTier(rec.billingTier),
+      billing: normalizeLedgerBilling(rec.billing),
+      // 🔴 切换口径（契约 A3）：这一笔是不是「切换后成功」+ 本轮第几次尝试才成功。
+      //    历史行没有这两个键 ⇒ false / 1（老数据按"没切换、一次成功"读，口径透明）。
+      switched: rec.switched === true,
+      attempts: Number(rec.attempts) || 1,
     }) + '\n'
     await appendFile(ledgerFile(dshHome), line, { mode: 0o600 })
     return true
@@ -78,7 +102,21 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
   // 🔴 失败/中断统计（用户要求页面可见）
   const byCode = new Map()
   const byFailProvider = new Map()
+  // 🔴 分账聚合：三个桶**恒定存在**（页面/指标不用处理「字段缺失」）
+  const byBillingTier = new Map([
+    ['free_only', { billingTier: 'free_only', calls: 0, paidCalls: 0, failed: 0, costCNY: 0, costUnknown: 0 }],
+    ['paid_allowed', { billingTier: 'paid_allowed', calls: 0, paidCalls: 0, failed: 0, costCNY: 0, costUnknown: 0 }],
+    ['unknown', { billingTier: 'unknown', calls: 0, paidCalls: 0, failed: 0, costCNY: 0, costUnknown: 0 }],
+  ])
   const recentFailures = []
+  // 🔴 切换口径（契约 A3）：口径同 adapter.switchSnapshot()（**口径 A**）
+  //    total     = 记了 switched=true 的条数（切换后成功）
+  //    分母      = **成功**条数（每一次成功都是一次"切换机会"）
+  //    为什么不用账本行数当分母：失败行也会写账本，它们不构成"切换机会"
+  const bySwitchProvider = new Map()
+  const bySwitchModel = new Map()
+  let switchTotal = 0
+  let successCalls = 0
   let total = 0, failed = 0, paidCount = 0, costTotal = 0, costUnknown = 0
   let lastAt = null
 
@@ -115,23 +153,73 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
       else if (o.paid === true && !Number.isFinite(o.cost)) { d.costUnknown++; costUnknown++ }
       if (o.provider) d.providers.add(o.provider)
 
+      // 分账：历史行（没有 billingTier）归 'unknown'，不进 paid 占比分子/分母
+      const bTier = normalizeLedgerTier(o.billingTier)
+      const bt = byBillingTier.get(bTier)
+      bt.calls++
+      if (o.paid === true) bt.paidCalls++
+      if (o.ok === false) bt.failed++
+      if (Number.isFinite(o.cost) && o.cost > 0) bt.costCNY += o.cost
+      else if (o.paid === true) bt.costUnknown++
+
+      // ── 切换口径（契约 A3）──
+      // ⚠️ 历史行没有 switched/attempts 字段 ⇒ switched=false，不进分子（口径透明）
+      const switched = o.switched === true
+      const isSuccess = o.ok !== false
+      if (isSuccess) successCalls++
+      if (switched) {
+        switchTotal++
+        const pv0 = o.provider || '(unknown)'
+        bySwitchProvider.set(pv0, (bySwitchProvider.get(pv0) ?? 0) + 1)
+        const mk = `${pv0}/${o.model ?? ''}`
+        bySwitchModel.set(mk, (bySwitchModel.get(mk) ?? 0) + 1)
+      }
+
       const p = o.provider || '(unknown)'
-      if (!byProvider.has(p)) byProvider.set(p, { provider: p, calls: 0, in: 0, out: 0, failed: 0, costCNY: 0 })
+      if (!byProvider.has(p)) {
+        byProvider.set(p, {
+          provider: p, calls: 0, in: 0, out: 0, failed: 0, costCNY: 0, switched: 0,
+          // per-model 子维度（契约 A3）：{ [model]: {calls, failed, in, out, switched} }
+          models: new Map(),
+        })
+      }
       const bp = byProvider.get(p)
       bp.calls++
       bp.in += Number(o.in) || 0
       bp.out += Number(o.out) || 0
       if (o.ok === false) bp.failed++
       if (Number.isFinite(o.cost)) bp.costCNY += o.cost
+      if (switched) bp.switched++
+
+      const mName = o.model ?? '(unknown)'
+      if (!bp.models.has(mName)) bp.models.set(mName, { model: mName, calls: 0, failed: 0, in: 0, out: 0, switched: 0 })
+      const bm = bp.models.get(mName)
+      bm.calls++
+      bm.in += Number(o.in) || 0
+      bm.out += Number(o.out) || 0
+      if (o.ok === false) bm.failed++
+      if (switched) bm.switched++
 
       if (total >= limit) break
     }
   } catch (err) {
     // 文件不存在 = 新装机器 = 正常情况，不是错误
-    if (err?.code !== 'ENOENT') {
-      return { ok: false, reason: String(err?.message ?? err).slice(0, 120), file, days: [], providers: [], total: 0 }
+    const emptySplit = {
+      byBillingTier: {
+        free_only: { billingTier: 'free_only', calls: 0, paidCalls: 0, failed: 0, costCNY: 0, costUnknown: 0 },
+        paid_allowed: { billingTier: 'paid_allowed', calls: 0, paidCalls: 0, failed: 0, costCNY: 0, costUnknown: 0 },
+        unknown: { billingTier: 'unknown', calls: 0, paidCalls: 0, failed: 0, costCNY: 0, costUnknown: 0 },
+      },
+      billingSplit: {
+        knownCalls: 0, unknownCalls: 0, paidCallsOfKnown: 0, paidShareOfKnown: null,
+        formula: 'paid 调用数 / (free_only + paid_allowed) 调用数；unknown 不计入分子/分母',
+      },
     }
-    return { ok: true, empty: true, file, days: [], providers: [], total: 0 }
+    const emptySwitches = { total: 0, switchSuccessRate: null, byProvider: {}, byModel: {} }
+    if (err?.code !== 'ENOENT') {
+      return { ok: false, reason: String(err?.message ?? err).slice(0, 120), file, days: [], providers: [], total: 0, switches: emptySwitches, ...emptySplit }
+    }
+    return { ok: true, empty: true, file, days: [], providers: [], total: 0, switches: emptySwitches, ...emptySplit }
   }
 
   return {
@@ -152,12 +240,45 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
       byProvider: Object.fromEntries([...byFailProvider.entries()].sort((a, b) => b[1] - a[1])),
       recent: recentFailures.slice(0, 20),
     },
+    byBillingTier: Object.fromEntries([...byBillingTier.entries()].map(([k, v]) => [k, {
+      ...v, costCNY: Number(v.costCNY.toFixed(6)),
+    }])),
+    billingSplit: (() => {
+      const tierOf = (k) => byBillingTier.get(k)
+      const knownCalls = tierOf('free_only').calls + tierOf('paid_allowed').calls
+      const knownPaid = tierOf('free_only').paidCalls + tierOf('paid_allowed').paidCalls
+      return {
+        knownCalls,
+        unknownCalls: tierOf('unknown').calls,
+        paidCallsOfKnown: knownPaid,
+        // 口径：只算带授权标签的记录；历史行（unknown）不进分子/分母
+        paidShareOfKnown: knownCalls > 0 ? Number((knownPaid / knownCalls).toFixed(4)) : null,
+        formula: 'paid 调用数 / (free_only + paid_allowed) 调用数；unknown 不计入分子/分母',
+      }
+    })(),
     days: [...byDay.values()]
       .map((d) => ({ ...d, providers: [...d.providers], costCNY: Number(d.costCNY.toFixed(6)) }))
       .sort((a, b) => b.date.localeCompare(a.date))
       .slice(0, 30),
+    // 🔴 切换口径（契约 A3，与 adapter.switchSnapshot() 同口径）
+    //    分母 = **成功调用数**（每一次成功都是一次"切换机会"；失败行不构成机会）
+    switches: {
+      total: switchTotal,
+      switchSuccessRate: successCalls > 0 ? Number(((switchTotal / successCalls) * 100).toFixed(1)) : null,
+      byProvider: Object.fromEntries([...bySwitchProvider.entries()].sort((a, b) => b[1] - a[1])),
+      byModel: Object.fromEntries([...bySwitchModel.entries()].sort((a, b) => b[1] - a[1])),
+      successCalls,
+      formula: '切换成功条数 / 成功调用条数；历史行（无 switched 字段）视为未切换',
+    },
     providers: [...byProvider.values()]
-      .map((p) => ({ ...p, costCNY: Number(p.costCNY.toFixed(6)) }))
+      .map((p) => ({
+        ...p,
+        costCNY: Number(p.costCNY.toFixed(6)),
+        // per-model 子维度（Map ⇒ 普通对象；按 calls 降序，页面上头条目在最前）
+        models: Object.fromEntries([...p.models.entries()]
+          .map(([k, v]) => [k, { ...v }])
+          .sort((a, b) => b[1].calls - a[1].calls)),
+      }))
       .sort((a, b) => b.calls - a.calls)
       .slice(0, 20),
   }

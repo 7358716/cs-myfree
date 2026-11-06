@@ -71,6 +71,16 @@ export function createAccountStore(dshHome) {
           masked: isAkSk ? `${maskCredential(a.ak)} / ${maskCredential(a.sk)}` : (a.credential ? maskCredential(a.credential) : null),
           addedAt: a.addedAt ?? null,
           expiresAt: a.expiresAt ?? null,
+          // ── 账号级真机验证（需求 #3）──
+          // `verifiedAt` = **本账号**用真实最小推理跑通过的时间戳；null = 从未验证。
+          // 与 flow-map 的 `loginVerified` 是两件事：那个说「登录器端点验证过」，
+          // 这个说「这个账号真的能调通」。UI 的「未验证」徽标点一下就能拿到真实证据。
+          verifiedAt: Number.isFinite(a.verifiedAt) ? a.verifiedAt : null,
+          // 最近一次验证失败的如实记录（原因 + 时间），供 UI 显示「为什么没验过」
+          verifyError: typeof a.verifyError === 'string' && a.verifyError ? a.verifyError : null,
+          verifyErrorAt: Number.isFinite(a.verifyErrorAt) ? a.verifyErrorAt : null,
+          // 凭据过期（officeace 2h 短效）：过期 ≠ 可用，UI 应提示重新登录
+          expired: Number.isFinite(a.expiresAt) ? a.expiresAt <= Date.now() : false,
         }
       })
     },
@@ -229,6 +239,40 @@ export function createAccountStore(dshHome) {
       if (!d.accounts[id]) return { ok: false, error: '账号不存在' }
       delete d.accounts[id]
       return { ok: await writeAll(dshHome, d), id }
+    },
+
+    /**
+     * 记一次账号级真机验证结果（需求 #3）。
+     *
+     * 🔴 纪律：**只写真实跑出来的结果**。调用方必须先真的发过一次最小推理，
+     *    再拿结果来写；`ok=true` 时写 `verifiedAt=now`，`ok=false` 时写
+     *    `verifyError`（人话原因）+ `verifyErrorAt`，且**保留**原有 verifiedAt
+     *    （曾经验过、这次失败了 ⇒ UI 应看到「上次成功时间 + 最近失败原因」，不是二值翻转）。
+     *
+     * @param {string} id 账号 id
+     * @param {{ok:boolean, at?:number, error?:string|null}} r
+     * @returns {Promise<{ok:boolean, id:string, verifiedAt:number|null, verifyError:string|null}|{ok:false, error:string}>}
+     */
+    async markVerified(id, r = {}) {
+      const d = await readAll(dshHome)
+      const a = d.accounts[id]
+      if (!a) return { ok: false, error: '账号不存在' }
+      const at = Number.isFinite(r.at) ? r.at : Date.now()
+      if (r.ok === true) {
+        a.verifiedAt = at
+        a.verifyError = null
+        a.verifyErrorAt = null
+      } else {
+        a.verifyError = String(r.error ?? '未知原因').slice(0, 300)
+        a.verifyErrorAt = at
+      }
+      const ok = await writeAll(dshHome, d)
+      return {
+        ok,
+        id,
+        verifiedAt: Number.isFinite(a.verifiedAt) ? a.verifiedAt : null,
+        verifyError: a.verifyError ?? null,
+      }
     },
 
     async count() {
