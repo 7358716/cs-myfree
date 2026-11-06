@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 320px; margin: 0; padding: 12px 14px; font: 13px/1.6 -apple-system, "PingFang SC", sans-serif; color: #1a1a1a; }
+  h3 { margin: 0 0 8px; font-size: 14px; }
+  label { display: block; margin: 8px 0 3px; font-size: 12px; color: #555; }
+  input[type=text], input[type=number] { width: 100%; box-sizing: border-box; padding: 5px 7px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
+  .row { display: flex; gap: 8px; }
+  .row > div { flex: 1; }
+  .btn { margin-top: 10px; width: 100%; padding: 7px; border: 1px solid #bbb; border-radius: 5px; background: #f6f6f6; cursor: pointer; font: inherit; }
+  .btn.primary { background: #0969da; color: #fff; border-color: #0969da; font-weight: 600; }
+  .status { margin-top: 10px; padding: 7px; border-radius: 5px; font-size: 12px; word-break: break-all; }
+  .ok { background: #e8f6ec; color: #1a7f37; }
+  .err { background: #fdecea; color: #b42318; }
+  .hint { margin-top: 10px; font-size: 11px; color: #888; line-height: 1.5; }
+  .switch { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<h3>DSH 上下文桥</h3>
+
+<label>DSH 地址</label>
+<input id="endpoint" type="text" placeholder="http://150.158.175.241/cs-myfree/context/deepseek">
+
+<label>口令（DSH 设置页 → 外部上下文）</label>
+<input id="code" type="text" placeholder="粘贴设置页里的口令">
+
+<div class="row">
+  <div>
+    <label>最多几条</label>
+    <input id="maxMessages" type="number" min="1" max="200">
+  </div>
+  <div>
+    <label>每条最多字</label>
+    <input id="maxChars" type="number" min="20" max="4000">
+  </div>
+</div>
+
+<label>上报间隔（秒）</label>
+<input id="intervalSec" type="number" min="10" max="600">
+
+<div class="switch">
+  <input id="enabled" type="checkbox">
+  <label for="enabled" style="margin:0">启用自动上报</label>
+</div>
+
+<button id="save" class="btn primary">保存</button>
+<button id="push" class="btn">立即上报一次</button>
+
+<div id="status" class="status" style="display:none"></div>
+
+<div class="hint">
+  只读取当前页面的对话正文，绝不读取 cookie 或账号信息。<br>
+  只在 DeepSeek 页面生效。
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

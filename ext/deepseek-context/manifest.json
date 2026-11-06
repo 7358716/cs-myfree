@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "DSH Context Bridge",
+  "version": "0.1.0",
+  "description": "把 DeepSeek 网页版对话的最近若干条同步给 DSH（只读、少传、不上传账号密码）",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://chat.deepseek.com/*",
+    "http://150.158.175.241/*",
+    "http://127.0.0.1:3080/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "DSH 上下文桥"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chat.deepseek.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
