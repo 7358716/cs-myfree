@@ -330,3 +330,32 @@ test('验证走账号级名额：A 账号满时验证 B 账号不会被 A 挡住
     for (const h of hogs) h.release()
   } finally { cleanup(home); resetSharedGate() }
 })
+// ══════════════════════════════════════════════════════════════════════════
+// 探测请求的消息形状（修 workbuddy「first message is not system prompt」）
+//
+// 实测背景：workbuddy 上游明确回 400 code:11128 "first message is not system prompt"。
+// 根因是探测只发了 user:ping —— **探测请求与真实对话的消息形状不一致**，
+// 于是「探测说不通」和「真实对话能用」会互相打脸。这条测试钉住：必须带 system 首帧。
+// ══════════════════════════════════════════════════════════════════════════
+test('🟥 探测请求首条必须是 system（workbuddy 实测要求，否则 400 first message is not system prompt）', async () => {
+  resetSharedGate()
+  const home = makeHome()
+  try {
+    const id = seedAccount(home, { id: 'acc-wb', provider: 'workbuddy' })
+    const calls = []
+    const srv = makeServer()
+    registerRoutes(srv, {
+      state: makeState(), version: 'test', trustedHosts: [], dshHome: home,
+      getChain: () => [], getConfig: () => ({}), isAdmin: () => true,
+      fetchImpl: okFetch(calls),
+    })
+    await call(srv, '/channels/verify', { method: 'POST', body: { id } })
+    assert.ok(calls.length >= 1, '必须真的发出请求')
+    const payload = JSON.parse(calls[0].body)
+    assert.ok(Array.isArray(payload.messages) && payload.messages.length >= 2,
+      '至少要 system + user 两条：' + JSON.stringify(payload.messages))
+    assert.equal(payload.messages[0].role, 'system',
+      '首条必须是 system（否则 workbuddy 回 400）：' + JSON.stringify(payload.messages[0]))
+    assert.equal(payload.messages[payload.messages.length - 1].role, 'user', '最后一条是 user')
+  } finally { cleanup(home); resetSharedGate() }
+})

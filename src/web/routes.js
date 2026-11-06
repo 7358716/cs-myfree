@@ -896,7 +896,10 @@ export function registerRoutes(webServer, opts = {}) {
         ch,
         cred,
         model,
-        messages: [{ role: 'user', content: 'ping' }],
+        messages: [
+          { role: 'system', content: 'You are a helpful assistant.' },
+          { role: 'user', content: 'ping' },
+        ],
         maxTokens: 8,
         stream: true,
         fetchImpl,
