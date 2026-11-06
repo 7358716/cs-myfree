@@ -43,6 +43,7 @@ import { readSettings, updateSettings } from './settings.js'
 import { createDocsHandler, DOCS_PREFIX } from '../docs/serve.js'
 import { filterVisibleCatalog } from './routing.js'
 import { webFetch, createSearchCache, createRateLimiter, runMultiSourceSearch } from './search.js'
+import { createContextBridge } from '../context/bridge.js'
 
 export const PREFIX = '/cs-myfree'
 
@@ -109,6 +110,13 @@ export function registerRoutes(webServer, opts = {}) {
   }
 
   let registered = 0
+
+  /**
+   * 外部对话上下文桥（DeepSeek 网页版 → DSH）。
+   * 进程级单例：浏览器扩展周期上报，这里只保最近 N 条（传得少）。
+   * 放在 route 之前创建，供 /context/* 路由与其它模块（adapter/工具）共用同一份。
+   */
+  const contextBridge = opts.contextBridge || createContextBridge({ now })
 
   /** 统一包装：guard + 错误处理 + no-store */
   const route = (path, handler, { method = 'ANY' } = {}) => {
@@ -1001,6 +1009,82 @@ export function registerRoutes(webServer, opts = {}) {
         : (wrote ? '验证未通过，已如实记下原因（不会伪造成已验证）' : '没发出请求（并发满/无凭据），本次不写验证结果'),
     }
   })
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 外部对话上下文桥（需求：DeepSeek 网页版 → DSH，且「传得少」）
+  //
+  // 方案 B：浏览器扩展定期把当前页面对话 POST 到 /context/deepseek。
+  // 🔴 这条路由**不走 judge()**：请求来自 DeepSeek 页面的扩展（跨域 Origin），
+  //    不可能带宿主的会话 cookie。改用**共享令牌**鉴权（token 由用户页面上配置），
+  //    并且只能写「只读上下文」，没有任何写配置/写链的能力。
+  // ══════════════════════════════════════════════════════════════════════════
+  // ⚠️ 键名里不能出现 token/key/secret（settings 的敏感字段拦截器会拒绝落盘），
+  //    所以这里叫 contextBridgeCode —— 语义是「扩展与 DSH 之间的约定口令」。
+  const CONTEXT_TOKEN_SETTING = 'contextBridgeCode'
+  const contextToken = () => {
+    try {
+      const c = getConfig() || {}
+      return typeof c?.[CONTEXT_TOKEN_SETTING] === 'string' && c[CONTEXT_TOKEN_SETTING] ? c[CONTEXT_TOKEN_SETTING] : null
+    } catch { return null }
+  }
+  const corsHeaders = {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'POST, GET, OPTIONS',
+    'access-control-allow-headers': 'content-type, x-context-token',
+    'access-control-max-age': '600',
+  }
+  const sendRaw = (res, code, obj) => {
+    try {
+      res.writeHead(code, Object.assign({ 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }, corsHeaders))
+      res.end(JSON.stringify(obj))
+    } catch { /* 连接已断 */ }
+  }
+
+  try {
+    webServer.register({
+      kind: 'prefix',
+      path: `${PREFIX}/context`,
+      handler: async (req, res) => {
+        try {
+          if (req.method === 'OPTIONS') { return sendRaw(res, 204, {}) }
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const sub = url.pathname.replace(`${PREFIX}/context`, '').replace(/^\//, '') || 'status'
+
+          // 鉴权：配置了 token 就校验（没配 ⇒ 只允许本机回环，防公网裸奔）
+          const need = contextToken()
+          const given = String(req.headers?.['x-context-token'] ?? url.searchParams.get('token') ?? '')
+          if (need) {
+            if (given !== need) return sendRaw(res, 401, { ok: false, error: 'x-context-token 不匹配' })
+          } else {
+            const addr = String(req.socket?.remoteAddress ?? '')
+            const loop = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+            if (!loop) return sendRaw(res, 401, { ok: false, error: '未配置 contextBridgeCode，仅允许本机上报（在设置页配置口令后扩展才可用）' })
+          }
+
+          if (req.method === 'GET') {
+            const detail = url.searchParams.get('detail') === '1'
+            return sendRaw(res, 200, detail ? contextBridge.read({}) : contextBridge.summary())
+          }
+          if (req.method === 'POST') {
+            if (sub !== 'deepseek' && sub !== 'ingest') return sendRaw(res, 404, { ok: false, error: '未知上报端点：' + sub })
+            const body = await readBody(req)
+            if (!body || !Array.isArray(body.messages)) return sendRaw(res, 400, { ok: false, error: '需要 { messages: [...] }' })
+            const r = contextBridge.ingest(body)
+            return sendRaw(res, 200, r)
+          }
+          if (req.method === 'DELETE') {
+            return sendRaw(res, 200, contextBridge.clear())
+          }
+          return sendRaw(res, 405, { ok: false, error: 'method not allowed' })
+        } catch (err) {
+          return sendRaw(res, 500, { ok: false, error: safeErrorText(err) })
+        }
+      },
+    })
+    registered += 1
+  } catch (e) {
+    logger.warn?.(`上下文桥路由挂载失败（不影响其它功能）：${safeErrorText(e)}`)
+  }
 
   // ── 续期（refresh）──
   route('/login/refresh', async ({ body }) => {
