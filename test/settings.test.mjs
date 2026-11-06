@@ -849,18 +849,18 @@ test('🟥 自加 API（deepseek/ark）**不参与**去重，与渠道包里的�
   for (const p of ['codearts', 'deepseek', 'ark']) assert.ok(providers.includes(p), '缺 ' + p)
 })
 
-test('🟥 不可用的渠道排在可用之后：有可用渠道时不会留未登录的那家', () => {
+test('🟥 同模型多家合格时，只留一家（不再重复出现）', () => {
   const groups = [
     { provider: 'workbuddy', label: 'WorkBuddy', kind: 'channel', models: [{ id: 'X', name: 'X' }] },
     { provider: 'buddy', label: 'CodeBuddy', kind: 'channel', models: [{ id: 'X', name: 'X' }] },
   ]
   const channels = [
-    { id: 'workbuddy', loggedIn: false, implemented: true, usable: true, hidden: false },
-    { id: 'buddy', loggedIn: true, loginVerified: false, implemented: true, usable: true, hidden: false },
+    { id: 'workbuddy', loggedIn: true, loginVerified: true, accountVerified: false, implemented: true, usable: true, hidden: false },
+    { id: 'buddy', loggedIn: true, loginVerified: true, accountVerified: false, implemented: true, usable: true, hidden: false },
   ]
   const out = dedupeModelsVisible(groups, channels)
   const kept = out.flatMap((g) => g.models.filter((m) => m.id === 'X').map(() => g.provider))
-  assert.equal(kept[0], 'buddy', '已登录的优先于未登录的：' + JSON.stringify(kept))
+  assert.equal(kept.length, 1, '同模型只留一家：' + JSON.stringify(kept))
 })
 
 test('去重不误伤：不同模型各自保留', () => {
@@ -876,4 +876,56 @@ test('去重不误伤：不同模型各自保留', () => {
 test('空输入不抛（选择器永不因目录为空而崩）', () => {
   assert.deepEqual(dedupeModelsVisible([], []), [])
   assert.deepEqual(dedupeModelsVisible(null, null), [])
+})
+
+// ── 渠道包准入门槛（2026-11-06 二次收紧）─────────────────────────────────────
+// 用户口径：「渠道包中只带出已登陆已验证可用的，其他的不展示，不用选择」
+
+test('🟥 烂渠道整条不进选择器：未登录 / 未验证 / 已停用 / 已隐藏', () => {
+  const groups = [
+    { provider: 'codearts', label: 'C', kind: 'channel', models: [{ id: 'A' }] },
+    { provider: 'buddy', label: 'B', kind: 'channel', models: [{ id: 'B' }] },
+    { provider: 'qoder', label: 'Q', kind: 'channel', models: [{ id: 'Q' }] },
+    { provider: 'trae', label: 'T', kind: 'channel', models: [{ id: 'T' }] },
+    { provider: 'cline', label: 'K', kind: 'channel', models: [{ id: 'K' }] },
+  ]
+  const channels = [
+    { id: 'codearts', loggedIn: true, loginVerified: true, implemented: true, usable: true, hidden: false },
+    { id: 'buddy', loggedIn: true, loginVerified: false, accountVerified: false, implemented: true, usable: true, hidden: false },
+    { id: 'qoder', loggedIn: false, loginVerified: false, implemented: true, usable: true, hidden: false },
+    { id: 'trae', loggedIn: true, loginVerified: true, implemented: true, usable: false, hidden: false },
+    { id: 'cline', loggedIn: true, loginVerified: true, implemented: true, usable: true, hidden: true },
+  ]
+  const out = dedupeModelsVisible(groups, channels)
+  const providers = out.map((g) => g.provider)
+  assert.deepEqual(providers, ['codearts'], '只有已登录+已验证+可用+未隐藏的才出现：' + JSON.stringify(providers))
+  const ids = out.flatMap((g) => g.models.map((m) => m.id))
+  for (const bad of ['B', 'Q', 'T', 'K']) {
+    assert.equal(ids.includes(bad), false, bad + ' 来自不合格渠道，不该出现：' + JSON.stringify(ids))
+  }
+})
+
+test('账号级验证也算「已验证」（verifiedAt 已写 ⇒ 渠道可用）', () => {
+  const groups = [{ provider: 'workbuddy', label: 'W', kind: 'channel', models: [{ id: 'X' }] }]
+  const channels = [{
+    id: 'workbuddy', loggedIn: true, loginVerified: false, accountVerified: true,
+    implemented: true, usable: true, hidden: false,
+  }]
+  const out = dedupeModelsVisible(groups, channels)
+  assert.deepEqual(out.map((g) => g.provider), ['workbuddy'], '账号验证过的渠道要保留')
+})
+
+test('🟥 自加 API 不受渠道门槛约束（用户自己的 key，他自己清楚）', () => {
+  const groups = [
+    { provider: 'deepseek', label: 'DS', kind: 'channel', models: [{ id: 'A' }] },
+    { provider: 'ark', label: 'ARK', kind: 'channel', models: [{ id: 'B' }] },
+    { provider: 'deepseek-web', label: 'DSW', kind: 'channel', models: [{ id: 'C' }] },
+  ]
+  // 三个都没「登录/验证」概念，但仍应出现
+  const channels = [
+    { id: 'deepseek', loggedIn: false, loginVerified: false, implemented: true, usable: false, hidden: false },
+  ]
+  const out = dedupeModelsVisible(groups, channels)
+  const providers = out.map((g) => g.provider).sort()
+  assert.deepEqual(providers, ['ark', 'deepseek', 'deepseek-web'], '自加 API 一律保留：' + JSON.stringify(providers))
 })

@@ -237,6 +237,11 @@ export function channelStatusList(channels, routing, ledger, effectiveCfg = {}) 
     const loggedIn = c.loggedIn === true
     const loginVerified = c.loginVerified === true
     const notLoggedIn = requiresLogin && !loggedIn
+    // 账号级真机验证（需求 #3）：任一账号跑通过最小推理 ⇒ 记 verifiedAt。
+    // 选择器口径（2026-11-06 二次收紧）用它判定「这个渠道真的能调通」——
+    // 渠道级 loginVerified 说的是「登录器端点验证过」，两件事不能混。
+    const accounts = Array.isArray(c.accounts) ? c.accounts : []
+    const accountVerified = accounts.some((a) => Number.isFinite(a?.verifiedAt) && a.verifiedAt > 0)
 
     let statusCode = 'ok'
     let reasonCode = null
@@ -304,6 +309,7 @@ export function channelStatusList(channels, routing, ledger, effectiveCfg = {}) 
       groupLabel: CHANNEL_GROUP_LABELS[group] ?? group,
       available,
       loginVerified,
+      accountVerified,
       status,
       statusCode,
       hidden: isSourceHidden(id, effectiveCfg),

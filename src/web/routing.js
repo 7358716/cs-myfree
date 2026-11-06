@@ -125,12 +125,43 @@ export function dedupeModelsVisible(groups, channels = []) {
     if (c && c.id) chan.set(String(c.id), c)
   }
 
-  /** 渠道是否「可用」（登录 + 已实现 + 未停用 + 未隐藏） */
+  /**
+   * 渠道是否「可用」（登录 + 已实现 + 未停用 + 未隐藏）。
+   * 用于**排优先级**（同模型多家可用时，展示哪一家）。
+   */
   const isUsable = (provider) => {
     const c = chan.get(provider)
     if (!c) return false
     if (c.implemented === false) return false
     if (c.loggedIn !== true) return false
+    if (c.usable === false) return false
+    if (c.hidden === true) return false
+    return true
+  }
+
+  /**
+   * 渠道包是否「够格进选择器」——用户口径（2026-11-06 二次收紧）：
+   *   「渠道包中只带出已登陆已验证可用的，其他的不展示，不用选择」
+   *
+   * ⇒ 渠道包（非自加 API）必须同时满足：已登录 + **已验证** + 可用 + 未隐藏。
+   *    四缺一就整条不进选择器（不是靠后，是**不出现**）。
+   *
+   * 🔴 为什么要求 `loginVerified`：未验证渠道「看起来登上了、实际调不通」
+   *    （实测 buddy 403 / qoder CSRFInvalid / workbuddy 403），
+   *    让用户在选择器里选一个注定失败的模型，比不列出来更糟。
+   *    真实验证入口在供给源页的「验证」按钮（写 verifiedAt）。
+   *
+   * ⚠️ 只作用于**渠道包**。自加/付费 API（deepseek / ark / deepseek-web…）
+   *    不套这条：那是用户自己配的 key，能不能用他自己清楚。
+   */
+  const isEligibleChannel = (provider) => {
+    const c = chan.get(provider)
+    if (!c) return false
+    if (c.implemented === false) return false
+    if (c.loggedIn !== true) return false
+    // 已验证：渠道级 loginVerified OR 任一账号 verifiedAt 已写（真机验证过）
+    const verified = c.loginVerified === true || c.accountVerified === true
+    if (!verified) return false
     if (c.usable === false) return false
     if (c.hidden === true) return false
     return true
@@ -161,6 +192,14 @@ export function dedupeModelsVisible(groups, channels = []) {
 
   for (const g of flatGroups) {
     const selfApi = isSelf(g.provider)
+    // 🔴 渠道包：不合格的整条不进选择器（用户口径「其他的不展示，不用选择」）
+    if (!selfApi && !isEligibleChannel(g.provider)) {
+      for (const m of g.models) {
+        const mid = String(m?.id ?? '')
+        if (mid) dropped.push({ model: mid, droppedProvider: g.provider, keptProvider: null, reason: 'channel-not-eligible' })
+      }
+      continue
+    }
     for (const m of g.models) {
       const mid = String(m?.id ?? '')
       if (!mid) continue
