@@ -365,6 +365,54 @@ export const CHANNELS = Object.freeze({
     credRef: 'QINIU_API_KEY',
     loginPage: 'https://portal.qiniu.com/developer/user/key',
   },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 自加 API（用户口径：「供给页面给个选项，我只粘贴 API 就行了」）
+  //
+  // 与其它渠道的区别：**不需要浏览器登录、不需要抓 cookie**，用户把 API Key
+  // 粘贴进供给源页面即可。走 LOGIN.PASTE_KEY ⇒ 页面自动出现「粘贴凭据」表单
+  // （与 qiniu 同一条路径，零新增 UI 代码）。
+  //
+  // 🔴 为什么不新建一套「自定义渠道」UI：那要另造存储/渲染/校验三套东西，
+  //    而 paste-key 流程已经跑通，复用最省且最不容易出错。
+  // ══════════════════════════════════════════════════════════════════════════
+  ark: {
+    // 火山方舟：并发上限保守取 2（未实测多账号并发）
+    concurrencyLimit: 2, limitSource: 'default',
+    billing: 'paid', billingSource: 'declared',
+    label: '火山方舟（ARK）',
+    family: 'openai',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    chatPath: '/chat/completions',
+    auth: AUTH.BEARER,
+    login: LOGIN.PASTE_KEY,
+    refresh: REFRESH.NONE,
+    checkin: { supported: false },
+    credRef: 'ARK_API_KEY',
+    loginPage: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
+    note: '火山方舟：粘贴 API Key 即可用；模型以控制台「在线推理」里开通的为准',
+  },
+  'deepseek-web': {
+    // DeepSeek 网页版（chat.deepseek.com）：**不消耗 API token**，走网页会话。
+    //
+    // 🔴 关键限制（实测/社区已知，页面必须如实告知用户）：
+    //   1. 网页版没有原生 function calling ⇒ 工具调用是「提示词模拟」，不稳定
+    //   2. 同一账号同一时刻**只允许一路流式请求** ⇒ 并发上限必须为 1
+    //   3. 自动化驱动网页会话可能触发平台风控 ⇒ 建议只用于轻量日常对话
+    concurrencyLimit: 1, limitSource: 'measured',
+    billing: 'free', billingSource: 'declared',
+    label: 'DeepSeek 网页版（自带账号）',
+    family: 'openai',
+    baseUrl: 'https://chat.deepseek.com',
+    chatPath: '/api/v0/chat/completions',
+    auth: AUTH.BEARER,
+    login: LOGIN.PASTE_KEY,
+    refresh: REFRESH.NONE,
+    checkin: { supported: false },
+    credRef: 'DEEPSEEK_WEB_TOKEN',
+    loginPage: 'https://chat.deepseek.com',
+    note: '网页版免费额度：同一账号同时只能一路对话；工具调用为模拟实现，仅供日常轻量聊天',
+  },
 })
 
 /** 参与聚合轮换的渠道（有可靠到期信息） */

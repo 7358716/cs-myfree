@@ -50,6 +50,10 @@ export const CHANNEL_FREE = Object.freeze([
   'codearts', 'buddy', 'workbuddy', 'lobsterai', 'qoder', 'qodercn',
   'trae', 'cline', 'loomy', 'raccoon', 'minimax', 'minimaxintl',
   'zcode', 'officeace', 'accio', 'gemini', 'qiniu',
+  // DeepSeek 网页版（用户自带账号）：不消耗 API token ⇒ 对用户是 0 元。
+  // ⚠️ 它的成本不是钱，而是**平台风控风险**（见 protocols.js 的 note），
+  //    所以「记 free」是财务口径，不代表可以无节制使用。
+  'deepseek-web',
 ])
 
 /**

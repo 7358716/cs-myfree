@@ -35,6 +35,7 @@ export const SOURCES = Object.freeze([
 
   { id: 'deepseek-official', label: 'DeepSeek 官方', kind: KIND.SELFAPI, paid: true },
   { id: 'ark', label: '火山方舟', kind: KIND.SELFAPI, paid: true },
+  { id: 'deepseek-web', label: 'DeepSeek 网页版', kind: KIND.SELFAPI, paid: false },
 ])
 
 export function sourceById(id) { return SOURCES.find((s) => s.id === id) ?? null }

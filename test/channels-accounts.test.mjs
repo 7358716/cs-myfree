@@ -50,10 +50,10 @@ test('删除账号', async () => {
   assert.equal((await s.list()).length, 0)
 })
 
-test('18 个渠道都有登录指引', async () => {
+test('20 个渠道都有登录指引', async () => {
   const home = await tmpHome()
   const list = await listChannels(createAccountStore(home))
-  assert.equal(list.length, 18)
+  assert.equal(list.length, 20)
   for (const c of list) {
     assert.ok(c.guideTitle, c.id + ' 缺 guideTitle')
     assert.ok(Array.isArray(c.guideSteps) && c.guideSteps.length > 0, c.id + ' 缺步骤')
@@ -68,9 +68,9 @@ test('登录 URL 必须是 https 且非空（可用真实入口路径）', () =>
     assert.match(u, /^https:\/\//, id + ' 必须 https：' + u)
   }
 })
-test('18 个渠道都有 loginPage（真实入口）', () => {
+test('20 个渠道都有 loginPage（真实入口）', () => {
   const withPage = Object.values(CHANNELS).filter((c) => c.loginPage).length
-  assert.equal(withPage, 18)
+  assert.equal(withPage, 20)
 })
 
 test('未登录时 loggedIn=false', async () => {

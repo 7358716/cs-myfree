@@ -712,7 +712,9 @@ export function registerRoutes(webServer, opts = {}) {
         label: CHANNELS[id]?.label ?? id,
         flow: info.flow,
         loginVerified: info.loginVerified,
-        note: info.loginNote,
+        // note 优先用渠道自身声明（并发限制/风控提示，用户必须看到）；
+        // 没有声明才回退登录器的 loginNote（新渠道在 flow-map 里可能没有条目）。
+        note: CHANNELS[id]?.note || info.loginNote,
         refreshable: CHANNELS[id]?.refresh === 'auto',
       }
     })

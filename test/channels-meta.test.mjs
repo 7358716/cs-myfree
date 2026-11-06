@@ -19,9 +19,9 @@ const VALID_BILLING = new Set(['free', 'paid'])
 const VALID_BILLING_SOURCE = new Set(['measured', 'declared', 'default'])
 const VALID_LIMIT_SOURCE = new Set(['measured', 'default'])
 
-test('渠道数量：18 家（遍历 Object.keys，防漏改/误删）', () => {
+test('渠道数量：20 家（遍历 Object.keys，防漏改/误删）', () => {
   const ids = Object.keys(CHANNELS)
-  assert.equal(ids.length, 18, `实际 ${ids.length} 家：${ids.join(',')}`)
+  assert.equal(ids.length, 20, `实际 ${ids.length} 家：${ids.join(',')}`)
   assert.deepEqual(allChannelIds(), ids)
   for (const id of ids) {
     assert.equal(CHANNELS[id]?.label?.length > 0, true, `${id} 缺 label`)

@@ -78,7 +78,7 @@ test('/state 返回源与链概览', async () => {
   const srv = makeServer(); registerRoutes(srv, base())
   const r = await call(srv, '/state')
   assert.equal(r.status, 200)
-  assert.equal(r.body.sources.counts.channels, 18)
+  assert.equal(r.body.sources.counts.channels, 20)
   assert.ok(r.body.chain)
 })
 test('/chain GET 返回内置/覆盖/生效', async () => {
