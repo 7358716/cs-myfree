@@ -72,6 +72,9 @@ const TEXT_RULES = [
   [buildRule(['invalid api key', 'unauthori[sz]ed', 'authentication'], ['凭证', '登录已失效', '未登录']), KIND.AUTH],
   [buildRule(['no such model', 'model not found', 'does not serve'], ['模型不存在']), KIND.MODEL_NOT_FOUND],
   [buildRule(['permission', 'forbidden'], ['无权', '权限']), KIND.PERMISSION],
+  // 🔴 fetch failed 是 Node fetch/undici 对网络层失败的通用报错（DNS/连接/TLS 都可能）
+  //    原文本规则漏了它 ⇒ 账本里 4 次 fetch failed 全记 UNKNOWN 失明（reports/对话中断排查报告 §2.1）
+  [buildRule(['fetch failed'], []), KIND.TRANSPORT],
 ]
 
 /** 状态码兜底（仅当没有文本规则命中时才用） */

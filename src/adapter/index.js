@@ -37,6 +37,31 @@ export { providerRetryPolicy }
 export const PROVIDER_ID = 'cs-myfree'
 
 /**
+ * 渠道名 → 注册 provider id 别名
+ *
+ * 🔴 为什么需要（P1 修复）：宿主按 provider 精确查注册表（`dsh-llm:2264`），
+ *    链内候选 provider 是渠道名（`codearts`/`buddy`/`loomy`…），而 myfree 只注册
+ *    `cs-myfree` 一个 id。任何"以渠道名发起请求/重放/续跑"的场合，宿主按渠道名查
+ *    注册表必然抛 `NO_ADAPTER`。
+ *
+ * 修复策略：注册时**同时**注册渠道名别名 —— 宿主按任一名字都能查到同一个 adapter。
+ * `providerInfo()` / `providerRetryPolicy()` / `listModels()` / `resolveModel()` /
+ * `prepareCall()` 对渠道名一律放行（返回与 `cs-myfree` 相同的信息）。
+ *
+ * ⚠️ 边界：不注册 `deepseek-official`（宿主自带适配器）、`kilo`（免密池已在链内）
+ *    等"非 CHANNELS 表"的 id —— 它们不在 `CHANNELS` 里，注册会导致重复声明。
+ *
+ * @returns {string[]} 渠道名数组（不含 `cs-myfree`）
+ */
+export function providerAliases() {
+  try {
+    return Object.keys(CHANNELS).filter((k) => k !== PROVIDER_ID && k !== 'kilo')
+  } catch {
+    return []
+  }
+}
+
+/**
  * 路由配置的**默认值**（契约 B `rules.configurable` 的兜底口径）。
  *
  * 🔴 默认值刻意与现状一致（零回归）：
@@ -928,21 +953,21 @@ export function createAdapter(opts = {}) {
       }
     },
 
-    // ── 契约②：必须含 id 且等于 provider ──
+    // ── 契约②：必须含 id 且等于 provider（渠道名别名同样放行，P1 修复）──
     providerInfo(provider) {
-      if (provider !== providerId) return undefined
+      if (provider !== providerId && !providerAliases().includes(provider)) return undefined
       return makeProviderInfo(provider, { name: displayName })
     },
 
-    // ── 契约⑤：返回扁平策略 ──
+    // ── 契约⑤：返回扁平策略（渠道名别名同样放行）──
     providerRetryPolicy(provider) {
-      if (provider !== providerId) return undefined
+      if (provider !== providerId && !providerAliases().includes(provider)) return undefined
       return providerRetryPolicy()
     },
 
-    // ── 契约③：每项必须有 provider ──
+    // ── 契约③：每项必须有 provider（渠道名别名同样放行）──
     listModels(provider) {
-      if (provider !== providerId) return []
+      if (provider !== providerId && !providerAliases().includes(provider)) return []
       return catalog().map((e) => makeModelInfo(provider, {
         id: e.model,
         name: e.name || e.model,
@@ -952,9 +977,9 @@ export function createAdapter(opts = {}) {
       }))
     },
 
-    // ── 契约④：provider + id 都必须对 ──
+    // ── 契约④：provider + id 都必须对（渠道名别名同样放行）──
     resolveModel(provider, model) {
-      if (provider !== providerId) return undefined
+      if (provider !== providerId && !providerAliases().includes(provider)) return undefined
       const hit = resolveRequested(model)
       if (!hit) return undefined
       return makeModelInfo(provider, {

@@ -11,7 +11,8 @@
  * @module cs-myfree
  */
 
-import { createAdapter, providerRetryPolicy, DEFAULT_CANDIDATES, PROVIDER_ID } from './adapter/index.js'
+import { createAdapter, providerRetryPolicy, DEFAULT_CANDIDATES, PROVIDER_ID, providerAliases } from './adapter/index.js'
+import { installRequestErrorHandler } from './adapter/request-error.js'
 import { mergeChain, normalizeChainAliases } from './adapter/chain-overrides.js'
 import { streamWithFallback, PRIORITY as KEYLESS_PRIORITY, DEFAULT_MODEL as KEYLESS_MODEL } from './pools/keyless/index.js'
 import { ADAPTERS as KEYLESS_ADAPTERS, resolveSourceId } from './pools/keyless/index.js'
@@ -688,17 +689,54 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
   else log.debug('宿主无 provide：路由服务未注册（仍可走 globalThis 符号）')
 
   // ── 注册到宿主（全部走安全调用）──
+  //
+  // 🔴 P1 修复：渠道名别名注册（NO_ADAPTER 根因）
+  //
+  // 链内候选 provider 是渠道名（`codearts`/`buddy`/`loomy`…），而 myfree 只注册
+  // `cs-myfree` 一个 id。宿主按 provider 精确查注册表（`dsh-llm:2264`），任何
+  // "以渠道名发起请求/重放/续跑"的场合必然抛 NO_ADAPTER。
+  //
+  // 策略：**同时**注册渠道名别名 —— 宿主按任一名字都能查到同一个 adapter。
+  // ⚠️ 宿主 `prepareRoutes` 是 all-or-nothing：一个冲突别名会导致整批失败。
+  //    所以逐个注册：PROVIDER_ID 独立注册，每个别名单独注册，冲突的跳过并留痕。
   if (adapter) {
     const ok = safeInject(ctx, ['llm'], (scoped) => {
-      const r = safeRegisterAdapter(scoped?.llm, [PROVIDER_ID], adapter)
-      if (r.ok) {
-        log.info(`✅ adapter 已注册：provider="${PROVIDER_ID}"，${adapter.describe().chain.length} 条候选`)
-      } else {
-        // 🔴 大声报：这是「模型选择器看不到 cs-myfree」的唯一原因
-        log.error(`❌ adapter 注册失败（模型选择器不会出现 ${PROVIDER_ID}）：${r.error}`)
+      const ids = [PROVIDER_ID, ...providerAliases()]
+      const okIds = []
+      const conflicting = []
+      const failed = []
+      for (const id of ids) {
+        const r = safeRegisterAdapter(scoped?.llm, [id], adapter)
+        if (r.ok) okIds.push(id)
+        else if (String(r.error).includes('DUPLICATE_ADAPTER')) conflicting.push(id)
+        else failed.push({ id, err: r.error })
       }
+      if (okIds.length > 0) {
+        log.info(`✅ adapter 已注册：${okIds.length} 个 id（${okIds.join(', ')}），${adapter.describe().chain.length} 条候选`)
+      } else {
+        log.error(`❌ adapter 注册全部失败（模型选择器不会出现 ${PROVIDER_ID}）：${JSON.stringify(failed)}`)
+      }
+      if (conflicting.length > 0) log.debug(`  冲突别名（已由其它插件注册，跳过）：${conflicting.join(', ')}`)
     }, `${NAME}: llm`)
     if (!ok) log.warn('宿主无 inject：跳过 llm 注册')
+  }
+
+  // ── P2 修复：注册 `agent/request-error` 瀑布处理器 ──
+  //
+  // 🔴 为什么需要：宿主 `dsh-agent-loop:1136` 在模型失败时发 `agent/request-error`
+  // waterfall，只有返回 `{kind:'retry'}` 才会原地重试。cs-myfree 此前只依赖
+  // adapter 内部降级链，未注册宿主层瀑布 ⇒ 宿主级的恢复策略对走 myfree 路由
+  // 的请求不生效。本处理器用 `failure-map.classify` 分类，只对真正瞬态的错误
+  // （TRANSPORT/TIMEOUT/SERVER/EMPTY_RESPONSE）返回 retry，终态错误交回宿主。
+  //
+  // ⚠️ 不与 `dsh-llm-retry` 冲突：分类口径一致（同样排除 RATE_LIMIT）。
+  const disposeRequestError = installRequestErrorHandler(ctx, {
+    onEvent: (e) => log.debug('request-error 分类', e),
+  })
+  if (disposeRequestError) {
+    log.info('✅ agent/request-error 瀑布处理器已注册')
+  } else {
+    log.debug('宿主无 on 方法：跳过 request-error 注册')
   }
 
   // ── 搜索 provider（可选）──
