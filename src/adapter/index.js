@@ -977,6 +977,34 @@ export function createAdapter(opts = {}) {
       }))
     },
 
+    /**
+     * 契约⑦（DSH 0.2.2-rc.1 新增）：图片请求计价。
+     *
+     * 🔴 为什么必须有：宿主在**模型切换 + 上下文压缩**时调用
+     *    `adapter.imageRequestPricing(provider, model)`（dsh-llm/lib/index.js:2053）。
+     *    0.2.2-rc.1 之前没有这个调用；升级后若 adapter 不实现 ⇒ 抛
+     *    `imageRequestPricing is not a function` ⇒ `MODEL_SWITCH_COMPACTION_FAILED`
+     *    （实测 2026-11-08 20:08，本会话与另一会话同时报错）。
+     *
+     * 本插件是**文本路由**（图片走 vision 链路单独处理），这里如实返回 undefined
+     * 表示「图片请求不计价」，而不是抛错。
+     */
+    imageRequestPricing(_provider, _model) {
+      return undefined
+    },
+
+    /**
+     * 契约⑧（DSH 0.2.2-rc.1 新增）：图片请求目标尺寸。
+     *
+     * 🔴 同上：宿主在图片请求序列化时调用 `adapter.imageRequestTarget(provider, model, image)`
+     *    （dsh-llm/lib/index.js:2063）。缺了同样会在图片相关路径抛 not a function。
+     *    默认行为（与宿主基类一致）：原样保留规范化后的图片尺寸/字节目标。
+     *    本插件文本路由不重采样图片，原样返回即可。
+     */
+    imageRequestTarget(_provider, _model, image) {
+      return { width: image.width, height: image.height, maxBytes: image.bytes }
+    },
+
     // ── 契约④：provider + id 都必须对（渠道名别名同样放行）──
     resolveModel(provider, model) {
       if (provider !== providerId && !providerAliases().includes(provider)) return undefined
