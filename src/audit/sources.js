@@ -27,6 +27,8 @@ export function dshHomePath(dshHome) {
   return dshHome || process.env.DSH_HOME || join(homedir(), '.dsh')
 }
 
+import { fourDimFailureBreakdown } from './ledger.js'
+
 /** 自己的账本目录 */
 export function ledgerDir(dshHome) {
   return join(dshHomePath(dshHome), 'cs-myfree')
@@ -67,6 +69,8 @@ export async function appendRecord(rec, { dshHome } = {}) {
       at,
       day: rec.day || dateKeyCN(at),
       provider: rec.provider ?? null,
+      // 🔴 账号级隔离（多账号并发统计）：记录 accountId，UI 可按「codearts#账号A」展示成功/失败率
+      account: rec.account ?? null,
       model: rec.model ?? null,
       in: Number(rec.in) || 0,
       out: Number(rec.out) || 0,
@@ -74,6 +78,8 @@ export async function appendRecord(rec, { dshHome } = {}) {
       cost: Number.isFinite(rec.cost) ? rec.cost : null,
       paid: rec.paid === true,
       ok: rec.ok !== false,
+      // 🔴 失败语义（kind）与原始码都记：UI 可按 kind 四维聚合（provider+model+kind+accountId）
+      kind: rec.kind ?? null,
       code: rec.code ?? null,
       ms: Number(rec.ms) || null,
       // 分账字段：每条记录都带（上游没给 ⇒ 'unknown'，绝不猜）
@@ -119,6 +125,8 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
   let successCalls = 0
   let total = 0, failed = 0, paidCount = 0, costTotal = 0, costUnknown = 0
   let lastAt = null
+  // 🔴 四维失败聚合（用户需求）：累积精简字段，返回时算 fourDim
+  const fourDimRecords = []
 
   try {
     const stream = createReadStream(file, { encoding: 'utf8' })
@@ -130,6 +138,14 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
       if (typeof o.at !== 'number' || o.at < fromMs) continue
       total++
       if (lastAt === null || o.at > lastAt) lastAt = o.at
+      // 🔴 四维精简字段（用户需求：按 provider+model+kind+accountId 聚合失败语义）
+      fourDimRecords.push({
+        provider: o.provider ?? null,
+        model: o.model ?? null,
+        kind: o.kind ?? o.code ?? null,
+        account: o.account ?? null,
+        ok: o.ok !== false,
+      })
       if (o.ok === false) {
         failed++
         const code = o.code ?? 'UNKNOWN'
@@ -281,6 +297,8 @@ export async function readSpend({ dshHome, limit = 200000, fromMs = 0 } = {}) {
       }))
       .sort((a, b) => b.calls - a.calls)
       .slice(0, 20),
+    // 🔴 四维失败聚合（用户需求：按 provider+model+kind+accountId 聚合）
+    fourDim: fourDimFailureBreakdown(fourDimRecords),
   }
 }
 

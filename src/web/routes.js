@@ -1297,6 +1297,39 @@ export function registerRoutes(webServer, opts = {}) {
     return { ok: r?.ok !== false, id, remaining: list.length }
   })
 
+  // ── 模型链（免费池/付费池 + 探测可用 + 重试计划）─────────────────────
+  route('/model-chain', async ({ body }) => {
+    const chain = typeof opts.getModelChain === 'function' ? opts.getModelChain() : null
+    const probeCache = typeof opts.getProbeCache === 'function' ? opts.getProbeCache() : null
+    if (body !== undefined && typeof opts.setModelChain === 'function') {
+      const r = await opts.setModelChain(body)
+      return { ok: r?.ok !== false, saved: r?.saved ?? true, error: r?.error ?? null }
+    }
+    const plan = typeof opts.planRoute === 'function' ? opts.planRoute({ chain, probeCache }) : null
+    return {
+      ok: true,
+      chain: chain ?? null,
+      probeCache: probeCache ?? null,
+      route: plan ? {
+        freeCount: plan.freeCount,
+        paidCount: plan.paidCount,
+        candidates: plan.candidates,
+        excluded: plan.excluded,
+        stale: plan.stale,
+      } : null,
+      retryPlans: typeof opts.getRetryPlans === 'function' ? opts.getRetryPlans() : [],
+    }
+  })
+
+  route('/model-chain/retry', async () => {
+    return { ok: true, plans: typeof opts.getRetryPlans === 'function' ? opts.getRetryPlans() : [] }
+  })
+
+  route('/probe/refresh', async () => {
+    try { return await (typeof opts.runProbe === 'function' ? opts.runProbe() : Promise.resolve({ ok: false, error: 'probe not configured' })) }
+    catch (err) { return { ok: false, error: String(err?.message ?? err) } }
+  })
+
   // ══════════════════════════════════════════════════════════════════
   // OAuth 公网回调（浏览器从厂商站点跳回来）
   // ══════════════════════════════════════════════════════════════════

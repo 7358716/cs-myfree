@@ -121,3 +121,81 @@ export function failureBreakdown(records = []) {
     blindRate: Number((((byCode.get('UNKNOWN') ?? 0) / total) * 100).toFixed(1)),
   }
 }
+
+/**
+ * 四维失败聚合（按 provider + model + kind + accountId）。
+ *
+ * 🔴 用户需求（2026-11-11）：错误统计细化——按四维聚合输出 failureBreakdown
+ * （如 `buddy: AUTH=66, INVALID_REQUEST=71`），并区分多账号 `codearts#账号A` vs
+ * `codearts#账号B` 的成功/失败率。
+ *
+ * 纯函数、零 I/O。records 来自 readSpend 解析后的账本行（含 provider/model/kind/code/
+ * account/ok 字段；历史行缺 kind/account 时按 null 处理，不影响新数据）。
+ *
+ * @param {Array<object>} records 账本记录（含 ok / kind / code / provider / model / account）
+ * @returns {{
+ *   byProviderModelKind: Record<string, number>,  // "provider/model/kind" → 失败次数
+ *   byProviderKind:      Record<string, number>,  // "provider/kind"     → 失败次数
+ *   byAccount:           Record<string, {calls:number, failed:number, failRate:number|null}>,
+ *   byProvider:          Record<string, {calls:number, failed:number, failRate:number|null, kinds:Record<string,number>}>,
+ *   failTotal:number,
+ *   callsTotal:number,
+ * }}
+ */
+export function fourDimFailureBreakdown(records = []) {
+  const byProviderModelKind = new Map()   // "provider/model/kind" → fail count
+  const byProviderKind = new Map()        // "provider/kind" → fail count
+  const byAccount = new Map()             // accountId → { calls, failed }
+  const byProvider = new Map()            // provider → { calls, failed, kinds:Map }
+
+  for (const r of records) {
+    const provider = r?.provider ?? '(unknown)'
+    const model = r?.model ?? '(unknown)'
+    const kind = r?.kind ?? r?.code ?? 'UNKNOWN'
+    const account = r?.account ?? null
+    const ok = r?.ok !== false
+
+    // 账号维度：所有调用（含成功），算失败率
+    if (account) {
+      if (!byAccount.has(account)) byAccount.set(account, { calls: 0, failed: 0 })
+      const a = byAccount.get(account)
+      a.calls++
+      if (!ok) a.failed++
+    }
+
+    // provider 维度
+    if (!byProvider.has(provider)) byProvider.set(provider, { calls: 0, failed: 0, kinds: new Map() })
+    const p = byProvider.get(provider)
+    p.calls++
+    if (!ok) {
+      p.failed++
+      const k2 = `${provider}/${kind}`
+      byProviderKind.set(k2, (byProviderKind.get(k2) ?? 0) + 1)
+      const k3 = `${provider}/${model}/${kind}`
+      byProviderModelKind.set(k3, (byProviderModelKind.get(k3) ?? 0) + 1)
+      p.kinds.set(kind, (p.kinds.get(kind) ?? 0) + 1)
+    }
+  }
+
+  const failTotal = [...byProviderKind.values()].reduce((a, b) => a + b, 0)
+  const callsTotal = records.length
+
+  const rateOf = (calls, failed) => calls > 0 ? Number(((failed / calls) * 100).toFixed(1)) : null
+  const sortObj = (m) => Object.fromEntries([...m.entries()].sort((a, b) => b[1] - a[1]))
+
+  return {
+    byProviderModelKind: sortObj(byProviderModelKind),
+    byProviderKind: sortObj(byProviderKind),
+    byAccount: Object.fromEntries([...byAccount.entries()]
+      .map(([k, v]) => [k, { calls: v.calls, failed: v.failed, failRate: rateOf(v.calls, v.failed) }])
+      .sort((a, b) => b[1].calls - a[1].calls)),
+    byProvider: Object.fromEntries([...byProvider.entries()].map(([k, v]) => [k, {
+      calls: v.calls,
+      failed: v.failed,
+      failRate: rateOf(v.calls, v.failed),
+      kinds: Object.fromEntries([...v.kinds.entries()].sort((a, b) => b[1] - a[1])),
+    }]).sort((a, b) => b[1].calls - a[1].calls)),
+    failTotal,
+    callsTotal,
+  }
+}

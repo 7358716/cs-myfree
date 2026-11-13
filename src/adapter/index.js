@@ -31,6 +31,11 @@ import { createBlacklist, isTerminalKind, ttlForKind } from './blacklist.js'
 import { DEFAULT_TTL_MS } from './failure-map.js'
 // 契约 E3 的唯一判定点（`config/scope.js` 已实现并导出；这里只负责**消费**，不重写语义）
 import { resolveSubagentRouting } from '../config/scope.js'
+// ── 探测路由（P2，2026-11-13 定稿设计）─────────────────────────────────────
+//    受 `routing.useProbeRoute` 开关保护（默认 false ⇒ 行为与冻结版一致，零回归）。
+import { planRoute, buildDetailedError } from './probe-route.js'
+import { readJson as readJsonFile, atomicWrite } from '../config/store.js'
+import { join } from 'node:path'
 
 export { providerRetryPolicy }
 
@@ -424,6 +429,36 @@ export function createAdapter(opts = {}) {
   // ── 切换成功计量（契约 A）：进程内累积、不随单次请求重置 ──
   const switchMeter = createSwitchMeter({ now })
 
+  // ── 探测路由（P2，2026-11-13 定稿）─────────────────────────────────────
+  // 探测缓存与重试计划的**内存态**（与磁盘通过 readProbeCache/writeProbeCache 同步）。
+  // 受 `routing.useProbeRoute` 开关保护；默认 false ⇒ 完全走原逻辑。
+  const dshHomeForProbe = () => process.env.DSH_HOME || join(process.env.HOME || '.', '.dsh')
+  const probeCachePath = () => join(dshHomeForProbe(), 'cs-myfree', 'probe-cache.json')
+  const retryPlanPath = () => join(dshHomeForProbe(), 'cs-myfree', 'retry-plan.json')
+
+  /** 读探测缓存（失败 ⇒ 空缓存，绝不抛） */
+  const readProbeCache = async () => {
+    try {
+      const r = await readJsonFile(probeCachePath(), {})
+      return r?.ok && r.value && typeof r.value === 'object' ? r.value : {}
+    } catch { return {} }
+  }
+  /** 写探测缓存（原子写；失败不影响主流程） */
+  const writeProbeCache = async (cache) => {
+    try { await atomicWrite(probeCachePath(), cache) } catch { /* ignore */ }
+  }
+  /** 读重试计划（失败 ⇒ 空数组） */
+  const readRetryPlans = async () => {
+    try {
+      const r = await readJsonFile(retryPlanPath(), { plans: [] })
+      return r?.ok && r.value && Array.isArray(r.value.plans) ? r.value.plans : []
+    } catch { return [] }
+  }
+  /** 写重试计划（原子写） */
+  const writeRetryPlans = async (plans) => {
+    try { await atomicWrite(retryPlanPath(), { schema: 'cs-myfree/retry-plan/v1', at: now(), plans }) } catch { /* ignore */ }
+  }
+
   /**
    * 路由配置读取（支持「传 cfg 对象」与「传取 cfg 的函数」两种形态）。
    * 函数形态用于配置热更新：每次请求重新读一遍，页面改完**不必重启**。
@@ -462,11 +497,14 @@ export function createAdapter(opts = {}) {
     cooldownMs: gateDefaults.busyCooldownMs,
     rateCooldownMs: gateDefaults.rateLimitCooldownMs,
     blacklistTtlMs: ROUTING_DEFAULTS.blacklistTtlMs,
+    globalCooldownMs: null,
+    useProbeRoute: false,
+    probeTtlMs: null,
     maxCooldownMs: Number(gate?.maxCooldownMs) || null,
     limits: {},
     configured: {
       priority: false, autoSwitch: false, cooldownMs: false,
-      rateCooldownMs: false, blacklistTtlMs: false, limits: false,
+      rateCooldownMs: false, blacklistTtlMs: false, globalCooldownMs: false, useProbeRoute: false, limits: false,
     },
     source: 'default',
   }
@@ -533,6 +571,19 @@ export function createAdapter(opts = {}) {
     routingEffective.blacklistTtlMs = routingEffective.configured.blacklistTtlMs
       ? bl
       : ROUTING_DEFAULTS.blacklistTtlMs
+
+    // ⑥ 全部渠道失败后链路休眠（记录配置，零 I/O，不调闸门；默认 null ⇒ 不休眠）
+    const gc = numIf(routing.globalCooldownMs, null)
+    routingEffective.configured.globalCooldownMs = gc !== null
+    routingEffective.globalCooldownMs = gc !== null ? gc : null
+
+    // ⑦ 探测路由开关（P2，默认 false ⇒ 走原 ladder 逻辑，零回归）
+    routingEffective.configured.useProbeRoute = typeof routing.useProbeRoute === 'boolean'
+    routingEffective.useProbeRoute = routingEffective.configured.useProbeRoute
+      ? routing.useProbeRoute
+      : false
+    const pt = numIf(routing.probeTtlMs, null)
+    routingEffective.probeTtlMs = pt !== null && pt > 0 ? pt : null
 
     // 生效值一律从闸门回读（唯一事实来源；也覆盖"注入的假闸门没有 configure"的场景）
     routingEffective.cooldownMs = numIf(gate?.busyCooldownMs, gateDefaults.busyCooldownMs)
@@ -1240,6 +1291,10 @@ export function createAdapter(opts = {}) {
               cost: priced.costCNY, paid: priced.paid, ok: true,
               // 分账口径（契约 §3）：这次调用发生在什么授权下、候选本身是免费还是付费
               billingTier, billing: cand.billing ?? BILLING.UNKNOWN,
+              // 🔴 账号级隔离统计：记录 accountId，UI 可按「codearts#账号A」展示成功/失败率
+              account: accountIdOfCandidate(cand) ?? null,
+              // 成功笔无失败语义
+              kind: null,
               // 契约 A3：这一笔是不是「切换后成功」+ 本轮第几次尝试才成功
               switched: booked.switched === true, attempts: booked.attempts,
               ms: now() - (ladder.snapshot().startedAt || now()),
@@ -1300,7 +1355,12 @@ export function createAdapter(opts = {}) {
             const failedPriced = computeCost({ provider: cand.provider, model: cand.model, inTokens: 0, outTokens: 0, at: now() })
             onRecord({
               at: now(), provider: cand.provider, model: cand.model,
-              in: 0, out: 0, cost: 0, paid: failedPriced.paid, ok: false, code: ledgerCode ?? lastErr.kind,
+              in: 0, out: 0, cost: 0, paid: failedPriced.paid, ok: false,
+              code: ledgerCode ?? lastErr.kind,
+              // 🔴 账号级隔离统计
+              account: accountIdOfCandidate(cand) ?? null,
+              // 🔴 失败语义（kind），供 fourDimFailureBreakdown 按 provider+model+kind+accountId 聚合
+              kind: lastErr.kind ?? null,
               billingTier, billing: cand.billing ?? BILLING.UNKNOWN,
             })
           } catch { /* ignore */ }
@@ -1657,14 +1717,46 @@ export function createAdapter(opts = {}) {
       //    沿用既有 13 类失败语义里的 PERMISSION（不新增失败码），但给出可读文案。
       const billingBlocked = admitted.eligible.length === 0 && admitted.stats.droppedBilling > 0
       const code = billingBlocked ? KIND.PERMISSION : (lastErr?.code ?? lastErr?.kind ?? 'UNKNOWN')
-      const e = new Error(
-        billingBlocked
-          ? 'cs-myfree: 全部候选都是付费渠道，而当前会话未获 paid_allowed 授权（默认 free_only）。请改用免费候选，或由平台为本次请求签发付费授权。'
-          : (code === 'CHANNEL_BUSY'
-            ? 'cs-myfree: 所有候选渠道当前并发已满（主/子智能体同时在用）。请稍后重试，或在「降级链」里加一个备用渠道。'
-            : `cs-myfree: 全部候选失败（最后错误 ${lastErr?.kind ?? 'unknown'}）`),
-      )
-      e.code = code === 'CHANNEL_BUSY' ? 'CHANNEL_BUSY' : (billingBlocked ? KIND.PERMISSION : (lastErr?.kind ?? 'UNKNOWN'))
+
+      // 🔴 详细抛错（用户确认第 2 点）：列出每个候选的失败原因（provider/model/kind）。
+      //    收集本轮 attemptedProviders 对应的失败详情（从 lastErr 推断，尽量给出可读信息）。
+      const failureDetails = []
+      for (const p of attemptedProviders) {
+        // 简化：只记录最后一次已知失败（精确逐候选失败需改造发送循环，留作后续）
+        if (lastFailedCand && String(lastFailedCand.provider) === String(p)) {
+          failureDetails.push({ provider: p, model: lastFailedCand.model ?? null, kind: lastErr?.kind ?? 'UNKNOWN', message: lastErr?.message ?? null })
+        } else {
+          failureDetails.push({ provider: p, model: null, kind: 'UNKNOWN', message: '本轮尝试失败（详情见日志）' })
+        }
+      }
+      const detailedErr = buildDetailedError({
+        failures: failureDetails,
+        excluded: lastAdmission?.excluded?.map((x) => ({ provider: x.provider, model: x.model, reason: x.reason ?? '未准入' })) ?? [],
+        code: code === 'CHANNEL_BUSY' ? 'CHANNEL_BUSY' : (billingBlocked ? KIND.PERMISSION : (lastErr?.kind ?? 'UNKNOWN')),
+      })
+      // 保留原 code 语义（兼容现有调用方）
+      detailedErr.code = code === 'CHANNEL_BUSY' ? 'CHANNEL_BUSY' : (billingBlocked ? KIND.PERMISSION : (lastErr?.kind ?? 'UNKNOWN'))
+      const e = detailedErr
+
+      // 🔴 全部渠道失败后链路休眠（用户需求）：全部候选失败且配置了 globalCooldownMs 时，
+      //   休眠再重试，避免连续轰炸失效渠道。记录 global-cooldown 事件供 UI 展示。
+      const gcMs = Number(routingEffective?.globalCooldownMs)
+      if (Number.isFinite(gcMs) && gcMs > 0) {
+        const snapshot = ladder ? ladder.snapshot() : {}
+        const allChannelsTried = Array.isArray(snapshot?.channelsTried) ? [...snapshot.channelsTried] : []
+        const totalMs = snapshot?.startedAt ? now() - snapshot.startedAt : 0
+        onEvent({
+          type: 'global-cooldown', provider: null, model: null,
+          totalAttempts: snapshot?.attempts ?? 0,
+          totalMs,
+          lastKind: lastErr?.kind ?? null,
+          allChannelsTried,
+          waitMs: gcMs,
+          at: now(),
+        })
+        await new Promise((r) => setTimeout(r, gcMs))
+      }
+
       throw e
     },
 

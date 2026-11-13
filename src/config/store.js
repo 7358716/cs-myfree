@@ -92,6 +92,13 @@ export const DEFAULTS = Object.freeze({
     priority: 'balanced',
     autoSwitch: true,
     blacklistTtlMs: DEFAULT_TTL_MS,
+    // 🔴 全部渠道失败后链路休眠（用户需求）：全部候选失败后，链路休眠多少秒再允许整体重试，
+    //   避免连续轰炸失效渠道。0 或 null 表示不休眠（当前默认，零回归）。
+    globalCooldownMs: null,
+    // 🔴 探测路由开关（P2，2026-11-13）：true = 先探测可用集合再路由；false = 原 ladder 逻辑（默认，零回归）
+    useProbeRoute: false,
+    // 探测缓存 TTL（毫秒）；null = 用 model-chain 默认 5 分钟
+    probeTtlMs: null,
   },
   // ── 子智能体路由策略（契约 E）──────────────────────────────────────────────
   // 默认值 = **今天的行为**（子智能体自动选路 + 全局链兜底）⇒ harness 零回归；

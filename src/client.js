@@ -1,4 +1,4 @@
-/**
+﻿/**
  * cs-myfree — Myfree 工作台（浏览器半身，完整交互版）
  *
  * ⚠️ 必须用 `window.__ModuleLoader__.load({id, factory})` 包装（不是裸 ESM）。
@@ -704,7 +704,7 @@ window.__ModuleLoader__.load({
       return h('div', null,
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '一眼看懂当前状态'),
-          status(chainLen === null ? null : chainLen > 0, '降级链', chainLen === null ? '加载中' : (chainLen + ' 条候选' + (chainLen === 0 ? '（空 ⇒ 必失败）' : ''))),
+          status(chainLen === null ? null : chainLen > 0, '模型链', chainLen === null ? '加载中' : (chainLen + ' 条候选' + (chainLen === 0 ? '（空 ⇒ 必失败）' : ''))),
           status(d && d.probe ? !!d.probe.anyOk : null, '免密源', keylessOk),
           status(chLogged === null ? null : chLogged > 0, '渠道账号', chTotal === null ? '加载中' : (chLogged + '/' + chTotal + ' 家已登录')),
           status(null, 'DeepSeek 余额', '见上方卡片'),
@@ -717,7 +717,7 @@ window.__ModuleLoader__.load({
           h('div', { style: S.dim },
             '· 免密源 ' + keylessList.length + ' 个' + (keylessLabels ? '（' + keylessLabels + '）' : '') + '，不需要任何账号'),
           h('div', { style: S.dim },
-            '· 默认降级链 ' + (chainLen == null ? '…' : chainLen + ' 条') + (chainProviders.length ? '：' + chainProviders.join(' → ') : '') + '（未进链的源不会被自动调用）'),
+            '· 默认模型链 ' + (chainLen == null ? '…' : chainLen + ' 条') + (chainProviders.length ? '：' + chainProviders.join(' → ') : '') + '（未进链的源不会被自动调用）'),
           h('div', { style: S.dim },
             '· 你自己的账号：到「供给源」页点对应渠道的「登录」按钮'),
           h('div', { style: S.dim },
@@ -1783,7 +1783,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ── W3 降级链编辑器（下拉选择版，不要求手输 provider/model）──
+    // ── W3 模型链编辑器（下拉选择版，不要求手输 provider/model）──
     function ChainZone() {
       const [s, reload] = useApi('/chain')
       const [cat, reloadCat] = useApi('/chain/catalog')
@@ -2015,7 +2015,7 @@ window.__ModuleLoader__.load({
               ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '⚠️ 页面这份链与运行时不一致：保存后需重启插件/宿主才生效')
               : h('div', { style: Object.assign({ marginTop: '6px' }, S.dim) }, '（后端未报告该链是否已应用到运行时）')),
 
-        h('div', { style: { fontWeight: 600, margin: '14px 0 8px' } }, '降级链配置（平台与模型分两层 + 跨平台搜索）'),
+        h('div', { style: { fontWeight: 600, margin: '14px 0 8px' } }, '模型链配置（平台与模型分两层 + 跨平台搜索）'),
         h('div', { style: S.dim }, 'T1 最先尝试，失败后依次降级。同 provider+model ⇒ 替换内置条目的 tier；新的 ⇒ 追加。留空的条目保存时会被忽略。'),
         h('div', { style: S.dim }, '每行三个控件：① 平台下拉（只决定在哪家平台找）② 跨平台搜索框（只输模型关键词）③ 模型下拉（默认只列该平台的模型；搜索有命中时展开为「平台 / 模型」，选中会同时切换平台）。保存提交的仍是 { 平台, 模型 }。'),
 
@@ -2053,7 +2053,7 @@ window.__ModuleLoader__.load({
       if (!s.data) return h(Loading, { on: s.loading })
       const eff = s.data.effective || []
       return h('div', null,
-        h('div', { style: S.dim }, '生效链里 tier 最小的就是当前首选。要改首选 ⇒ 去「降级链」把某条的 tier 改成 1。'),
+        h('div', { style: S.dim }, '生效链里 tier 最小的就是当前首选。要改首选 ⇒ 去「模型链」把某条的 tier 改成 1。'),
         h('div', { style: { marginTop: '10px' } }, eff.length === 0
           ? h('div', { style: S.dim }, '（生效链为空）')
           : eff.map((e, i) => h('div', { key: i, style: S.row },
@@ -2302,7 +2302,7 @@ window.__ModuleLoader__.load({
         h('div', { style: S.card },
           h('div', { style: { fontWeight: 600, marginBottom: '8px' } }, '保护策略'),
           h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim, S.warn) },
-            '⚠️ 图片输入说明：当前降级链上的模型都只声明了 text 模态（inputModalities: [text]），宿主不会把图片发给本模型 ⇒ 聊天输入框不能发图。下面的「识图档位」只影响已进入插件的图片预处理，不改变这个限制（后端声明待修）。'),
+            '⚠️ 图片输入说明：当前模型链上的模型都只声明了 text 模态（inputModalities: [text]），宿主不会把图片发给本模型 ⇒ 聊天输入框不能发图。下面的「识图档位」只影响已进入插件的图片预处理，不改变这个限制（后端声明待修）。'),
           h(ConfigEditor, { fields: [
             { path: ['search', 'budgetMs'], label: '搜索总预算 (ms)', type: 'number', hint: '单次搜索最多等多久；超时按已返回的部分结果用' },
             { path: ['search', 'sources'], label: '搜索源', type: 'list', hint: '逗号分隔。可选：bing-rss, bing-html, sogou, mwmbl' },
@@ -4306,9 +4306,9 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontWeight: 600, cursor: 'pointer' }, onClick: () => setAdvOpen(!advOpen) },
             (advOpen ? '▾ ' : '▸ ') + '高级（技术细节）'),
           advOpen ? h('div', { style: { marginTop: '8px' } },
-            h('div', { style: { fontWeight: 500, marginBottom: '4px' } }, '降级链'),
+            h('div', { style: { fontWeight: 500, marginBottom: '4px' } }, '模型链'),
             chainTiers.length === 0
-              ? h('div', { style: S.dim }, '（无候选链数据；到「降级链」页查看）')
+              ? h('div', { style: S.dim }, '（无候选链数据；到「模型链」页查看）')
               : chainTiers.map((t, i) => h('div', { key: i, style: S.row },
                   h('span', null, '第 ' + t.tier + ' 层'),
                   h('span', { style: S.dim }, (t.providers || []).join(' → ') || '—'))),
@@ -4411,10 +4411,10 @@ window.__ModuleLoader__.load({
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // W2 模型与路由（design/21 §3）：自动路由可视化 + 手动降级链 + 渠道模型清单
+    // W2 模型与路由（design/21 §3）：自动路由可视化 + 手动模型链 + 渠道模型清单
     // ═══════════════════════════════════════════════════════════════════════
     // · 自动路由（只读展示生效值；调整入口在「设置」页）
-    // · 手动降级链（复用旧 ChainZone；标注「自动路由开着时仅作候选排序参考」）
+    // · 手动模型链（复用旧 ChainZone；标注「自动路由开着时仅作候选排序参考」）
     // · 渠道模型清单：默认只显示 codearts + 免密源（kilo/ovh/pollinations），
     //   开关「显示全部渠道」展开其余账号渠道；每渠道带状态徽标。
     const MODELS_DEFAULT_PROVIDERS = new Set(['codearts', 'kilo', 'ovh', 'pollinations'])
@@ -4479,9 +4479,9 @@ window.__ModuleLoader__.load({
                 h('button', { style: S.btn(false), onClick: () => props.onGoTab('settings') }, '去「设置」页调整'))
             : null),
 
-        // 手动降级链（复用旧 ChainZone；标注语义）
+        // 手动模型链（复用旧 ChainZone；标注语义）
         h('div', { style: { marginTop: '12px' } },
-          h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '手动降级链（覆盖）'),
+          h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '手动模型链（覆盖）'),
           h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
             autoOn
               ? '自动路由开着时，这份链只作为候选排序参考；关掉自动路由后按这份链逐个尝试。'
