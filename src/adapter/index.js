@@ -409,20 +409,6 @@ export function createAdapter(opts = {}) {
      * 装配层接线后即可让「同一渠道的两个账号各占各自名额」。
      */
     accountOf = null,
-    /**
-     * **精选模型清单**（用户需求 2026-11-15，**可选**）
-     *
-     * `string[]` 或 `() => string[]`：用户点名的模型（`provider/model` 或裸 `model`）。
-     *
-     * 语义（**只影响选择器展示，不影响路由/降级**）：
-     *   · 空数组 / null ⇒ 不启用精选 ⇒ `listModels()` 返回全量（零回归）
-     *   · 非空 ⇒ `listModels()` **只返回清单里的模型**（治「模型选择特别多」）
-     *   · `resolveModel()` / `stream()` 始终按全量解析 ⇒ 老会话选中项收窄后仍能跑
-     *
-     * ⚠️ 与 `sources.hidden` 同一纪律：**隐藏 ≠ 禁用**，路由链与自动切换不受影响。
-     *    与 routingConfig 同理传函数而非快照 ⇒ 设置页改完即时生效（不必重启）。
-     */
-    configuredModels = null,
   } = opts
 
   if (typeof send !== 'function') throw new TypeError('createAdapter 需要 send 函数')
@@ -703,29 +689,56 @@ export function createAdapter(opts = {}) {
   }
 
   /**
-   * 精选模型清单（用户需求 2026-11-15）：
-   *   「模型选择目前特别多，我计划是免费池/付费池中我选择的几个模型才能被选择」
+   * 模型链 = 可被选择的模型集合（用户口径 2026-11-16 修正）
    *
-   * 语义（**只影响选择器展示，不影响路由/降级** —— 与 sources.hidden 同一纪律）：
-   *   · configuredModels 为空 / null ⇒ 不启用精选（返回全量，零回归）
-   *   · 非空 ⇒ `listModels()` 只返回清单里点名的模型
-   *   · `resolveModel()` / `stream()` **始终**按全量解析 ⇒ 老会话选中的模型
-   *     在清单收窄后仍能继续跑，不会突然「模型不存在」
+   * 🔴 用户原话：「模型链替代降级链，不叫精选模型链，降级链内置有规则逻辑，
+   *    模型链按照级别可以添加免费、付费模型，**只有官方（含我自行添加的）和
+   *    模型链中明确的可以被选择**」
    *
-   * 匹配口径：`provider/model` 精确匹配，或裸 `model` 匹配（任一渠道）。
+   * 落地口径（用户在问答里进一步确认）：
+   *   · **只有链里列出的模型才能被选**（官方也要进链）
+   *   · 降级链的内置规则 = 链的默认内容（不是另一套东西）
+   *   · 链里每一条带 tier ⇒ 就是级别（T1 优先尝试，失败降级到 T2…）
    *
-   * @returns {Array|null} 精选后的条目；null = 未启用
+   * 语义：
+   *   · `chain` 为空 ⇒ 返回空（**这是如实的**：没配链就没有可选项，
+   *     而不是偷偷把全部模型放出来 —— 那会重新变成「模型太多」）
+   *   · 非空 ⇒ 只返回链里的模型（**按 tier 排序**，与选路顺序一致）
+   *
+   * ⚠️ 只作用于 `listModels()`（选择器展示）；`resolveModel()` / `stream()`
+   *    仍走全量 catalog ⇒ 老会话里选中的模型不会因为链调整而突然「不存在」。
+   *
+   * @returns {Array} 链内模型条目（可能为空）
    */
-  function selectedCatalog() {
-    const want = typeof configuredModels === 'function' ? configuredModels() : configuredModels
-    if (!Array.isArray(want) || want.length === 0) return null
-    const set = new Set(want.map((x) => String(x).trim()).filter(Boolean))
-    if (set.size === 0) return null
-    const all = catalog()
-    const hit = all.filter((e) => set.has(`${e.provider}/${e.model}`) || set.has(String(e.model)))
-    // fail-open：清单点名的模型一个都对不上（例如渠道还没登录/模型改名）
-    //   ⇒ 回落到全量，而不是给用户一个空选择器（空列表比"多"糟得多）。
-    return hit.length > 0 ? hit : null
+  function chainCatalog() {
+    // chain 已由 mergeChain(builtin, overrides) 算好，且每个条目都有 provider/model/tier。
+    // 去重口径与 catalog() 一致：按 model id 唯一（宿主 listModels 要求 id 不重复）。
+    const seen = new Map()
+    for (const e of chain) {
+      if (!e?.model) continue
+      const id = String(e.model)
+      if (seen.has(id)) continue
+      // 渠道模型（extraModels 动态追加）也要能带出模态信息
+      const extra = (() => {
+        try { return (extraModels() || []).find((m) => m?.id === id) ?? null } catch { return null }
+      })()
+      seen.set(id, {
+        provider: e.provider,
+        model: id,
+        name: e.name || extra?.name || id,
+        tier: e.tier,
+        inputModalities: extra?.inputModalities ?? e.inputModalities,
+        // 🔴 contextWindow 必须一起带出：链条目里显式声明的优先（用户/协议可调），
+        //    否则 listModels 的 contextWindow 与 resolveModel 会漂移 ⇒ 压缩判定出错。
+        contextWindow: e.contextWindow,
+      })
+    }
+    // 按 tier 升序（T1 在前）⇒ 与选路优先级一致，用户看到的顺序 = 实际尝试顺序
+    return [...seen.values()].sort((a, b) => {
+      const ta = Number.isFinite(a.tier) ? a.tier : 99
+      const tb = Number.isFinite(b.tier) ? b.tier : 99
+      return ta - tb
+    })
   }
 
   /**
@@ -1058,17 +1071,17 @@ export function createAdapter(opts = {}) {
 
     // ── 契约③：每项必须有 provider（渠道名别名同样放行）──
     //
-    // 🔴 2026-11-15 用户需求：选择器只列「我选定的几个模型」（configuredModels）。
-    //    精选只作用于**展示**；resolveModel/stream 仍走全量（见 selectedCatalog 注释）。
+    // 🔴 2026-11-16 用户口径修正：**只有模型链里列出的才能被选**（官方也要进链）。
+    //    所以这里返回**链内模型**，而不是全量 catalog。
+    //    ⇒ 解决「模型选择目前特别多」；用户想让某个模型可选，就把它加进模型链。
     listModels(provider) {
       if (provider !== providerId && !providerAliases().includes(provider)) return []
-      const list = selectedCatalog() ?? catalog()
-      return list.map((e) => makeModelInfo(provider, {
+      return chainCatalog().map((e) => makeModelInfo(provider, {
         id: e.model,
         name: e.name || e.model,
         contextWindow: contextOf(e),
         inputModalities: e.inputModalities,
-        supportsVision: e.supportsVision,
+        supportsVision: (Array.isArray(e.inputModalities) ? e.inputModalities : []).includes('image'),
       }))
     },
 

@@ -1729,36 +1729,68 @@ window.__ModuleLoader__.load({
             })),
 
         // ══════════════════════════════════════════════════════════════════
-        // 付费池（自带 API Key；会用真钱，默认关闭）
-        //   🔴 用户需求 2026-11-15：此前付费源在页面上完全不可见（/state 没返回）
+        // 付费池 = 可管理的容器（用户口径 2026-11-16）
+        //
+        //   「不是开启付费池，是有一个付费池供我管理」
+        //
+        // ⇒ 这里不是开关，而是**管理面板**：
+        //     · 每个付费源显示：是否已配 Key（掩码）、是否已加入模型链
+        //     · 可直接「去配置 Key」跳转到该源的登录卡片
+        //     · 「加入模型链 / 从链移除」直连模型链（付费模型也走同一条链）
+        //   总开关（是否允许花真钱）仍然存在，但它属于**授权**，放在「设置」页，
+        //   这里是「池子里有什么、我怎么配」。
         // ══════════════════════════════════════════════════════════════════
-        h('div', { style: S.poolHead },
-          h('span', { style: S.poolTitle('paid') }, '💰 付费池'),
-          h('span', { style: S.dim },
-            ((d.sources.paid || []).length) + ' 个源 · '
-            + (d.config && d.config.paid && d.config.paid.enabled ? '⚠️ 已开启（会花钱）' : '默认关闭（不会自动花钱）'))),
-        h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
-          '付费源用自己的 API Key，按量计费。只有打开「允许付费」后才会被路由选中；'
-          + '子智能体始终只走免费池。'),
-        (d.sources.paid || []).length === 0
-          ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, '（后端没有返回付费源）')
-          : h('div', { style: S.grid }, (d.sources.paid || []).map((p) => h('div', { key: p.id, style: S.tile },
-            h('div', { style: { fontWeight: 600 } }, p.label),
-            h('div', { style: S.dim }, p.note || '自带 API Key'),
-            h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) },
-              p.enabled ? '⚠️ 已启用' : '⏸ 未启用')))),
-        h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '6px' } },
-          h('button', {
-            style: S.btn(!(d.config && d.config.paid && d.config.paid.enabled)),
-            onClick: () => {
-              const on = !(d.config && d.config.paid && d.config.paid.enabled)
-              if (on && !window.confirm('打开付费池后，主会话可能调用付费 API 产生真实费用。确定打开？')) return
-              api('/config', { method: 'POST', body: JSON.stringify({ paid: { enabled: on } }) })
-                .then((r) => { setMsg(r.ok ? { ok: true, text: on ? '付费池已开启' : '付费池已关闭' } : { ok: false, error: r.error || '保存失败' }); reload() })
-                .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
-            },
-          }, (d.config && d.config.paid && d.config.paid.enabled) ? '关闭付费池' : '开启付费池'),
-          h('span', { style: S.dim }, '「DeepSeek 账户余额」卡片在上方总览；预算限额见「设置」页')),
+        (() => {
+          const paidList = Array.isArray(d.sources.paid) ? d.sources.paid : []
+          const paidOn = !!(d.config && d.config.paid && d.config.paid.enabled)
+          return h('div', null,
+            h('div', { style: S.poolHead },
+              h('span', { style: S.poolTitle('paid') }, '💰 付费池'),
+              h('span', { style: S.dim },
+                paidList.filter((p) => p.configured).length + ' / ' + paidList.length + ' 个源已配 Key · '
+                + (paidOn ? '⚠️ 已授权可花钱' : '🔒 未授权（不会花钱）'))),
+            h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
+              '付费池里放你自带的 API（Key 只存本机）。「加入模型链」之后，它才会出现在对话模型选择器里；'
+              + '是否真的允许花钱由「设置 → 付费授权」决定，本页不做开关。'),
+            paidList.length === 0
+              ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, '（付费池为空）')
+              : h('div', { style: S.grid }, paidList.map((p) => h('div', { key: p.id, style: S.tile },
+                  h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' } },
+                    h('span', { style: { fontWeight: 600 } }, p.label),
+                    h('span', { style: S.badge(p.configured ? 'good' : 'warn') },
+                      p.configured ? ('已配 ' + (p.accounts || 1) + ' 个 Key') : '未配置')),
+                  h('div', { style: S.dim }, p.note || '自带 API Key'),
+                  p.configured && p.masked
+                    ? h('div', { style: Object.assign({ marginTop: '2px' }, S.dim, S.mono) }, p.masked)
+                    : null,
+                  h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) },
+                    p.inChain ? '📌 已在模型链' : '⭕ 未加入模型链'),
+                  h('div', { style: { display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' } },
+                    h('button', {
+                      style: Object.assign({}, S.btn(false), { padding: '0 8px', fontSize: '11px' }),
+                      onClick: () => {
+                        // 跳到该源对应的渠道卡片（配置 Key 的地方）
+                        if (typeof props.onGoTab === 'function') props.onGoTab('sources')
+                        if (typeof window !== 'undefined') {
+                          try { window.scrollTo({ top: 0, behavior: 'smooth' }) } catch { /* ignore */ }
+                        }
+                        setMsg({ ok: true, text: '请在下方「账号渠道」里找到「' + p.label + '」配置 API Key' })
+                      },
+                    }, p.configured ? '更换 Key' : '去配置 Key'),
+                    h('button', {
+                      style: Object.assign({}, S.btn(false), { padding: '0 8px', fontSize: '11px' }),
+                      onClick: () => {
+                        // 🔴 加入模型链要选**具体模型**（链的每条是 provider+model），
+                        //    不能在付费池里猜模型名 ⇒ 引导到「模型与路由」页的模型链编辑器，
+                        //    那里有平台/模型两级下拉（用户选完即写入链）。
+                        if (typeof props.onGoTab === 'function') props.onGoTab('models')
+                        setMsg({ ok: true, text: '请在「模型与路由 → 模型链」里用下拉把「' + p.label + '」的模型加进去（可指定级别）' })
+                      },
+                    }, p.inChain ? '调整级别' : '加入模型链')),
+                  ))),
+            h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
+              '「DeepSeek 账户余额」「火山方舟余额」在同一页下方；预算限额与付费授权见「设置」页。')) 
+        })(),
 
         // design/21 §1：额度健康并入供给源（复用旧 HealthZone 渲染，不删源码）
         h('div', { style: { marginTop: '16px', borderTop: '1px solid rgba(128,128,128,0.18)', paddingTop: '12px' } },
@@ -4503,9 +4535,6 @@ window.__ModuleLoader__.load({
       const [st, reload] = useApi('/state')
       const [s, reloadS] = useApi('/settings')
       const [showAll, setShowAll] = react.useState(false)
-      // 精选模型（用户需求 2026-11-15）：本地待加入 + 保存提示
-      const [pickModel, setPickModel] = react.useState('')
-      const [selMsg, setSelMsg] = react.useState(null)
 
       if (s.error) {
         return h('div', null,
@@ -4541,51 +4570,14 @@ window.__ModuleLoader__.load({
             : '失败 ' + (c.failCount || 0) + ' 次')
       }
 
-      // ── 精选模型（用户需求 2026-11-15）────────────────────────────────────
-      //   「模型选择目前特别多，我计划是免费池/付费池中我选择的几个模型才能被选择」
-      //
-      //   数据来源：`/settings` 的 models 目录（每组 {provider,label,kind,models}）
-      //   键形状：`provider/model`（精确，允许同名模型分属不同渠道）
-      //   🔴 只写 config.models.selected；**不动**链/准入/降级（隐藏 ≠ 禁用）
-      const selectedModels = Array.isArray(effCfg.models && effCfg.models.selected)
-        ? effCfg.models.selected
-        : []
-      const allModelOptions = (() => {
-        const out = []
-        const seen = new Set()
-        for (const g of visibleGroups) {
-          for (const m of g.models || []) {
-            const key = g.provider + '/' + (m.id || m.name)
-            if (seen.has(key)) continue
-            seen.add(key)
-            out.push({
-              key,
-              label: (g.label || g.provider) + ' · ' + (m.name || m.id),
-            })
-          }
-        }
-        return out
+      // 模型链 = 可被选择的模型集合（用户口径 2026-11-16）
+      const chainCount = (() => {
+        const c = (st.data && st.data.chain) || eff.chain || null
+        if (!c) return null
+        if (typeof c.effectiveCount === 'number') return c.effectiveCount
+        if (Array.isArray(c.effective)) return c.effective.length
+        return null
       })()
-      /** 把 `provider/model` 键渲染成人话（找不到就原样显示键） */
-      const modelLabel = (key) => {
-        const hit = allModelOptions.find((o) => o.key === key)
-        return hit ? hit.label : key
-      }
-      /** 保存精选（整表覆盖；后端 /config 会热更新内存 cfg ⇒ 即时生效） */
-      const saveSelectedModels = (next) => {
-        setSelMsg(null)
-        api('/config', { method: 'POST', body: JSON.stringify({ models: { selected: next } }) })
-          .then((r) => {
-            if (r && r.ok) {
-              setSelMsg({ ok: true, text: '已保存：' + (next.length === 0 ? '恢复列出全部模型' : '精选 ' + next.length + ' 个模型') })
-              setPickModel('')
-              reloadS(); reload()
-            } else {
-              setSelMsg({ ok: false, error: (r && r.error) || '保存失败' })
-            }
-          })
-          .catch((e) => setSelMsg({ ok: false, error: String((e && e.message) || e) }))
-      }
 
       return h('div', null,
         // 自动路由卡片（只读展示生效值）
@@ -4604,65 +4596,37 @@ window.__ModuleLoader__.load({
                 h('button', { style: S.btn(false), onClick: () => props.onGoTab('settings') }, '去「设置」页调整'))
             : null),
 
-        // 手动模型链（复用旧 ChainZone；标注语义）
+        // 模型链（用户口径 2026-11-16：模型链 = 可被选择的模型集合）
         h('div', { style: { marginTop: '12px' } },
-          h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '手动模型链（覆盖）'),
+          h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '模型链（决定对话里能选哪些 + 尝试顺序）'),
           h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
-            autoOn
-              ? '自动路由开着时，这份链只作为候选排序参考；关掉自动路由后按这份链逐个尝试。'
-              : '自动路由已关：按这份链逐个尝试。'),
+            '这就是「模型链」：链里列出的模型「才会出现在对话的模型选择器里」；'
+            + '级别（T1→T2→…）就是实际尝试顺序，上一级失败自动降级到下一级。'
+            + (autoOn ? '自动路由开着时，链的顺序仍决定优先尝试谁。' : '自动路由已关：严格按这份链逐个尝试。')),
           h(ChainZone)),
 
         // ══════════════════════════════════════════════════════════════════
-        // 精选模型（用户需求 2026-11-15）
-        //   「模型选择目前特别多，我计划是免费池/付费池中我选择的几个模型才能被选择」
-        //   🔴 只影响选择器展示；路由/降级/自动切换一律不受影响（隐藏 ≠ 禁用）
+        // 模型链说明卡（用户口径 2026-11-16 修正）
+        //
+        //   「模型链替代降级链，不叫精选模型链，降级链内置有规则逻辑，
+        //    模型链按照级别可以添加免费、付费模型，
+        //    **只有官方（含我自行添加的）和模型链中明确的可以被选择**」
+        //
+        //   ⇒ 上面那张「手动模型链」就是本文档的主角：它就是**可被选择的模型集合**。
+        //     这张卡只解释「选择器为什么这么短 / 怎么加模型」，不重复做编排 UI。
         // ══════════════════════════════════════════════════════════════════
         h('div', { style: { marginTop: '12px' } },
-          h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '精选模型（决定对话里能选哪些）'),
-          h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
-            selectedModels.length === 0
-              ? '当前未启用：对话模型选择器会列出全部可用模型（' + allModelOptions.length + ' 个）。'
-              : '已精选 ' + selectedModels.length + ' 个：对话里只列这些。'),
-          allModelOptions.length === 0
-            ? h('div', { style: S.dim }, '（还没有可选模型：先登录渠道或等免密源就绪）')
-            : h('div', null,
-                // 已选清单
-                selectedModels.length === 0 ? null : h('div', { style: { marginBottom: '8px' } },
-                  selectedModels.map((key) => h('div', { key, style: Object.assign({}, S.row, { padding: '3px 0' }) },
-                    h('span', { style: S.mono }, modelLabel(key)),
-                    h('button', {
-                      style: Object.assign({}, S.btn(false), { padding: '0 8px', fontSize: '11px' }),
-                      onClick: () => saveSelectedModels(selectedModels.filter((x) => x !== key)),
-                    }, '移除')))),
-                // 添加：下拉列出尚未选中的
-                (() => {
-                  const rest = allModelOptions.filter((o) => !selectedModels.includes(o.key))
-                  return rest.length === 0
-                    ? h('div', { style: S.dim }, '（已把全部 ' + allModelOptions.length + ' 个模型都选上了）')
-                    : h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } },
-                        h('select', {
-                          style: Object.assign({}, S.input, { maxWidth: '360px' }),
-                          value: pickModel,
-                          onChange: (e) => setPickModel(e.target.value),
-                        },
-                          h('option', { value: '' }, '（选择要加入精选的模型…）'),
-                          rest.map((o) => h('option', { key: o.key, value: o.key }, o.label))),
-                        h('button', {
-                          style: S.btn(!!pickModel),
-                          disabled: !pickModel,
-                          onClick: () => { if (pickModel) saveSelectedModels([...selectedModels, pickModel]) },
-                        }, '加入精选'))
-                })(),
-                selectedModels.length > 0
-                  ? h('div', { style: { marginTop: '8px' } },
-                      h('button', { style: S.btn(false), onClick: () => saveSelectedModels([]) },
-                        '清空精选（恢复列出全部模型）'))
-                  : null,
-                selMsg
-                  ? h('div', { style: Object.assign({ marginTop: '6px' }, selMsg.ok ? { color: 'var(--dsw-alias-state-success-primary)' } : S.warn) },
-                      selMsg.ok ? selMsg.text : '保存失败：' + selMsg.error)
-                  : null)),
+          h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, '对话里能选哪些模型？'),
+          h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
+            '对话模型选择器只列「上面这条模型链里」的模型 —— 想让某个模型可选，就把它加进链里；'
+            + '想减少可选项，就从链里移除。链里的顺序（级别）就是实际尝试顺序：上一级失败自动降级到下一级。'),
+          h('div', { style: S.row },
+            h('span', null, '当前链内模型'),
+            h('span', { style: { fontWeight: 600 } },
+              (typeof chainCount === 'number' ? chainCount : '—') + ' 个')),
+          h('div', { style: Object.assign({ marginTop: '6px' }, S.dim) },
+            '免费模型与付费模型都可以加进链里；付费模型只有在「设置 → 付费授权」允许时才会被真正调用。'),
+        ),
 
         // 渠道与模型清单（默认过滤 + 显示全部开关）
         h('div', { style: { marginTop: '12px' } },

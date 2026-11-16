@@ -80,14 +80,7 @@ export const DEFAULTS = Object.freeze({
   //   `hidden: []`（默认）= 没写显式清单 ⇒ 套用下面的**默认可见集合**；
   //     显式写空数组（`{sources:{hidden:[]}}`）= 全部展示；写非空 = 该清单为准（绝对口径）。
   sources: { disabled: [], hidden: [] },
-  // ── 精选模型（用户需求 2026-11-15）──────────────────────────────────────────
-  //   「模型选择目前特别多，我计划是免费池/付费池中我选择的几个模型才能被选择」
-  //
-  //   `[]`（默认）= 不启用精选 ⇒ 选择器展示全量（零回归）。
-  //   非空 = 只列这些模型。元素形状：`"provider/model"`（精确）或裸 `"model"`（任一渠道）。
-  //   🔴 **只影响选择器展示，不影响路由/降级/自动切换** —— 与 sources.hidden 同一纪律：
-  //      隐藏 ≠ 禁用。老会话已选中的模型在清单收窄后仍能继续跑（resolveModel 走全量）。
-  models: { selected: [] },
+
   // ── 路由（契约 B `rules.configurable`）──────────────────────────────────────
   // 🔴 **逐字镜像** `adapter/index.js` 的 `ROUTING_DEFAULTS`（见该处定义与注释）：
   //      priority: 'balanced' / autoSwitch: true / blacklistTtlMs: DEFAULT_TTL_MS(6h)

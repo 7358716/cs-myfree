@@ -641,10 +641,6 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
       // 与 routingConfig 同理传函数而非快照：adapter 的 subagentRoutingOf() 认两种形态，
       // 函数形态 ⇒ 设置改完即时生效（不必重启）。
       subagentRouting: () => cfg.subagentRouting,
-      // 🔴 用户需求 2026-11-15：选择器只列「我选定的几个模型」。
-      // 传函数（不是快照）⇒ 设置页保存后即时生效，不必重启。
-      // 空数组 ⇒ 不启用精选（零回归）。只看展示，不影响路由（见 adapter selectedCatalog）。
-      configuredModels: () => cfg.models?.selected,
       // 旁路授权通道（同一份注册表：cordis 服务与 globalThis 符号指向它）
       routingHints: hintRegistry,
       // 终态失败黑名单（进程级共享：adapter 与 /state 看到同一份）

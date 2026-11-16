@@ -163,6 +163,9 @@ export function registerRoutes(webServer, opts = {}) {
   route('/state', async () => {
     const cfg = withDefaults(getConfig())
     const view = await chainView()
+    // 付费池「可管理」需要知道每个源存了几个 Key（读失败按空处理，不阻塞 /state）
+    let allAccounts = []
+    try { allAccounts = await accounts.list() } catch { allAccounts = [] }
     const builtin = view.builtin
     const overrides = view.overrides
     const merged = view.effective
@@ -191,15 +194,27 @@ export function registerRoutes(webServer, opts = {}) {
         })),
         // 🔴 用户需求 2026-11-15：设置页要「收费池 / 免费池」两池。
         //    此前只暴露 keyless + channels，付费源自加 API 完全不可见 ⇒「页面不全」。
-        paid: paidSources().map((s) => ({
-          id: s.id,
-          label: s.label,
-          note: s.note ?? null,
-          // 是否已经配好自己的 key（配置里出现过 / 有账号记录）
-          configured: (cfg.sources?.disabled ?? []).includes(s.id) === false
-            && (Array.isArray(cfg.paid?.providers) ? cfg.paid.providers.includes(s.id) : true),
-          enabled: cfg.paid?.enabled === true,
-        })),
+        //
+        // 🔴 2026-11-16 用户口径修正：付费池是**可管理的容器**，不是开关。
+        //    所以每个付费源要给出「我能不能管它」的真实信息：
+        //      configured  = 是否已存凭证（能真的调用）
+        //      accounts    = 存了几个账号/Key
+        //      inChain     = 是否已加入模型链（只有在链里才会被调用）
+        //    ⚠️ 不再用 cfg.paid.providers 判断（那个字段根本不存在，旧逻辑恒 true）。
+        paid: paidSources().map((s) => {
+          const accts = allAccounts.filter((a) => String(a.provider) === String(s.id))
+          return {
+            id: s.id,
+            label: s.label,
+            note: s.note ?? null,
+            accounts: accts.length,
+            configured: accts.length > 0,
+            // 是否在模型链里（免费/付费一视同仁：不在链里就不会被调用）
+            inChain: merged.some((e) => String(e.provider) === String(s.id)),
+            enabled: cfg.paid?.enabled === true,
+            masked: accts[0]?.masked ?? null,
+          }
+        }),
         counts: {
           keyless: keylessSources().length,
           channels: Object.keys(CHANNELS).length,
@@ -226,8 +241,6 @@ export function registerRoutes(webServer, opts = {}) {
         budget: cfg.budget,
         paid: { enabled: cfg.paid?.enabled === true },
         disabledSources: cfg.sources?.disabled ?? [],
-        // 精选模型（空 = 未启用精选 ⇒ 选择器展示全量）
-        selectedModels: cfg.models?.selected ?? [],
       },
       // 路由：授权默认值 / 最近准入 / 候选成本视图 / 并发闸门
       routing,

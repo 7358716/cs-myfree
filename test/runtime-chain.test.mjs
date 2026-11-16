@@ -55,7 +55,7 @@ test('请求的免密模型优先直连（同 model 命中链条目）', async (
   assert.equal(calls[0].provider, 'ovh', '请求的模型必须优先，不受 tier 影响')
 })
 
-test('extraModels 目录里的渠道模型既能选到、也能直连', async () => {
+test('🔴 模型链语义（2026-11-16）：只有链里的模型能被选；未进链仍可直连', async () => {
   const calls = []
   const adapter = createAdapter({
     builtin: [{ provider: 'kilo', model: 'kilo-auto/free', tier: 1 }],
@@ -63,18 +63,25 @@ test('extraModels 目录里的渠道模型既能选到、也能直连', async ()
     send: okSend(calls),
   })
 
-  // listModels：渠道模型可被选中（宿主契约：provider 必须是 cs-myfree、id 唯一）
+  // 用户口径：模型选择器 = 模型链内容（未进链的渠道模型**不出现**）
   const ids = adapter.listModels('cs-myfree').map((m) => m.id)
-  assert.ok(ids.includes('kilo-auto/free'))
-  assert.ok(ids.includes('codearts/deepseek-v4-pro'))
-  // resolveModel：选择器选中后宿主会解析
+  assert.ok(ids.includes('kilo-auto/free'), '链内模型必须可选')
+  assert.equal(ids.includes('codearts/deepseek-v4-pro'), false,
+    '未进模型链的渠道模型不得出现在选择器里（用户口径：只有链里列出的才能选）')
+
+  // 但 resolveModel 仍走全量 ⇒ 老会话选中的模型不会突然「不存在」
   const rm = adapter.resolveModel('cs-myfree', 'codearts/deepseek-v4-pro')
   assert.equal(rm.id, 'codearts/deepseek-v4-pro')
   assert.equal(rm.provider, 'cs-myfree')
 
+  // 直连仍可用（路由不受列表收窄影响）
   await collect(adapter.stream({ model: 'codearts/deepseek-v4-pro', messages: [] }))
   assert.equal(calls[0].provider, 'codearts')
-  assert.equal(calls[0].model, 'codearts/deepseek-v4-pro')
+
+  // 把它加进链之后，就应该出现在选择器里
+  adapter.setChain([{ provider: 'codearts', model: 'codearts/deepseek-v4-pro', tier: 2 }], [])
+  const ids2 = adapter.listModels('cs-myfree').map((m) => m.id)
+  assert.ok(ids2.includes('codearts/deepseek-v4-pro'), '进链后必须可选')
 })
 
 test('直连失败后才按链降级（模型不存在 → 换模型）', async () => {
