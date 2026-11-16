@@ -143,7 +143,12 @@ export async function chat(o) {
     signal, fetchImpl = globalThis.fetch, timeoutMs = 90_000,
   } = o
 
-  const url = joinUrl(ch.baseUrl, ch.chatPath ?? '/v1/chat/completions')
+  // 🔑 自加免费 API（2026-11-16）：端点由用户提供 ⇒ 优先用账号记录里的 baseUrl。
+  //    其它渠道一律用 protocols 的静态声明（用户误填也不会改掉内置端点）。
+  const effectiveBase = (ch.userBaseUrl === true && typeof o.baseUrl === 'string' && o.baseUrl.trim())
+    ? o.baseUrl.trim()
+    : ch.baseUrl
+  const url = joinUrl(effectiveBase, ch.chatPath ?? '/v1/chat/completions')
 
   const ctrl = new AbortController()
   const onAbort = () => ctrl.abort()

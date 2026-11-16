@@ -13,6 +13,9 @@ export const SOURCES = Object.freeze([
   { id: 'kilo-free', label: 'Kilo 免费池', kind: KIND.KEYLESS, note: '完全免密；prompt 可能被上游记录' },
   { id: 'ovh-vision', label: 'OVH 免费视觉', kind: KIND.KEYLESS, note: '识图专用；免密' },
   { id: 'pollinations', label: 'Pollinations', kind: KIND.KEYLESS, note: '免密；能力较弱' },
+  // 自加免费 API（2026-11-16）：用户粘贴 OpenAI 兼容端点 + Key 即可用 ⇒ 归**免费池**
+  //   ⚠️ 与 ark/deepseek-official（付费，kind=SELFAPI）分开：这是用户声明免费的端点
+  { id: 'custom-free', label: '自加免费 API（OpenAI 兼容）', kind: KIND.ACCOUNT, note: '粘贴 Base URL + API Key；如 AMD 开发者云 / Groq / OpenRouter 免费模型 / 本地 Ollama' },
 
   { id: 'codearts', label: 'CodeArts（华为云）', kind: KIND.ACCOUNT, checkin: true },
   { id: 'buddy', label: 'CodeBuddy（腾讯）', kind: KIND.ACCOUNT, checkin: true },
@@ -31,7 +34,6 @@ export const SOURCES = Object.freeze([
   { id: 'gemini', label: 'Gemini Code Assist', kind: KIND.ACCOUNT, checkin: false, note: '当前网络不可达' },
   { id: 'officeace', label: 'OfficeAce（华为 MaaS）', kind: KIND.ACCOUNT, checkin: true },
   { id: 'accio', label: 'Accio（阿里）', kind: KIND.ACCOUNT, checkin: false },
-  { id: 'qiniu', label: 'Qiniu（七牛）', kind: KIND.ACCOUNT, checkin: false },
 
   { id: 'deepseek-official', label: 'DeepSeek 官方', kind: KIND.SELFAPI, paid: true },
   { id: 'ark', label: '火山方舟', kind: KIND.SELFAPI, paid: true },

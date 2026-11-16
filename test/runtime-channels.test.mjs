@@ -18,6 +18,8 @@ import { listChannels } from '../src/web/channels.js'
 
 test('🔴 所有渠道的 chat URL 不得出现重复 /v1（/v1/v1）', () => {
   for (const [id, ch] of Object.entries(CHANNELS)) {
+    // ⚠️ 自加免费 API（userBaseUrl）的端点由**用户填写**：这里的 baseUrl 只是占位骨架，
+    //    不参与「必须是真实 https 域名」的约束（真实值来自账号记录，driver 侧校验）。
     const url = joinUrl(ch.baseUrl, ch.chatPath ?? '/v1/chat/completions')
     assert.equal(/\/v1\/v1\//.test(url), false, `${id} URL 重复 /v1：${url}`)
     assert.equal(/\/api\/v1\/v1\//.test(url), false, `${id} URL 重复 /api/v1：${url}`)
@@ -223,7 +225,7 @@ test('🔴 渠道清单如实标注 implemented / reason（必须与 flow-map �
   //    裸 HTTP 会回 CSRFInvalid ⇒ 如实标为不可用，避免用户以为登了就能用。
   const SHOULD_BE_IMPLEMENTED = [
     'codearts', 'buddy', 'workbuddy', 'trae', 'cline',
-    'loomy', 'raccoon', 'minimax', 'minimaxintl', 'officeace', 'accio', 'qiniu',
+    'loomy', 'raccoon', 'minimax', 'minimaxintl', 'officeace', 'accio',
   ]
   for (const id of SHOULD_BE_IMPLEMENTED) {
     assert.equal(byId[id].implemented, true, id + ' 已有真实现 ⇒ 必须标 true')

@@ -409,6 +409,20 @@ export function createAdapter(opts = {}) {
      * 装配层接线后即可让「同一渠道的两个账号各占各自名额」。
      */
     accountOf = null,
+    /**
+     * **精选模型清单**（用户需求 2026-11-15，**可选**）
+     *
+     * `string[]` 或 `() => string[]`：用户点名的模型（`provider/model` 或裸 `model`）。
+     *
+     * 语义（**只影响选择器展示，不影响路由/降级**）：
+     *   · 空数组 / null ⇒ 不启用精选 ⇒ `listModels()` 返回全量（零回归）
+     *   · 非空 ⇒ `listModels()` **只返回清单里的模型**（治「模型选择特别多」）
+     *   · `resolveModel()` / `stream()` 始终按全量解析 ⇒ 老会话选中项收窄后仍能跑
+     *
+     * ⚠️ 与 `sources.hidden` 同一纪律：**隐藏 ≠ 禁用**，路由链与自动切换不受影响。
+     *    与 routingConfig 同理传函数而非快照 ⇒ 设置页改完即时生效（不必重启）。
+     */
+    configuredModels = null,
   } = opts
 
   if (typeof send !== 'function') throw new TypeError('createAdapter 需要 send 函数')
@@ -686,6 +700,32 @@ export function createAdapter(opts = {}) {
       } catch { /* 直连解析失败 ⇒ 按原链降级 */ }
     }
     return null
+  }
+
+  /**
+   * 精选模型清单（用户需求 2026-11-15）：
+   *   「模型选择目前特别多，我计划是免费池/付费池中我选择的几个模型才能被选择」
+   *
+   * 语义（**只影响选择器展示，不影响路由/降级** —— 与 sources.hidden 同一纪律）：
+   *   · configuredModels 为空 / null ⇒ 不启用精选（返回全量，零回归）
+   *   · 非空 ⇒ `listModels()` 只返回清单里点名的模型
+   *   · `resolveModel()` / `stream()` **始终**按全量解析 ⇒ 老会话选中的模型
+   *     在清单收窄后仍能继续跑，不会突然「模型不存在」
+   *
+   * 匹配口径：`provider/model` 精确匹配，或裸 `model` 匹配（任一渠道）。
+   *
+   * @returns {Array|null} 精选后的条目；null = 未启用
+   */
+  function selectedCatalog() {
+    const want = typeof configuredModels === 'function' ? configuredModels() : configuredModels
+    if (!Array.isArray(want) || want.length === 0) return null
+    const set = new Set(want.map((x) => String(x).trim()).filter(Boolean))
+    if (set.size === 0) return null
+    const all = catalog()
+    const hit = all.filter((e) => set.has(`${e.provider}/${e.model}`) || set.has(String(e.model)))
+    // fail-open：清单点名的模型一个都对不上（例如渠道还没登录/模型改名）
+    //   ⇒ 回落到全量，而不是给用户一个空选择器（空列表比"多"糟得多）。
+    return hit.length > 0 ? hit : null
   }
 
   /**
@@ -1017,9 +1057,13 @@ export function createAdapter(opts = {}) {
     },
 
     // ── 契约③：每项必须有 provider（渠道名别名同样放行）──
+    //
+    // 🔴 2026-11-15 用户需求：选择器只列「我选定的几个模型」（configuredModels）。
+    //    精选只作用于**展示**；resolveModel/stream 仍走全量（见 selectedCatalog 注释）。
     listModels(provider) {
       if (provider !== providerId && !providerAliases().includes(provider)) return []
-      return catalog().map((e) => makeModelInfo(provider, {
+      const list = selectedCatalog() ?? catalog()
+      return list.map((e) => makeModelInfo(provider, {
         id: e.model,
         name: e.name || e.model,
         contextWindow: contextOf(e),

@@ -49,11 +49,15 @@ export const FREE_PROVIDERS = Object.freeze(['kilo', 'ovh', 'pollinations', 'ope
 export const CHANNEL_FREE = Object.freeze([
   'codearts', 'buddy', 'workbuddy', 'lobsterai', 'qoder', 'qodercn',
   'trae', 'cline', 'loomy', 'raccoon', 'minimax', 'minimaxintl',
-  'zcode', 'officeace', 'accio', 'gemini', 'qiniu',
+  'zcode', 'officeace', 'accio', 'gemini',
   // DeepSeek 网页版（用户自带账号）：不消耗 API token ⇒ 对用户是 0 元。
   // ⚠️ 它的成本不是钱，而是**平台风控风险**（见 protocols.js 的 note），
   //    所以「记 free」是财务口径，不代表可以无节制使用。
   'deepseek-web',
+  // 自加免费 API（2026-11-16）：用户自己提供的 OpenAI 兼容端点，并**声明它是免费的**。
+  // ⚠️ 财务口径：插件按 0 元记账（不计价）；真实花费发生在用户自己的服务商账号上，
+  //    插件无从得知，也不假装知道。
+  'custom-free',
 ])
 
 /**

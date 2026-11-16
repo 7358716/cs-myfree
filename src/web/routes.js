@@ -18,7 +18,7 @@
  */
 
 import { validateOverrides, mergeChain, chainSummary } from '../adapter/chain-overrides.js'
-import { keylessSources, SOURCES, buildOrder, checkinSources } from '../pools/registry.js'
+import { keylessSources, paidSources, SOURCES, buildOrder, checkinSources } from '../pools/registry.js'
 import { CHANNELS, checkinChannels, manualRefreshChannels, proxyRequiredChannels } from '../pools/channels/protocols.js'
 import { probeAll, PRIORITY, DEFAULT_MODEL, resolveSourceId } from '../pools/keyless/index.js'
 import { queryCash, CASH_PATH } from './cash.js'
@@ -189,9 +189,23 @@ export function registerRoutes(webServer, opts = {}) {
           checkin: c.checkin?.supported === true,
           note: c.note ?? null,
         })),
+        // 🔴 用户需求 2026-11-15：设置页要「收费池 / 免费池」两池。
+        //    此前只暴露 keyless + channels，付费源自加 API 完全不可见 ⇒「页面不全」。
+        paid: paidSources().map((s) => ({
+          id: s.id,
+          label: s.label,
+          note: s.note ?? null,
+          // 是否已经配好自己的 key（配置里出现过 / 有账号记录）
+          configured: (cfg.sources?.disabled ?? []).includes(s.id) === false
+            && (Array.isArray(cfg.paid?.providers) ? cfg.paid.providers.includes(s.id) : true),
+          enabled: cfg.paid?.enabled === true,
+        })),
         counts: {
           keyless: keylessSources().length,
           channels: Object.keys(CHANNELS).length,
+          paid: paidSources().length,
+          // 免费池总数 = 免密源 + 账号渠道（用户口径：账号属于免费池）
+          free: keylessSources().length + Object.keys(CHANNELS).length,
           checkin: checkinChannels().length,
           manualRefresh: manualRefreshChannels().length,
           proxyRequired: proxyRequiredChannels().length,
@@ -212,6 +226,8 @@ export function registerRoutes(webServer, opts = {}) {
         budget: cfg.budget,
         paid: { enabled: cfg.paid?.enabled === true },
         disabledSources: cfg.sources?.disabled ?? [],
+        // 精选模型（空 = 未启用精选 ⇒ 选择器展示全量）
+        selectedModels: cfg.models?.selected ?? [],
       },
       // 路由：授权默认值 / 最近准入 / 候选成本视图 / 并发闸门
       routing,
@@ -1156,6 +1172,12 @@ export function registerRoutes(webServer, opts = {}) {
     if (ak && !sk) return { ok: false, error: 'AK/SK 需要成对提交：还缺 SK' }
     if (sk && !ak) return { ok: false, error: 'AK/SK 需要成对提交：还缺 AK' }
     // 🔴 绝不把凭证写日志
+    // 🔑 自加免费 API（2026-11-16）：端点由用户提供 ⇒ 落盘 baseUrl
+    const customBaseUrl = typeof body.baseUrl === 'string' ? body.baseUrl.trim() : ''
+    if (CHANNELS[body.provider]?.userBaseUrl === true) {
+      if (!customBaseUrl) return { ok: false, error: '该渠道需要接口地址（Base URL）' }
+      if (!/^https?:\/\//i.test(customBaseUrl)) return { ok: false, error: '接口地址必须以 http:// 或 https:// 开头' }
+    }
     const r = await accounts.save({
       id: body.id,
       provider: body.provider,
@@ -1165,6 +1187,7 @@ export function registerRoutes(webServer, opts = {}) {
       sk: sk || undefined,
       securityToken: securityToken || undefined,
       expiresAt: Number.isFinite(body.expiresAt) ? body.expiresAt : null,
+      baseUrl: customBaseUrl || undefined,
     })
     if (r.ok) {
       // 🔑 保存成功后**立刻拉取该渠道模型**，让模型选择器马上能看到

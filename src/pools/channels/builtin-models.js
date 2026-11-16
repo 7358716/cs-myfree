@@ -37,7 +37,7 @@ export const MODELS_PATH = Object.freeze({
   gemini: '/v1beta/models',
   officeace: '/v2/models',
   accio: null,
-  qiniu: '/v1/models',
+  'custom-free': '/models',      // OpenAI 兼容端点标准路径（相对 baseUrl）
 })
 
 /**
@@ -112,7 +112,6 @@ export const BUILTIN_MODELS = Object.freeze({
   accio: [
     { id: 'deepseek-v4-1-flash', name: 'DeepSeek V4.1 Flash' },
   ],
-  qiniu: [],
 })
 
 /** 取某渠道的内置模型（没有则空数组） */

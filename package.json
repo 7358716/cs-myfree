@@ -1,6 +1,6 @@
 {
   "name": "cs-myfree",
-  "version": "1.9.24",
+  "version": "1.9.25",
   "type": "module",
   "description": "18 个 AI 渠道统一接入。",
   "main": "src/index.js",
@@ -45,5 +45,13 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.2-rc.1 <0.3.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
   }
 }

@@ -4,7 +4,7 @@ import { recommendMode, supportedModes, LOGIN_MODE } from '../src/pools/channels
 import { CHANNELS } from '../src/pools/channels/protocols.js'
 
 test('AK/SK 类渠道推荐一步制', () => {
-  for (const id of ['qiniu', 'officeace', 'codearts', 'zcode', 'accio']) {
+  for (const id of ['officeace', 'codearts', 'zcode', 'accio']) {
     assert.equal(recommendMode(id, CHANNELS[id]).id, 'aksk', id + ' 应推荐 AK/SK')
     assert.equal(recommendMode(id, CHANNELS[id]).steps, 1, id + ' 应是一步')
   }

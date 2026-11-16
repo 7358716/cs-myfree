@@ -1,4 +1,4 @@
-﻿/**
+/**
  * cs-myfree — Myfree 工作台（浏览器半身，完整交互版）
  *
  * ⚠️ 必须用 `window.__ModuleLoader__.load({id, factory})` 包装（不是裸 ESM）。
@@ -358,6 +358,12 @@ window.__ModuleLoader__.load({
       tile: { border: '1px solid rgba(128,128,128,0.25)', borderRadius: '6px', padding: '9px' },
       row: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid rgba(128,128,128,0.12)' },
       tabs: { display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '14px', borderBottom: '1px solid rgba(128,128,128,0.2)', paddingBottom: '8px' },
+      // 池分区标题（免费池 / 付费池）：细分隔线 + 色点，让人一眼分清「谁不花钱」
+      poolHead: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap', margin: '6px 0 10px', paddingBottom: '6px', borderBottom: '2px solid rgba(128,128,128,0.22)' },
+      poolTitle: (kind) => ({
+        fontSize: '14px', fontWeight: 700,
+        color: kind === 'paid' ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-state-success-primary)',
+      }),
       tab: (on) => ({ cursor: 'pointer', padding: '3px 10px', borderRadius: '5px', fontSize: '12px', fontWeight: on ? 600 : 400, background: on ? 'rgba(128,128,128,0.18)' : 'transparent', border: '1px solid ' + (on ? 'rgba(128,128,128,0.4)' : 'transparent') }),
       btn: (primary) => ({ cursor: 'pointer', fontSize: '12px', padding: '3px 12px', borderRadius: '5px', border: '1px solid rgba(128,128,128,0.4)', background: primary ? 'rgba(64,160,96,0.18)' : 'transparent', color: 'inherit', fontWeight: primary ? 600 : 400 }),
       mono: { fontFamily: 'ui-monospace, monospace', fontSize: '11px' },
@@ -815,6 +821,8 @@ window.__ModuleLoader__.load({
       const [open, setOpen] = react.useState(false)
       const [sess, setSess] = react.useState(null)          // /login/start 的会话
       const [pasteText, setPasteText] = react.useState('')
+      // 🔑 自加免费 API（2026-11-16）：用户自定义端点
+      const [baseUrl, setBaseUrl] = react.useState('')
       const [ak, setAk] = react.useState('')
       const [sk, setSk] = react.useState('')
       const [busy, setBusy] = react.useState(false)
@@ -1036,6 +1044,16 @@ window.__ModuleLoader__.load({
       const savePaste = (text) => {
         const value = String(text == null ? pasteText : text).trim()
         if (!value) { setMsg({ ok: false, error: '先粘贴 API Key、回调链接或令牌' }); return }
+        // 🔑 自加免费 API：必须填接口地址（否则不知道发到哪）
+        const bu = String(baseUrl || '').trim()
+        if (ch.userBaseUrl === true && !bu) {
+          setMsg({ ok: false, error: '先填「接口地址（Base URL）」——例如 https://api.groq.com/openai/v1' })
+          return
+        }
+        if (ch.userBaseUrl === true && !/^https?:\/\//i.test(bu)) {
+          setMsg({ ok: false, error: '接口地址必须以 http:// 或 https:// 开头' })
+          return
+        }
         setBusy(true); setMsg(null)
         api('/channels/parse', { method: 'POST', body: JSON.stringify({ text: value }) })
           .then((p) => {
@@ -1044,7 +1062,10 @@ window.__ModuleLoader__.load({
               return null
             }
             setMsg({ ok: true, text: '识别成功：' + (p.preview || '（已识别）') + '，正在保存…' })
-            return api('/channels/save', { method: 'POST', body: JSON.stringify({ provider: ch.id, text: value }) })
+            return api('/channels/save', { method: 'POST', body: JSON.stringify(Object.assign(
+              { provider: ch.id, text: value },
+              ch.userBaseUrl === true ? { baseUrl: bu } : {},
+            )) })
           })
           .then((r) => {
             if (!r) return
@@ -1084,6 +1105,18 @@ window.__ModuleLoader__.load({
 
       const pasteBox = (hint) => h('div', null,
         h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) }, hint),
+        // 🔑 自加免费 API（2026-11-16）：端点由用户提供 ⇒ 必须多一个 Base URL 输入。
+        //    其它渠道用 protocols 里的静态端点，不显示这个框（避免用户误以为能改）。
+        ch.userBaseUrl === true ? h('div', { style: { marginBottom: '8px' } },
+          h('div', { style: Object.assign({ marginBottom: '4px' }, S.dim) }, '① 接口地址（Base URL，OpenAI 兼容）'),
+          h('input', {
+            style: Object.assign({}, S.input, { marginBottom: '6px' }),
+            value: baseUrl,
+            placeholder: '例：https://inference.do-ai.run 或 https://api.groq.com/openai',
+            onChange: (e) => setBaseUrl(e.target.value),
+          }),
+          h('div', { style: S.dim },
+            '会自动在这个地址后面接 /chat/completions。填到 /v1 为止即可（例：https://xxx/v1）。')) : null,
         h('input', {
           style: S.input,
           value: pasteText,
@@ -1665,12 +1698,23 @@ window.__ModuleLoader__.load({
             groups.length ? h('div', { style: { marginTop: '6px' } }, head, groupNodes) : null)
         })() : null,
 
-        h('div', { style: { fontWeight: 600, margin: '4px 0 8px' } }, '免密源（无需登录）'),
+        // ══════════════════════════════════════════════════════════════════
+        // 免费池（用户口径 2026-11-15：**账号渠道也属于免费池**）
+        //   ① 免密源（无需登录）② 账号渠道（登录后免费用）
+        // ══════════════════════════════════════════════════════════════════
+        h('div', { style: S.poolHead },
+          h('span', { style: S.poolTitle('free') }, '🟢 免费池'),
+          h('span', { style: S.dim },
+            (d.sources.keyless || []).length + ' 个免密源 · '
+            + (chData ? chData.total : d.sources.counts.channels) + ' 家账号渠道 · '
+            + '已登录 ' + loggedChannels.length + ' 家')),
+
+        h('div', { style: { fontWeight: 600, margin: '10px 0 8px', fontSize: '12px' } }, '免密源（无需登录）'),
         h('div', { style: S.grid }, (d.sources.keyless || []).map((k) => h('div', { key: k.id, style: S.tile },
           h('div', { style: { fontWeight: 600 } }, k.label),
           h('div', { style: S.dim }, k.note || '')))),
 
-        h('div', { style: { fontWeight: 600, margin: '16px 0 4px' } },
+        h('div', { style: { fontWeight: 600, margin: '16px 0 4px', fontSize: '12px' } },
           '账号渠道（' + (chData ? chData.total : d.sources.counts.channels) + ' 家 · 已登录 ' + loggedChannels.length + ' 家' +
           (statusList.length ? ' · 已验证 ' + verifiedCount + '/' + statusList.length : '') + '）'),
         h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
@@ -1683,6 +1727,38 @@ window.__ModuleLoader__.load({
               key: c.id, channel: c, status: statusById[c.id] || null,
               onChanged: () => { reloadCh(); reload(); reloadLs() },
             })),
+
+        // ══════════════════════════════════════════════════════════════════
+        // 付费池（自带 API Key；会用真钱，默认关闭）
+        //   🔴 用户需求 2026-11-15：此前付费源在页面上完全不可见（/state 没返回）
+        // ══════════════════════════════════════════════════════════════════
+        h('div', { style: S.poolHead },
+          h('span', { style: S.poolTitle('paid') }, '💰 付费池'),
+          h('span', { style: S.dim },
+            ((d.sources.paid || []).length) + ' 个源 · '
+            + (d.config && d.config.paid && d.config.paid.enabled ? '⚠️ 已开启（会花钱）' : '默认关闭（不会自动花钱）'))),
+        h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+          '付费源用自己的 API Key，按量计费。只有打开「允许付费」后才会被路由选中；'
+          + '子智能体始终只走免费池。'),
+        (d.sources.paid || []).length === 0
+          ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, '（后端没有返回付费源）')
+          : h('div', { style: S.grid }, (d.sources.paid || []).map((p) => h('div', { key: p.id, style: S.tile },
+            h('div', { style: { fontWeight: 600 } }, p.label),
+            h('div', { style: S.dim }, p.note || '自带 API Key'),
+            h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) },
+              p.enabled ? '⚠️ 已启用' : '⏸ 未启用')))),
+        h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '6px' } },
+          h('button', {
+            style: S.btn(!(d.config && d.config.paid && d.config.paid.enabled)),
+            onClick: () => {
+              const on = !(d.config && d.config.paid && d.config.paid.enabled)
+              if (on && !window.confirm('打开付费池后，主会话可能调用付费 API 产生真实费用。确定打开？')) return
+              api('/config', { method: 'POST', body: JSON.stringify({ paid: { enabled: on } }) })
+                .then((r) => { setMsg(r.ok ? { ok: true, text: on ? '付费池已开启' : '付费池已关闭' } : { ok: false, error: r.error || '保存失败' }); reload() })
+                .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+            },
+          }, (d.config && d.config.paid && d.config.paid.enabled) ? '关闭付费池' : '开启付费池'),
+          h('span', { style: S.dim }, '「DeepSeek 账户余额」卡片在上方总览；预算限额见「设置」页')),
 
         // design/21 §1：额度健康并入供给源（复用旧 HealthZone 渲染，不删源码）
         h('div', { style: { marginTop: '16px', borderTop: '1px solid rgba(128,128,128,0.18)', paddingTop: '12px' } },
@@ -4427,6 +4503,9 @@ window.__ModuleLoader__.load({
       const [st, reload] = useApi('/state')
       const [s, reloadS] = useApi('/settings')
       const [showAll, setShowAll] = react.useState(false)
+      // 精选模型（用户需求 2026-11-15）：本地待加入 + 保存提示
+      const [pickModel, setPickModel] = react.useState('')
+      const [selMsg, setSelMsg] = react.useState(null)
 
       if (s.error) {
         return h('div', null,
@@ -4462,6 +4541,52 @@ window.__ModuleLoader__.load({
             : '失败 ' + (c.failCount || 0) + ' 次')
       }
 
+      // ── 精选模型（用户需求 2026-11-15）────────────────────────────────────
+      //   「模型选择目前特别多，我计划是免费池/付费池中我选择的几个模型才能被选择」
+      //
+      //   数据来源：`/settings` 的 models 目录（每组 {provider,label,kind,models}）
+      //   键形状：`provider/model`（精确，允许同名模型分属不同渠道）
+      //   🔴 只写 config.models.selected；**不动**链/准入/降级（隐藏 ≠ 禁用）
+      const selectedModels = Array.isArray(effCfg.models && effCfg.models.selected)
+        ? effCfg.models.selected
+        : []
+      const allModelOptions = (() => {
+        const out = []
+        const seen = new Set()
+        for (const g of visibleGroups) {
+          for (const m of g.models || []) {
+            const key = g.provider + '/' + (m.id || m.name)
+            if (seen.has(key)) continue
+            seen.add(key)
+            out.push({
+              key,
+              label: (g.label || g.provider) + ' · ' + (m.name || m.id),
+            })
+          }
+        }
+        return out
+      })()
+      /** 把 `provider/model` 键渲染成人话（找不到就原样显示键） */
+      const modelLabel = (key) => {
+        const hit = allModelOptions.find((o) => o.key === key)
+        return hit ? hit.label : key
+      }
+      /** 保存精选（整表覆盖；后端 /config 会热更新内存 cfg ⇒ 即时生效） */
+      const saveSelectedModels = (next) => {
+        setSelMsg(null)
+        api('/config', { method: 'POST', body: JSON.stringify({ models: { selected: next } }) })
+          .then((r) => {
+            if (r && r.ok) {
+              setSelMsg({ ok: true, text: '已保存：' + (next.length === 0 ? '恢复列出全部模型' : '精选 ' + next.length + ' 个模型') })
+              setPickModel('')
+              reloadS(); reload()
+            } else {
+              setSelMsg({ ok: false, error: (r && r.error) || '保存失败' })
+            }
+          })
+          .catch((e) => setSelMsg({ ok: false, error: String((e && e.message) || e) }))
+      }
+
       return h('div', null,
         // 自动路由卡片（只读展示生效值）
         h('div', { style: S.card },
@@ -4487,6 +4612,57 @@ window.__ModuleLoader__.load({
               ? '自动路由开着时，这份链只作为候选排序参考；关掉自动路由后按这份链逐个尝试。'
               : '自动路由已关：按这份链逐个尝试。'),
           h(ChainZone)),
+
+        // ══════════════════════════════════════════════════════════════════
+        // 精选模型（用户需求 2026-11-15）
+        //   「模型选择目前特别多，我计划是免费池/付费池中我选择的几个模型才能被选择」
+        //   🔴 只影响选择器展示；路由/降级/自动切换一律不受影响（隐藏 ≠ 禁用）
+        // ══════════════════════════════════════════════════════════════════
+        h('div', { style: { marginTop: '12px' } },
+          h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '精选模型（决定对话里能选哪些）'),
+          h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+            selectedModels.length === 0
+              ? '当前未启用：对话模型选择器会列出全部可用模型（' + allModelOptions.length + ' 个）。'
+              : '已精选 ' + selectedModels.length + ' 个：对话里只列这些。'),
+          allModelOptions.length === 0
+            ? h('div', { style: S.dim }, '（还没有可选模型：先登录渠道或等免密源就绪）')
+            : h('div', null,
+                // 已选清单
+                selectedModels.length === 0 ? null : h('div', { style: { marginBottom: '8px' } },
+                  selectedModels.map((key) => h('div', { key, style: Object.assign({}, S.row, { padding: '3px 0' }) },
+                    h('span', { style: S.mono }, modelLabel(key)),
+                    h('button', {
+                      style: Object.assign({}, S.btn(false), { padding: '0 8px', fontSize: '11px' }),
+                      onClick: () => saveSelectedModels(selectedModels.filter((x) => x !== key)),
+                    }, '移除')))),
+                // 添加：下拉列出尚未选中的
+                (() => {
+                  const rest = allModelOptions.filter((o) => !selectedModels.includes(o.key))
+                  return rest.length === 0
+                    ? h('div', { style: S.dim }, '（已把全部 ' + allModelOptions.length + ' 个模型都选上了）')
+                    : h('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } },
+                        h('select', {
+                          style: Object.assign({}, S.input, { maxWidth: '360px' }),
+                          value: pickModel,
+                          onChange: (e) => setPickModel(e.target.value),
+                        },
+                          h('option', { value: '' }, '（选择要加入精选的模型…）'),
+                          rest.map((o) => h('option', { key: o.key, value: o.key }, o.label))),
+                        h('button', {
+                          style: S.btn(!!pickModel),
+                          disabled: !pickModel,
+                          onClick: () => { if (pickModel) saveSelectedModels([...selectedModels, pickModel]) },
+                        }, '加入精选'))
+                })(),
+                selectedModels.length > 0
+                  ? h('div', { style: { marginTop: '8px' } },
+                      h('button', { style: S.btn(false), onClick: () => saveSelectedModels([]) },
+                        '清空精选（恢复列出全部模型）'))
+                  : null,
+                selMsg
+                  ? h('div', { style: Object.assign({ marginTop: '6px' }, selMsg.ok ? { color: 'var(--dsw-alias-state-success-primary)' } : S.warn) },
+                      selMsg.ok ? selMsg.text : '保存失败：' + selMsg.error)
+                  : null)),
 
         // 渠道与模型清单（默认过滤 + 显示全部开关）
         h('div', { style: { marginTop: '12px' } },

@@ -80,6 +80,14 @@ export const DEFAULTS = Object.freeze({
   //   `hidden: []`（默认）= 没写显式清单 ⇒ 套用下面的**默认可见集合**；
   //     显式写空数组（`{sources:{hidden:[]}}`）= 全部展示；写非空 = 该清单为准（绝对口径）。
   sources: { disabled: [], hidden: [] },
+  // ── 精选模型（用户需求 2026-11-15）──────────────────────────────────────────
+  //   「模型选择目前特别多，我计划是免费池/付费池中我选择的几个模型才能被选择」
+  //
+  //   `[]`（默认）= 不启用精选 ⇒ 选择器展示全量（零回归）。
+  //   非空 = 只列这些模型。元素形状：`"provider/model"`（精确）或裸 `"model"`（任一渠道）。
+  //   🔴 **只影响选择器展示，不影响路由/降级/自动切换** —— 与 sources.hidden 同一纪律：
+  //      隐藏 ≠ 禁用。老会话已选中的模型在清单收窄后仍能继续跑（resolveModel 走全量）。
+  models: { selected: [] },
   // ── 路由（契约 B `rules.configurable`）──────────────────────────────────────
   // 🔴 **逐字镜像** `adapter/index.js` 的 `ROUTING_DEFAULTS`（见该处定义与注释）：
   //      priority: 'balanced' / autoSwitch: true / blacklistTtlMs: DEFAULT_TTL_MS(6h)
@@ -154,7 +162,7 @@ export const CHANNEL_GROUP_LABELS = Object.freeze({
 /** 华为云（codearts = 华为云 CodeArts；officeace = 华为云 MaaS） */
 export const HUAWEI_SOURCE_IDS = Object.freeze(['codearts', 'officeace'])
 /** 免密免费源（能力可用、不需要账号） */
-export const FREE_SOURCE_IDS = Object.freeze(['kilo', 'ovh', 'pollinations'])
+export const FREE_SOURCE_IDS = Object.freeze(['kilo', 'ovh', 'pollinations', 'custom-free'])
 /** 用户自加 API（付费/自带 key，不走登录态） */
 export const SELFAPI_SOURCE_IDS = Object.freeze(['deepseek-official', 'ark'])
 /** 名字以 deepseek 开头的一律算「deepseek 系」 */
@@ -169,7 +177,7 @@ export const DEEPSEEK_SOURCE_RE = /^deepseek/i
  */
 export const DEFAULT_HIDDEN_SOURCES = Object.freeze([
   'buddy', 'workbuddy', 'lobsterai', 'qoder', 'qodercn', 'trae', 'cline', 'loomy',
-  'raccoon', 'minimax', 'minimaxintl', 'zcode', 'opencode', 'gemini', 'accio', 'qiniu',
+  'raccoon', 'minimax', 'minimaxintl', 'zcode', 'opencode', 'gemini', 'accio',
 ])
 
 /** 默认**展示**集合（= deepseek 系 + 自加 API + 免费可用 + 华为云），供 UI/文档引用 */
@@ -188,7 +196,13 @@ export const HIDDEN_MAX_ID_LEN = 64
  * 不归一的话「隐藏 kilo」会对 `kilo-free` 失效。
  */
 export function normalizeSourceId(id) {
-  return String(id ?? '').trim().toLowerCase().replace(/-free$|-vision$/, '')
+  const s = String(id ?? '').trim().toLowerCase()
+  // 🔴 `custom-free` 是**真实渠道 id**（自加免费 API），不是别名：
+  //    若这里去掉 `-free` 后缀会归一成 `custom` ⇒ 分组判定落到 OTHER、
+  //    FREE_SOURCE_IDS 匹配不上、可见性开关也失效。
+  //    其它渠道（kilo-free / ovh-vision）才是别名，需要归一。
+  if (s === 'custom-free') return s
+  return s.replace(/-free$|-vision$/, '')
 }
 
 /** 某渠道属于哪个分组 */

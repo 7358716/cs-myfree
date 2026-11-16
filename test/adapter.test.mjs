@@ -122,7 +122,9 @@ test('全部失败时抛错且带最后错误码', async () => {
       throw Object.assign(new Error('boom'), { status: 500 })
     })(),
   })
-  await assert.rejects(() => collect(a.stream({ model: 'm1', messages: [] })), /全部候选失败/)
+  // 2026-11-15：详细抛错改造后文案为「全部可用模型失败」（并列出逐候选原因），
+  // 断言同步到新文案（旧文案「全部候选失败」已不存在）。
+  await assert.rejects(() => collect(a.stream({ model: 'm1', messages: [] })), /全部可用模型失败/)
 })
 
 test('预算耗尽即停止（不无限重试）', async () => {

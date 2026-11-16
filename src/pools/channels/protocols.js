@@ -350,28 +350,12 @@ export const CHANNELS = Object.freeze({
     loginPage: 'https://accio.alibaba.com',
     note: '图片通路原生收图；multimodal:false 模型会静默忽略图片',
   },
-  qiniu: {
-    // 并发上限：未实测 ⇒ 保守取 1
-    concurrencyLimit: 1, limitSource: 'default',
-    billing: 'free', billingSource: 'declared',
-    label: 'Qiniu（七牛）',
-    family: 'openai',
-    baseUrl: 'https://openai.qiniu.com/v1',
-    chatPath: '/chat/completions',           // baseUrl 已含 /v1（否则 /v1/v1 实测 404）
-    auth: AUTH.BEARER,
-    login: LOGIN.PASTE_KEY,
-    refresh: REFRESH.NONE,
-    checkin: { supported: false },
-    credRef: 'QINIU_API_KEY',
-    loginPage: 'https://portal.qiniu.com/developer/user/key',
-  },
-
   // ══════════════════════════════════════════════════════════════════════════
   // 自加 API（用户口径：「供给页面给个选项，我只粘贴 API 就行了」）
   //
   // 与其它渠道的区别：**不需要浏览器登录、不需要抓 cookie**，用户把 API Key
   // 粘贴进供给源页面即可。走 LOGIN.PASTE_KEY ⇒ 页面自动出现「粘贴凭据」表单
-  // （与 qiniu 同一条路径，零新增 UI 代码）。
+  // （与其它 paste-key 渠道同一条路径，零新增 UI 代码）。
   //
   // 🔴 为什么不新建一套「自定义渠道」UI：那要另造存储/渲染/校验三套东西，
   //    而 paste-key 流程已经跑通，复用最省且最不容易出错。
@@ -412,6 +396,43 @@ export const CHANNELS = Object.freeze({
     credRef: 'DEEPSEEK_WEB_TOKEN',
     loginPage: 'https://chat.deepseek.com',
     note: '网页版免费额度：同一账号同时只能一路对话；工具调用为模拟实现，仅供日常轻量聊天',
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 自加免费 API（用户需求 2026-11-16）
+  //   「免费池也需要有一套可以直接粘贴 api 的模型设置」
+  //
+  // 用途：任何 **OpenAI 兼容** 的免费/自建端点，用户粘贴 Base URL + API Key 即可用。
+  //   典型：AMD Developer Cloud / DigitalOcean Gradient、Groq、Cerebras、
+  //        OpenRouter 免费模型、本地 Ollama、vLLM、自建 one-api 等。
+  //
+  // 🔴 与 ark / deepseek-official 的区别：
+  //   · ark/deepseek-official 是**付费池**（billing: paid）——钱要算清楚，默认关闭
+  //   · custom-free 是**免费池**（billing: free）——用户声明它是免费的，直接可用
+  //
+  // 🔴 baseUrl 是**用户自定义**（存在 accounts.json 的 entry.baseUrl）：
+  //   protocols 里的 baseUrl 只是**占位**，真实值从账号记录读（见 driver.js 的 resolveBaseUrl）。
+  // ══════════════════════════════════════════════════════════════════════════
+  'custom-free': {
+    // 并发上限：未知端点 ⇒ 保守取 1（用户可在 routing.limits 里调高）
+    concurrencyLimit: 1, limitSource: 'default',
+    billing: 'free', billingSource: 'declared',
+    label: '自加免费 API（OpenAI 兼容）',
+    family: 'openai',
+    // 占位值：真实端点来自账号记录的 baseUrl（driver 在 userBaseUrl===true 时采用）。
+    // 这个默认值只是为了让「未填地址」时也有合法的 URL 骨架可校验，**不会真的发出去**
+    //（未填就意味着没保存账号 ⇒ sendToChannel 在凭据阶段就会以 AUTH 失败）。
+    baseUrl: 'https://localhost.invalid',
+    chatPath: '/chat/completions',
+    auth: AUTH.BEARER,
+    login: LOGIN.PASTE_KEY,
+    refresh: REFRESH.NONE,
+    checkin: { supported: false },
+    credRef: 'CUSTOM_FREE_API_KEY',
+    loginPage: null,
+    note: '粘贴 OpenAI 兼容端点的 Base URL + API Key（如 AMD 开发者云、Groq、OpenRouter 免费模型、本地 Ollama）',
+    // 标记：端点由用户提供 ⇒ 页面必须显示 URL 输入框
+    userBaseUrl: true,
   },
 })
 

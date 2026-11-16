@@ -15,6 +15,7 @@ import { readFile, writeFile, rename, mkdir, chmod, unlink } from 'node:fs/promi
 import { CHANNELS, AUTH } from './protocols.js'
 import { buildRequestHeaders, joinUrl } from './driver.js'
 import { MODELS_PATH, builtinModelsOf, hasBuiltin } from './builtin-models.js'
+import { inputModalitiesFor } from './capabilities.js'
 
 /** 模型 id 分隔符（用 `/` 更直观，用户能看出是哪个渠道的） */
 export const SEP = '/'
@@ -218,7 +219,9 @@ export function channelModelsAsList(cache = {}) {
         name: `${ch.label} · ${m.name || m.id}`,
         channelId,
         modelId: m.id,
-        inputModalities: ['text'],
+        // 🔴 修「当前模型不支持图片」：此前写死 ['text'] ⇒ 宿主把图片投影成占位符，
+        //    模型永远看不到图。改由能力表判定（上游声明优先，其次渠道/模型规则）。
+        inputModalities: inputModalitiesFor(channelId, m.id, m.inputModalities ?? m.input_modalities ?? null),
         // 该模型来自远端还是内置兜底（UI 如实标注「内置清单」用）
         source: info.source ?? null,
       })

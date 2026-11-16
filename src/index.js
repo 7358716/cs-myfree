@@ -423,10 +423,22 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
       prepared = r.messages
     } catch { /* 识图失败不影响 */ }
 
+    // 🔑 自加免费 API（2026-11-16）：端点由用户提供 ⇒ 从账号记录读 baseUrl。
+    //    其它渠道忽略这个字段（driver 只在 ch.userBaseUrl === true 时才采用）。
+    let customBaseUrl = null
+    if (ch.userBaseUrl === true && typeof accountStore.list === 'function') {
+      try {
+        const all = await accountStore.list()
+        const hit = (Array.isArray(all) ? all : []).find((a) => a?.provider === parsed.channelId && typeof a.baseUrl === 'string' && a.baseUrl.trim())
+        if (hit) customBaseUrl = hit.baseUrl.trim()
+      } catch { /* 读账号失败 ⇒ 走 ch.baseUrl（空）⇒ 上游会报 URL 错，如实透传 */ }
+    }
+
     return channelStream({
       channelId: parsed.channelId,
       ch,
       cred,
+      baseUrl: customBaseUrl,
       model: parsed.modelId,
       messages: convertMessages(prepared, options),
       tools: convertTools(options?.tools),
@@ -629,6 +641,10 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
       // 与 routingConfig 同理传函数而非快照：adapter 的 subagentRoutingOf() 认两种形态，
       // 函数形态 ⇒ 设置改完即时生效（不必重启）。
       subagentRouting: () => cfg.subagentRouting,
+      // 🔴 用户需求 2026-11-15：选择器只列「我选定的几个模型」。
+      // 传函数（不是快照）⇒ 设置页保存后即时生效，不必重启。
+      // 空数组 ⇒ 不启用精选（零回归）。只看展示，不影响路由（见 adapter selectedCatalog）。
+      configuredModels: () => cfg.models?.selected,
       // 旁路授权通道（同一份注册表：cordis 服务与 globalThis 符号指向它）
       routingHints: hintRegistry,
       // 终态失败黑名单（进程级共享：adapter 与 /state 看到同一份）

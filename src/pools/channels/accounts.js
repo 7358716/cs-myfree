@@ -165,7 +165,7 @@ export function createAccountStore(dshHome) {
       return null
     },
 
-    async save({ id, provider, label, credential, ak, sk, securityToken, expiresAt, refreshToken, refreshSource }) {
+    async save({ id, provider, label, credential, ak, sk, securityToken, expiresAt, refreshToken, refreshSource, baseUrl, models }) {
       const d = await readAll(dshHome)
       let key = id || `${provider}-${Date.now()}`
       let credAk = typeof ak === 'string' && ak.trim() ? ak.trim() : ''
@@ -187,6 +187,11 @@ export function createAccountStore(dshHome) {
         entry.sk = credSk
         if (typeof securityToken === 'string' && securityToken.trim()) entry.securityToken = securityToken.trim()
       }
+      // 🔑 自加免费 API（用户需求 2026-11-16）：用户自定义的 OpenAI 兼容端点。
+      //    只对 `custom-free` 渠道生效 —— 其它渠道的 baseUrl 由 protocols.js 静态声明，
+      //    这里存了也不会被读（避免用户误改内置渠道端点）。
+      if (typeof baseUrl === 'string' && baseUrl.trim()) entry.baseUrl = baseUrl.trim()
+      if (Array.isArray(models) && models.length > 0) entry.models = models.map((m) => String(m)).filter(Boolean)
       // 🔑 续期材料：OAuth 渠道的 refresh_token 必须落盘，否则「续期」无从谈起
       if (typeof refreshToken === 'string' && refreshToken.trim()) entry.refreshToken = refreshToken.trim()
       if (typeof refreshSource === 'string' && refreshSource.trim()) entry.refreshSource = refreshSource.trim()

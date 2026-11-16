@@ -43,7 +43,6 @@ export const LOGIN_MODE = Object.freeze({
  * 依据：厂商是否支持 AK/SK（国内云厂商基本都支持，且是永久凭证）
  */
 const AK_SK_SUPPORTED = new Set([
-  'qiniu',        // 七牛：控制台 → 密钥管理
   'officeace',    // 华为云 MaaS：我的凭证 → 访问密钥
   'codearts',     // 华为云：我的凭证 → 访问密钥
   'zcode',        // 智谱：API Key

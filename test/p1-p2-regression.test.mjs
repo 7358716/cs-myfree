@@ -196,3 +196,62 @@ test('P2: RETRYABLE_KINDS 与 policy.js 一致', async () => {
     assert.ok(RETRYABLE_KINDS.includes(kind), `${code} → ${kind} 必须在 RETRYABLE_KINDS 里`)
   }
 })
+
+// ─────────────────── 自加免费 API（2026-11-16 用户需求）───────────────────
+
+test('自加免费 API：渠道已注册且归免费池', async () => {
+  const { CHANNELS } = await import('../src/pools/channels/protocols.js')
+  const ch = CHANNELS['custom-free']
+  assert.ok(ch, 'custom-free 必须注册')
+  assert.equal(ch.billing, 'free', '它属于免费池')
+  assert.equal(ch.userBaseUrl, true, '必须标记端点由用户提供（UI 才会显示地址输入框）')
+  assert.equal(ch.login, 'paste-key', '粘贴 Key 即用')
+})
+
+test('自加免费 API：billing 归免费（pricing 唯一事实来源）', async () => {
+  const { CHANNEL_FREE } = await import('../src/audit/pricing.js')
+  assert.ok(CHANNEL_FREE.includes('custom-free'), 'pricing.js 必须声明 custom-free 免费')
+})
+
+test('自加免费 API：baseUrl 归一不被误删（custom-free 是真实 id 不是别名）', async () => {
+  const { normalizeSourceId, channelGroupOf, CHANNEL_GROUP } = await import('../src/config/store.js')
+  assert.equal(normalizeSourceId('custom-free'), 'custom-free', '不能被归一成 custom')
+  assert.equal(channelGroupOf('custom-free'), CHANNEL_GROUP.FREE, '必须归免费源分组')
+  // 对照：真正的别名仍要归一
+  assert.equal(normalizeSourceId('kilo-free'), 'kilo')
+  assert.equal(normalizeSourceId('ovh-vision'), 'ovh')
+})
+
+test('自加免费 API：driver 用账号里的 baseUrl（userBaseUrl 渠道）', async () => {
+  const { chat } = await import('../src/pools/channels/driver.js')
+  const { CHANNELS } = await import('../src/pools/channels/protocols.js')
+  let calledUrl = null
+  const fakeFetch = async (url) => { calledUrl = String(url); return { ok: true, body: null, json: async () => ({}) } }
+  try {
+    await chat({
+      ch: CHANNELS['custom-free'],
+      baseUrl: 'https://my-endpoint.example/v1',
+      cred: { token: 'k' },
+      model: 'm', messages: [], stream: true,
+      fetchImpl: fakeFetch, timeoutMs: 100,
+    })
+  } catch { /* SSE 解析失败无所谓，只验 URL */ }
+  assert.ok(calledUrl && calledUrl.startsWith('https://my-endpoint.example/v1'), '必须用用户填的端点：' + calledUrl)
+})
+
+test('自加免费 API：内置渠道不会因 body.baseUrl 被劫持', async () => {
+  const { chat } = await import('../src/pools/channels/driver.js')
+  const { CHANNELS } = await import('../src/pools/channels/protocols.js')
+  let calledUrl = null
+  const fakeFetch = async (url) => { calledUrl = String(url); return { ok: true, body: null, json: async () => ({}) } }
+  try {
+    await chat({
+      ch: CHANNELS.loomy,
+      baseUrl: 'https://evil.example',      // 试图劫持
+      cred: { token: 'k' },
+      model: 'm', messages: [], stream: true,
+      fetchImpl: fakeFetch, timeoutMs: 100,
+    })
+  } catch { /* ignore */ }
+  assert.ok(calledUrl && !calledUrl.includes('evil.example'), '内置渠道必须用静态端点，忽略外部 baseUrl：' + calledUrl)
+})

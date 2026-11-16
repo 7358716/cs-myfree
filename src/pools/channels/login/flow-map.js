@@ -128,13 +128,13 @@ export const FLOW_MAP = Object.freeze({
     loginVerified: false, loginNote: 'Raccoon 商汤：微信扫码（端点已对拍，无需验证码），待真机验证',
   },
   // ── 粘贴 API Key ──
-  qiniu: { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: 'Qiniu 七牛：粘贴 API Key' },
   opencode: { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: 'OpenCode：免费层已关闭' },
   // ── 自加 API（用户自带 Key，粘贴即用）──
   // loginVerified 保持 false：粘贴式接入**没有可自动验证的登录端点**，
   // 真实验证靠 /channels/verify 发一条最小推理（成功才记 verifiedAt）。
   ark: { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: '火山方舟：在控制台创建 API Key 后粘贴' },
   'deepseek-web': { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: 'DeepSeek 网页版：粘贴网页会话 token（自带账号）' },
+  'custom-free': { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: '自加免费 API：填接口地址（Base URL）+ 粘贴 API Key，任意 OpenAI 兼容端点' },
 })
 
 const DEFAULT_START = {

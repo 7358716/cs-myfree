@@ -68,9 +68,16 @@ test('登录 URL 必须是 https 且非空（可用真实入口路径）', () =>
     assert.match(u, /^https:\/\//, id + ' 必须 https：' + u)
   }
 })
-test('20 个渠道都有 loginPage（真实入口）', () => {
-  const withPage = Object.values(CHANNELS).filter((c) => c.loginPage).length
-  assert.equal(withPage, 20)
+test('渠道都有 loginPage（真实入口）；用户自填端点的渠道除外', () => {
+  // ⚠️ 自加免费 API（userBaseUrl）没有统一的官方登录页 —— 端点由用户自己提供，
+  //    它的「登录」就是在页面里填地址 + 粘贴 Key。因此不参与「必须有官方 loginPage」。
+  const needPage = Object.entries(CHANNELS).filter(([, c]) => c.userBaseUrl !== true)
+  const withPage = needPage.filter(([, c]) => c.loginPage).length
+  assert.equal(withPage, needPage.length, '除 userBaseUrl 渠道外，每个渠道都要有真实 loginPage')
+  // 自加端点渠道的 loginPage 允许为空，但必须明确标了 userBaseUrl
+  for (const [id, c] of Object.entries(CHANNELS)) {
+    if (!c.loginPage) assert.equal(c.userBaseUrl, true, `${id} 没有 loginPage 却没标 userBaseUrl`)
+  }
 })
 
 test('未登录时 loggedIn=false', async () => {

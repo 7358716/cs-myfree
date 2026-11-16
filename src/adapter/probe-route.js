@@ -85,7 +85,16 @@ export function planRoute(o = {}) {
  * @returns {Error}
  */
 export function buildDetailedError(o = {}) {
-  const lines = ['cs-myfree: 全部可用模型失败']
+  // 🔴 付费授权不足（fail-closed）不是「模型全挂了」，必须给出**可操作的**首行文案。
+  //    历史缺陷：这里统一写「全部可用模型失败」⇒ 用户以为渠道坏了，
+  //    实际是 free_only 授权下候选全是付费源 ⇒ 该文案会误导排查方向。
+  const billingBlocked = o.code === 'PERMISSION'
+  const lines = [billingBlocked
+    ? 'cs-myfree: 当前授权为 free_only（只允许免费模型），而所有候选都是付费源 ⇒ 拒绝发起请求'
+    : 'cs-myfree: 全部可用模型失败']
+  if (billingBlocked) {
+    lines.push('  怎么办：在「设置」里打开付费池，或把免费池里的模型加进降级链。')
+  }
   const failures = Array.isArray(o.failures) ? o.failures : []
   if (failures.length > 0) {
     lines.push('  本轮尝试失败的渠道：')

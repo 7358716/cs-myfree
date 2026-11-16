@@ -49,7 +49,7 @@ export const DEFAULT_MODEL_CHAIN = Object.freeze({
   pools: {
     free: {
       // 免费池优先级（数字越小越优先）
-      order: ['kilo', 'ovh', 'codearts', 'buddy', 'workbuddy', 'loomy', 'qoder', 'qodercn', 'trae', 'cline', 'raccoon', 'minimax', 'minimaxintl', 'zcode', 'officeace', 'accio', 'qiniu', 'gemini', 'deepseek-web'],
+      order: ['kilo', 'ovh', 'codearts', 'buddy', 'workbuddy', 'loomy', 'qoder', 'qodercn', 'trae', 'cline', 'raccoon', 'minimax', 'minimaxintl', 'zcode', 'officeace', 'accio', 'gemini', 'deepseek-web', 'custom-free'],
       probeTtlMs: DEFAULT_PROBE_TTL_MS,
     },
     paid: {

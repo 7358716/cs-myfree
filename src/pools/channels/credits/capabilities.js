@@ -88,9 +88,9 @@ export const CREDITS_CAPABILITIES = Object.freeze({
   zcode: { checkin: false, credits: false, verified: false, reason: '签到需现场产阿里云验证码（有代价），本插件不自动做' },
   officeace: { checkin: false, credits: false, verified: false, reason: '需 OAuth 换 token；自动领取未实现' },
   accio: { checkin: false, credits: false, verified: false, reason: '无签到端点（每日积分由登录触发），且需 AK/SK 签名协议' },
+  'custom-free': { checkin: false, credits: false, verified: false, reason: '自加端点：额度由你自己的服务商决定，插件不做签到' },
   opencode: { checkin: false, credits: false, verified: false, reason: '上游 403 FreeTierError，无可领取积分' },
   gemini: { checkin: false, credits: false, verified: false, reason: '本机网络不可达（HTTPS 超时）' },
-  qiniu: { checkin: false, credits: false, verified: false, reason: '无每日签到端点' },
 })
 
 /** 取某渠道能力（未知渠道返回全 false + 原因） */
