@@ -157,7 +157,7 @@ export const HUAWEI_SOURCE_IDS = Object.freeze(['codearts', 'officeace'])
 /** 免密免费源（能力可用、不需要账号） */
 export const FREE_SOURCE_IDS = Object.freeze(['kilo', 'ovh', 'pollinations', 'custom-free'])
 /** 用户自加 API（付费/自带 key，不走登录态） */
-export const SELFAPI_SOURCE_IDS = Object.freeze(['deepseek-official', 'ark'])
+export const SELFAPI_SOURCE_IDS = Object.freeze(['deepseek-official', 'ark', 'custom-paid'])
 /** 名字以 deepseek 开头的一律算「deepseek 系」 */
 export const DEEPSEEK_SOURCE_RE = /^deepseek/i
 
@@ -194,7 +194,7 @@ export function normalizeSourceId(id) {
   //    若这里去掉 `-free` 后缀会归一成 `custom` ⇒ 分组判定落到 OTHER、
   //    FREE_SOURCE_IDS 匹配不上、可见性开关也失效。
   //    其它渠道（kilo-free / ovh-vision）才是别名，需要归一。
-  if (s === 'custom-free') return s
+  if (s === 'custom-free' || s === 'custom-paid') return s
   return s.replace(/-free$|-vision$/, '')
 }
 

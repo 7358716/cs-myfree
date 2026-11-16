@@ -53,7 +53,7 @@ test('删除账号', async () => {
 test('20 个渠道都有登录指引', async () => {
   const home = await tmpHome()
   const list = await listChannels(createAccountStore(home))
-  assert.equal(list.length, 20)
+  assert.equal(list.length, 21)
   for (const c of list) {
     assert.ok(c.guideTitle, c.id + ' 缺 guideTitle')
     assert.ok(Array.isArray(c.guideSteps) && c.guideSteps.length > 0, c.id + ' 缺步骤')

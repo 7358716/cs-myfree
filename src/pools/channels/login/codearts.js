@@ -23,7 +23,7 @@
  * @module cs-myfree/pools/channels/login/codearts
  */
 
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 
 export const CODEARTS_LOGIN_BASE = 'https://devcloud.cn-north-4.huaweicloud.com/doer/redirect'
 export const HUAWEI_AUTH_BASE = 'https://auth.huaweicloud.com/authui/login.html'
@@ -94,7 +94,10 @@ function parseExpiry(v) {
  */
 export function startCodearts(provider, ch, opts = {}) {
   const secret = generateRandomSecret()
-  const ticketId = randomBytes(16).toString('hex')
+  // 🔴 关键（2026-11-16 实测）：华为 ticket_id 必须是 **UUID 格式**（带连字符）。
+  //    原实现用 randomBytes(16).toString('hex') 生成纯 hex ⇒ 华为侧判「无效ticketId」。
+  //    参考实现 dsh-codearts-auth/lib/login.js:497 用的正是 randomUUID()。
+  const ticketId = randomUUID()
   const callbackUrl = opts.callbackUrl
     ?? `${String(opts.publicBase ?? '').replace(/\/+$/, '')}${opts.callbackPath ?? '/cs-myfree/login/callback'}`
   return {

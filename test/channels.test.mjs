@@ -6,7 +6,7 @@ import { createPool, STATE } from '../src/pools/channels/pool.js'
 import { isDue, toDateKey, summarize, nextRunAt } from '../src/pools/channels/checkin.js'
 
 // ── 协议表 ──
-test('20 个渠道全部注册（2026-11-16 新增自加免费 API）', () => { assert.equal(Object.keys(CHANNELS).length, 20) })
+test('21 个渠道全部注册（2026-11-16 新增自加免费/付费 API）', () => { assert.equal(Object.keys(CHANNELS).length, 21) })
 test('每个渠道都有必需字段', () => {
   for (const [id, c] of Object.entries(CHANNELS)) {
     assert.ok(c.label, id); assert.ok(c.baseUrl, id); assert.ok(c.auth, id)

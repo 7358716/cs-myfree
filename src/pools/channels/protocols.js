@@ -434,6 +434,34 @@ export const CHANNELS = Object.freeze({
     // 标记：端点由用户提供 ⇒ 页面必须显示 URL 输入框
     userBaseUrl: true,
   },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 自加付费 API（用户需求 2026-11-16）
+  //   「付费池 = 可添加管理付费源的容器」
+  //
+  // 与 custom-free 完全同构，唯一区别是 billing: 'paid'：
+  //   · custom-free ⇒ 进免费池
+  //   · custom-paid ⇒ 进付费池（受 paid 授权闸门约束，默认不会自动调用）
+  //
+  // 为什么拆成两家而不是加个开关：池归属由渠道的 billing 静态决定，
+  // 复用现有「免费池/付费池」分组逻辑，不必给每个源再存一份池属性。
+  // ══════════════════════════════════════════════════════════════════════════
+  'custom-paid': {
+    concurrencyLimit: 1, limitSource: 'default',
+    billing: 'paid', billingSource: 'declared',
+    label: '自加付费 API（OpenAI 兼容）',
+    family: 'openai',
+    baseUrl: 'https://localhost.invalid',
+    chatPath: '/chat/completions',
+    auth: AUTH.BEARER,
+    login: LOGIN.PASTE_KEY,
+    refresh: REFRESH.NONE,
+    checkin: { supported: false },
+    credRef: 'CUSTOM_PAID_API_KEY',
+    loginPage: null,
+    note: '粘贴 OpenAI 兼容端点的 Base URL + API Key（按量计费；需在「设置」里授权付费才会被调用）',
+    userBaseUrl: true,
+  },
 })
 
 /** 参与聚合轮换的渠道（有可靠到期信息） */

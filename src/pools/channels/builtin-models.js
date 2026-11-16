@@ -38,6 +38,7 @@ export const MODELS_PATH = Object.freeze({
   officeace: '/v2/models',
   accio: null,
   'custom-free': '/models',      // OpenAI 兼容端点标准路径（相对 baseUrl）
+  'custom-paid': '/models',
 })
 
 /**

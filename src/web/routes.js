@@ -311,6 +311,30 @@ export function registerRoutes(webServer, opts = {}) {
         accounts: 0,
       })
     }
+    // ④ 自加 / 付费源（用户反馈 2026-11-16：红圈里没有火山方舟等）
+    //
+    // 🔴 此前链下拉**只收集免密源+渠道**，付费源自加 API 根本进不了模型链
+    //    ⇒ 用户没法把付费模型加进链（而口径是「只有链里的才能选」）。
+    //    这里补上：已登录的自加源用真实模型清单，未登录的给出可手填的占位模型。
+    for (const src of paidSources()) {
+      const accts = logged.filter((a) => String(a.provider) === String(src.id))
+      const cached = Array.isArray(cache?.[src.id]?.models) ? cache[src.id].models : []
+      const models = cached.map((m) => ({ id: m.id, name: m.name || m.id }))
+      sources.push({
+        kind: 'selfapi',
+        provider: src.id,
+        label: src.label ?? src.id,
+        models,
+        accounts: accts.length,
+        configured: accts.length > 0,
+        // 未配置时说明「配好 Key 后模型才会自动出现」
+        note: accts.length > 0
+          ? (models.length > 0 ? null : '已配 Key，但还没拉到模型清单（点「模型搜索探测」）')
+          : '未配置 Key：可以先手填模型名加入链，配好 Key 后才会真正调用',
+        // 允许手填模型名（自加源的模型清单依赖上游，可能拉不到）
+        allowManualModel: true,
+      })
+    }
     return sources
   }
 

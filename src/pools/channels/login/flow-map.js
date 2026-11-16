@@ -135,6 +135,7 @@ export const FLOW_MAP = Object.freeze({
   ark: { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: '火山方舟：在控制台创建 API Key 后粘贴' },
   'deepseek-web': { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: 'DeepSeek 网页版：粘贴网页会话 token（自带账号）' },
   'custom-free': { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: '自加免费 API：填接口地址（Base URL）+ 粘贴 API Key，任意 OpenAI 兼容端点' },
+  'custom-paid': { type: FLOW_TYPE.PASTE, loginVerified: false, loginNote: '自加付费 API：填接口地址 + API Key（按量计费，需付费授权）' },
 })
 
 const DEFAULT_START = {

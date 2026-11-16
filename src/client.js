@@ -1394,6 +1394,11 @@ window.__ModuleLoader__.load({
       const [scanning, setScanning] = react.useState(false)
       const [scanStep, setScanStep] = react.useState('')   // 正在跑第几步（按钮上显示进度）
       const [scanQ, setScanQ] = react.useState('')
+      // 提示条（新增/配置操作的反馈）
+      const [msg, setMsg] = react.useState(null)
+      // 付费池「+ 新增付费源」表单展开态 + 表单字段（用户反馈 2026-11-16）
+      const [paidAddOpen, setPaidAddOpen] = react.useState(false)
+      const [paidForm, setPaidForm] = react.useState({ label: '', baseUrl: '', apiKey: '', model: '' })
       const aliveRef = react.useRef(true)
       react.useEffect(() => () => { aliveRef.current = false }, [])
 
@@ -1707,7 +1712,20 @@ window.__ModuleLoader__.load({
           h('span', { style: S.dim },
             (d.sources.keyless || []).length + ' 个免密源 · '
             + (chData ? chData.total : d.sources.counts.channels) + ' 家账号渠道 · '
-            + '已登录 ' + loggedChannels.length + ' 家')),
+            + '已登录 ' + loggedChannels.length + ' 家'),
+          // 🔴 用户反馈 2026-11-16：「付费池、免费池都没有新增按钮」
+          //    ⇒ 池标题右侧给显眼的新增入口（原来只有卡片内展开后的「再加一个」，藏得深）
+          h('span', { style: { flex: '1 1 auto' } }),
+          h('button', {
+            style: Object.assign({}, S.btn(true), { padding: '2px 10px', fontSize: '12px' }),
+            onClick: () => {
+              // 滚动到账号渠道区并展开「自加免费 API」卡片（它是最通用的新增方式）
+              const el = typeof document !== 'undefined' ? document.getElementById('myfree-add-free') : null
+              if (el && el.scrollIntoView) { try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }) } catch { /* ignore */ } }
+              setMsg({ ok: true, text: '在下方「账号渠道」里选一家登录，或用「自加免费 API」粘贴你自己的端点' })
+            },
+            title: '新增免费源：登录一家账号渠道，或用「自加免费 API」粘贴任意 OpenAI 兼容端点',
+          }, '+ 新增免费源')),
 
         h('div', { style: { fontWeight: 600, margin: '10px 0 8px', fontSize: '12px' } }, '免密源（无需登录）'),
         h('div', { style: S.grid }, (d.sources.keyless || []).map((k) => h('div', { key: k.id, style: S.tile },
@@ -1748,12 +1766,57 @@ window.__ModuleLoader__.load({
               h('span', { style: S.poolTitle('paid') }, '💰 付费池'),
               h('span', { style: S.dim },
                 paidList.filter((p) => p.configured).length + ' / ' + paidList.length + ' 个源已配 Key · '
-                + (paidOn ? '⚠️ 已授权可花钱' : '🔒 未授权（不会花钱）'))),
+                + (paidOn ? '⚠️ 已授权可花钱' : '🔒 未授权（不会花钱）')),
+              h('span', { style: { flex: '1 1 auto' } }),
+              // 🔴 用户反馈 2026-11-16：付费池也要有新增入口
+              h('button', {
+                style: Object.assign({}, S.btn(true), { padding: '2px 10px', fontSize: '12px' }),
+                onClick: () => setPaidAddOpen((v) => !v),
+                title: '新增付费源：填写名称 + 接口地址 + API Key（任意 OpenAI 兼容端点）',
+              }, paidAddOpen ? '取消' : '+ 新增付费源')),
             h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
               '付费池里放你自带的 API（Key 只存本机）。「加入模型链」之后，它才会出现在对话模型选择器里；'
               + '是否真的允许花钱由「设置 → 付费授权」决定，本页不做开关。'),
-            paidList.length === 0
-              ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, '（付费池为空）')
+            // 🔴 用户反馈 2026-11-16：付费池要有「新增」入口
+            paidAddOpen ? h('div', { style: Object.assign({}, S.tile, { marginBottom: '10px' }) },
+              h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '新增付费源'),
+              h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+                '填任意 OpenAI 兼容端点（Base URL 形如 https://xxx/v1）。Key 只存本机；'
+                + '加好后还要去「模型与路由 → 模型链」把它加进链，才会出现在对话模型选择器里。'),
+              h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), placeholder: '显示名称（如「我的 OpenAI」）',
+                value: paidForm.label, onChange: (e) => setPaidForm(Object.assign({}, paidForm, { label: e.target.value })) }),
+              h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), placeholder: '接口地址 Base URL（如 https://api.openai.com/v1）',
+                value: paidForm.baseUrl, onChange: (e) => setPaidForm(Object.assign({}, paidForm, { baseUrl: e.target.value })) }),
+              h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), placeholder: 'API Key',
+                type: 'password',
+                value: paidForm.apiKey, onChange: (e) => setPaidForm(Object.assign({}, paidForm, { apiKey: e.target.value })) }),
+              h('div', { style: { display: 'flex', gap: '8px', marginTop: '4px' } },
+                h('button', {
+                  style: S.btn(true),
+                  onClick: () => {
+                    const f = paidForm
+                    if (!f.baseUrl.trim() || !f.apiKey.trim()) { setMsg({ ok: false, error: '接口地址和 API Key 都要填' }); return }
+                    if (!/^https?:\/\//i.test(f.baseUrl.trim())) { setMsg({ ok: false, error: '接口地址必须以 http:// 或 https:// 开头' }); return }
+                    api('/channels/save', { method: 'POST', body: JSON.stringify({
+                      provider: 'custom-paid',
+                      label: f.label.trim() || '自加付费 API',
+                      credential: f.apiKey.trim(),
+                      baseUrl: f.baseUrl.trim(),
+                    }) })
+                      .then((r) => {
+                        if (!r.ok) { setMsg({ ok: false, error: r.error || '保存失败' }); return }
+                        setMsg({ ok: true, text: '已加入付费池。下一步：到「模型与路由 → 模型链」把它加进链，才能在对话里选到。' })
+                        setPaidForm({ label: '', baseUrl: '', apiKey: '', model: '' })
+                        setPaidAddOpen(false)
+                        reload(); reloadCh()
+                      })
+                      .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+                  },
+                }, '保存到付费池'),
+                h('button', { style: S.btn(false), onClick: () => { setPaidAddOpen(false); setPaidForm({ label: '', baseUrl: '', apiKey: '', model: '' }) } }, '取消')))
+              : null,
+            paidList.length === 0 && !paidAddOpen
+              ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, '（付费池为空：点右上「+ 新增付费源」添加）')
               : h('div', { style: S.grid }, paidList.map((p) => h('div', { key: p.id, style: S.tile },
                   h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' } },
                     h('span', { style: { fontWeight: 600 } }, p.label),
@@ -1926,9 +1989,15 @@ window.__ModuleLoader__.load({
       const sources = (cat.data && Array.isArray(cat.data.sources)) ? cat.data.sources : []
       const byProvider = {}
       for (const src of sources) byProvider[src.provider] = src
+      // 🔴 用户反馈 2026-11-16：模型链下拉要能一眼看出「哪个是付费池、哪个是免费池」。
+      //    口径：免密源 + 账号渠道 = 免费池；自加/付费源（selfapi）= 付费池。
+      const poolOf = (src) => (src.kind === 'selfapi' ? 'paid' : 'free')
+      const poolTag = (src) => (poolOf(src) === 'paid' ? '💰 付费池' : '🟢 免费池')
       const providerOpts = sources.map((src) => ({
         value: src.provider,
-        label: src.label + (src.kind === 'channel-unlogged' ? '（未登录）' : src.kind === 'keyless' ? '（免密）' : ''),
+        label: poolTag(src) + ' · ' + src.label
+          + (src.kind === 'channel-unlogged' ? '（未登录）' : src.kind === 'keyless' ? '（免密）' : ''),
+        pool: poolOf(src),
       }))
 
       /** 取某 provider 的可选模型 */
@@ -2037,6 +2106,12 @@ window.__ModuleLoader__.load({
           ...(e.disabled ? { opacity: 0.6 } : {}),
         }) },
           h('span', { style: Object.assign({}, S.mono, S.dim) }, '#' + (i + 1)),
+          // 🔴 池标签（用户反馈 2026-11-16）：直接标出这条属于免费池还是付费池
+          (() => {
+            const src = byProvider[e.provider]
+            const paid = src ? poolOf(src) === 'paid' : false
+            return h('span', { style: S.badge(paid ? 'warn' : 'good') }, paid ? '付费池' : '免费池')
+          })(),
           // ① 平台下拉（独立一层：只决定"在哪家平台上找"）
           h('select', {
             style: Object.assign({}, S.input, { flex: '1 1 150px', minWidth: '120px' }),

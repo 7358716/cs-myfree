@@ -36,6 +36,7 @@ export const SOURCES = Object.freeze([
   { id: 'accio', label: 'Accio（阿里）', kind: KIND.ACCOUNT, checkin: false },
 
   { id: 'deepseek-official', label: 'DeepSeek 官方', kind: KIND.SELFAPI, paid: true },
+  { id: 'custom-paid', label: '自加付费 API（OpenAI 兼容）', kind: KIND.SELFAPI, paid: true, note: '你自己粘贴的付费端点' },
   { id: 'ark', label: '火山方舟', kind: KIND.SELFAPI, paid: true },
   { id: 'deepseek-web', label: 'DeepSeek 网页版', kind: KIND.SELFAPI, paid: false },
 ])
