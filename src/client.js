@@ -1411,6 +1411,27 @@ window.__ModuleLoader__.load({
       const loggedChannels = channels.filter((c) => c.loggedIn)
       const verifiedCount = statusList.filter((x) => x.loginVerified === true).length
 
+      /** 保存付费源（新增/更新）— 用户需求 2026-11-16：付费池可增删改查 */
+      const savePaidSource = () => {
+        const f = paidForm
+        if (!f.baseUrl.trim() || !f.apiKey.trim()) { setMsg({ ok: false, error: '接口地址和 API Key 都要填' }); return }
+        if (!/^https?:\/\//i.test(f.baseUrl.trim())) { setMsg({ ok: false, error: '接口地址必须以 http:// 或 https:// 开头' }); return }
+        api('/channels/save', { method: 'POST', body: JSON.stringify({
+          provider: 'custom-paid',
+          label: f.label.trim() || '自加付费 API',
+          credential: f.apiKey.trim(),
+          baseUrl: f.baseUrl.trim(),
+        }) })
+          .then((r) => {
+            if (!r.ok) { setMsg({ ok: false, error: r.error || '保存失败' }); return }
+            setMsg({ ok: true, text: '已加入付费池。下一步：到「模型与路由 → 模型链」把它加进链。' })
+            setPaidForm({ label: '', baseUrl: '', apiKey: '', model: '' })
+            setPaidAddOpen(false)
+            reload(); reloadCh()
+          })
+          .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+      }
+
       const runProbe = () => {
         setProbing(true)
         api('/probe', { method: 'POST', body: JSON.stringify({}) })
@@ -1727,13 +1748,54 @@ window.__ModuleLoader__.load({
             title: '新增免费源：登录一家账号渠道，或用「自加免费 API」粘贴任意 OpenAI 兼容端点',
           }, '+ 新增免费源')),
 
-        h('div', { style: { fontWeight: 600, margin: '10px 0 8px', fontSize: '12px' } }, '免密源（无需登录）'),
+        h('div', { style: { fontWeight: 600, margin: '10px 0 8px', fontSize: '12px' } },
+          '① 免密源（无需登录）',
+          h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) }, '开箱即用，不需要任何账号')),
         h('div', { style: S.grid }, (d.sources.keyless || []).map((k) => h('div', { key: k.id, style: S.tile },
           h('div', { style: { fontWeight: 600 } }, k.label),
           h('div', { style: S.dim }, k.note || '')))),
 
+        // ══════════════════════════════════════════════════════════════════
+        // ② 模型预设（用户需求 2026-11-16）
+        //   「免费渠道增加一个模型预设入口，和免密源、渠道并列」
+        //
+        //   与「自加免费 API」的区别：
+        //     · 自加免费 API = 一个**端点**（Base URL + Key），可能有多个模型
+        //     · 模型预设   = 一个**模型**（往现有端点里加一个可选模型）
+        //   ⇒ 预设是「快速往模型链里塞一个常用免费模型」的捷径，
+        //     不必为每个模型都配一遍完整端点。
+        // ══════════════════════════════════════════════════════════════════
+        h('div', { style: { fontWeight: 600, margin: '16px 0 8px', fontSize: '12px' } },
+          '② 模型预设',
+          h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) },
+            '常用免费模型一键加进模型链（免密源模型 / 渠道模型）')),
+        (() => {
+          const presets = [
+            { provider: 'kilo', model: 'kilo-auto/free', label: 'Kilo 免费池 · kilo-auto/free', note: '完全免密' },
+            { provider: 'ovh', model: 'Qwen3.5-397B-A17B', label: 'OVH · Qwen3.5-397B', note: '实测最快 1.9s' },
+            { provider: 'ovh', model: 'Qwen2.5-VL-72B-Instruct', label: 'OVH · Qwen2.5-VL-72B', note: '视觉能力强' },
+            { provider: 'pollinations', model: 'openai', label: 'Pollinations · openai', note: '免密，能力较弱' },
+          ]
+          const inChain = (p) => {
+            const cs = (d.chain && Array.isArray(d.chain.tiers)) ? d.chain.tiers : []
+            return cs.some((t) => String(t.provider) === p.provider)
+          }
+          return h('div', { style: S.grid }, presets.map((p) => h('div', { key: p.provider + '/' + p.model, style: S.tile },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' } },
+              h('span', { style: { fontWeight: 600, fontSize: '12px' } }, p.label),
+              inChain(p) ? h('span', { style: S.badge('good') }, '已入链') : null),
+            h('div', { style: S.dim }, p.note),
+            h('button', {
+              style: Object.assign({}, S.btn(false), { marginTop: '6px', padding: '0 8px', fontSize: '11px' }),
+              onClick: () => {
+                if (typeof props.onGoTab === 'function') props.onGoTab('models')
+                setMsg({ ok: true, text: '请在「模型与路由 → 模型链」里用下拉把 ' + p.label + ' 加进去（可指定级别）' })
+              },
+            }, '加进模型链'))))
+        })(),
+
         h('div', { style: { fontWeight: 600, margin: '16px 0 4px', fontSize: '12px' } },
-          '账号渠道（' + (chData ? chData.total : d.sources.counts.channels) + ' 家 · 已登录 ' + loggedChannels.length + ' 家' +
+          '③ 账号渠道（' + (chData ? chData.total : d.sources.counts.channels) + ' 家 · 已登录 ' + loggedChannels.length + ' 家' +
           (statusList.length ? ' · 已验证 ' + verifiedCount + '/' + statusList.length : '') + '）'),
         h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
           '「一键登录」按各渠道流程自动完成；未验证 = 后端登录端点尚未真机验证，可能失败，请以实际结果为准。凭证只存本机。'),
@@ -1761,98 +1823,79 @@ window.__ModuleLoader__.load({
         (() => {
           const paidList = Array.isArray(d.sources.paid) ? d.sources.paid : []
           const paidOn = !!(d.config && d.config.paid && d.config.paid.enabled)
-          return h('div', null,
-            h('div', { style: S.poolHead },
-              h('span', { style: S.poolTitle('paid') }, '💰 付费池'),
-              h('span', { style: S.dim },
-                paidList.filter((p) => p.configured).length + ' / ' + paidList.length + ' 个源已配 Key · '
-                + (paidOn ? '⚠️ 已授权可花钱' : '🔒 未授权（不会花钱）')),
-              h('span', { style: { flex: '1 1 auto' } }),
-              // 🔴 用户反馈 2026-11-16：付费池也要有新增入口
-              h('button', {
-                style: Object.assign({}, S.btn(true), { padding: '2px 10px', fontSize: '12px' }),
-                onClick: () => setPaidAddOpen((v) => !v),
-                title: '新增付费源：填写名称 + 接口地址 + API Key（任意 OpenAI 兼容端点）',
-              }, paidAddOpen ? '取消' : '+ 新增付费源')),
-            h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
-              '付费池里放你自带的 API（Key 只存本机）。「加入模型链」之后，它才会出现在对话模型选择器里；'
-              + '是否真的允许花钱由「设置 → 付费授权」决定，本页不做开关。'),
-            // 🔴 用户反馈 2026-11-16：付费池要有「新增」入口
-            paidAddOpen ? h('div', { style: Object.assign({}, S.tile, { marginBottom: '10px' }) },
-              h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '新增付费源'),
-              h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
-                '填任意 OpenAI 兼容端点（Base URL 形如 https://xxx/v1）。Key 只存本机；'
-                + '加好后还要去「模型与路由 → 模型链」把它加进链，才会出现在对话模型选择器里。'),
-              h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), placeholder: '显示名称（如「我的 OpenAI」）',
-                value: paidForm.label, onChange: (e) => setPaidForm(Object.assign({}, paidForm, { label: e.target.value })) }),
-              h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), placeholder: '接口地址 Base URL（如 https://api.openai.com/v1）',
-                value: paidForm.baseUrl, onChange: (e) => setPaidForm(Object.assign({}, paidForm, { baseUrl: e.target.value })) }),
-              h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), placeholder: 'API Key',
-                type: 'password',
-                value: paidForm.apiKey, onChange: (e) => setPaidForm(Object.assign({}, paidForm, { apiKey: e.target.value })) }),
-              h('div', { style: { display: 'flex', gap: '8px', marginTop: '4px' } },
-                h('button', {
-                  style: S.btn(true),
-                  onClick: () => {
-                    const f = paidForm
-                    if (!f.baseUrl.trim() || !f.apiKey.trim()) { setMsg({ ok: false, error: '接口地址和 API Key 都要填' }); return }
-                    if (!/^https?:\/\//i.test(f.baseUrl.trim())) { setMsg({ ok: false, error: '接口地址必须以 http:// 或 https:// 开头' }); return }
-                    api('/channels/save', { method: 'POST', body: JSON.stringify({
-                      provider: 'custom-paid',
-                      label: f.label.trim() || '自加付费 API',
-                      credential: f.apiKey.trim(),
-                      baseUrl: f.baseUrl.trim(),
-                    }) })
-                      .then((r) => {
-                        if (!r.ok) { setMsg({ ok: false, error: r.error || '保存失败' }); return }
-                        setMsg({ ok: true, text: '已加入付费池。下一步：到「模型与路由 → 模型链」把它加进链，才能在对话里选到。' })
-                        setPaidForm({ label: '', baseUrl: '', apiKey: '', model: '' })
-                        setPaidAddOpen(false)
-                        reload(); reloadCh()
-                      })
-                      .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
-                  },
-                }, '保存到付费池'),
-                h('button', { style: S.btn(false), onClick: () => { setPaidAddOpen(false); setPaidForm({ label: '', baseUrl: '', apiKey: '', model: '' }) } }, '取消')))
-              : null,
-            paidList.length === 0 && !paidAddOpen
-              ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, '（付费池为空：点右上「+ 新增付费源」添加）')
-              : h('div', { style: S.grid }, paidList.map((p) => h('div', { key: p.id, style: S.tile },
-                  h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' } },
-                    h('span', { style: { fontWeight: 600 } }, p.label),
-                    h('span', { style: S.badge(p.configured ? 'good' : 'warn') },
-                      p.configured ? ('已配 ' + (p.accounts || 1) + ' 个 Key') : '未配置')),
-                  h('div', { style: S.dim }, p.note || '自带 API Key'),
-                  p.configured && p.masked
-                    ? h('div', { style: Object.assign({ marginTop: '2px' }, S.dim, S.mono) }, p.masked)
-                    : null,
-                  h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) },
-                    p.inChain ? '📌 已在模型链' : '⭕ 未加入模型链'),
-                  h('div', { style: { display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' } },
-                    h('button', {
-                      style: Object.assign({}, S.btn(false), { padding: '0 8px', fontSize: '11px' }),
-                      onClick: () => {
-                        // 跳到该源对应的渠道卡片（配置 Key 的地方）
-                        if (typeof props.onGoTab === 'function') props.onGoTab('sources')
-                        if (typeof window !== 'undefined') {
-                          try { window.scrollTo({ top: 0, behavior: 'smooth' }) } catch { /* ignore */ }
-                        }
-                        setMsg({ ok: true, text: '请在下方「账号渠道」里找到「' + p.label + '」配置 API Key' })
-                      },
-                    }, p.configured ? '更换 Key' : '去配置 Key'),
-                    h('button', {
-                      style: Object.assign({}, S.btn(false), { padding: '0 8px', fontSize: '11px' }),
-                      onClick: () => {
-                        // 🔴 加入模型链要选**具体模型**（链的每条是 provider+model），
-                        //    不能在付费池里猜模型名 ⇒ 引导到「模型与路由」页的模型链编辑器，
-                        //    那里有平台/模型两级下拉（用户选完即写入链）。
-                        if (typeof props.onGoTab === 'function') props.onGoTab('models')
-                        setMsg({ ok: true, text: '请在「模型与路由 → 模型链」里用下拉把「' + p.label + '」的模型加进去（可指定级别）' })
-                      },
-                    }, p.inChain ? '调整级别' : '加入模型链')),
-                  ))),
+          const head = h('div', { style: S.poolHead },
+            h('span', { style: S.poolTitle('paid') }, '💰 付费池'),
+            h('span', { style: S.dim },
+              paidList.filter((p) => p.configured).length + ' / ' + paidList.length + ' 个源已配 Key · '
+              + (paidOn ? '⚠️ 已授权可花钱' : '🔒 未授权（不会花钱）')),
+            h('span', { style: { flex: '1 1 auto' } }),
+            h('button', {
+              style: Object.assign({}, S.btn(true), { padding: '2px 10px', fontSize: '12px' }),
+              onClick: () => setPaidAddOpen((v) => !v),
+              title: '新增付费源：填写名称 + 接口地址 + API Key（任意 OpenAI 兼容端点）',
+            }, paidAddOpen ? '取消' : '+ 新增付费源'))
+
+          const intro = h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
+            '付费池里放你自带的 API（Key 只存本机）。加入模型链之后，它才会出现在对话模型选择器里；'
+            + '是否真的允许花钱由「设置 → 付费授权」决定，本页不做开关。')
+
+          const addForm = paidAddOpen ? h('div', { style: Object.assign({}, S.tile, { marginBottom: '10px' }) },
+            h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '新增付费源'),
+            h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) },
+              '填任意 OpenAI 兼容端点（Base URL 形如 https://xxx/v1）。Key 只存本机；'
+              + '加好后还要去「模型与路由 → 模型链」把它加进链，才会出现在对话模型选择器里。'),
+            h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), placeholder: '显示名称（如「我的 OpenAI」）',
+              value: paidForm.label, onChange: (e) => setPaidForm(Object.assign({}, paidForm, { label: e.target.value })) }),
+            h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), placeholder: '接口地址 Base URL（如 https://api.openai.com/v1）',
+              value: paidForm.baseUrl, onChange: (e) => setPaidForm(Object.assign({}, paidForm, { baseUrl: e.target.value })) }),
+            h('input', { style: Object.assign({}, S.input, { marginBottom: '6px' }), placeholder: 'API Key', type: 'password',
+              value: paidForm.apiKey, onChange: (e) => setPaidForm(Object.assign({}, paidForm, { apiKey: e.target.value })) }),
+            h('div', { style: { display: 'flex', gap: '8px', marginTop: '4px' } },
+              h('button', { style: S.btn(true), onClick: savePaidSource }, '保存到付费池'),
+              h('button', { style: S.btn(false), onClick: () => { setPaidAddOpen(false); setPaidForm({ label: '', baseUrl: '', apiKey: '', model: '' }) } }, '取消')))
+            : null
+
+          const list = paidList.length === 0 && !paidAddOpen
+            ? h('div', { style: Object.assign({ marginBottom: '8px' }, S.dim) }, '（付费池为空：点右上「+ 新增付费源」添加）')
+            : h('div', { style: S.grid }, paidList.map((p) => h('div', { key: p.id, style: S.tile },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' } },
+                  h('span', { style: { fontWeight: 600 } }, p.label),
+                  h('span', { style: S.badge(p.configured ? 'good' : 'warn') },
+                    p.configured ? ('已配 ' + (p.accounts || 1) + ' 个 Key') : '未配置')),
+                h('div', { style: S.dim }, p.note || '自带 API Key'),
+                p.configured && p.masked
+                  ? h('div', { style: Object.assign({ marginTop: '2px' }, S.dim, S.mono) }, p.masked)
+                  : null,
+                h('div', { style: Object.assign({ marginTop: '4px' }, S.dim) },
+                  p.inChain ? '📌 已在模型链' : '⭕ 未加入模型链'),
+                h('div', { style: { display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' } },
+                  h('button', {
+                    style: Object.assign({}, S.btn(false), { padding: '0 8px', fontSize: '11px' }),
+                    onClick: () => {
+                      if (typeof props.onGoTab === 'function') props.onGoTab('sources')
+                      setMsg({ ok: true, text: '请在下方「③ 账号渠道」里找到「' + p.label + '」配置 API Key' })
+                    },
+                  }, p.configured ? '更换 Key' : '去配置 Key'),
+                  h('button', {
+                    style: Object.assign({}, S.btn(false), { padding: '0 8px', fontSize: '11px' }),
+                    onClick: () => {
+                      if (typeof props.onGoTab === 'function') props.onGoTab('models')
+                      setMsg({ ok: true, text: '请在「模型与路由 → 模型链」里用下拉把「' + p.label + '」的模型加进去（可指定级别）' })
+                    },
+                  }, p.inChain ? '调整级别' : '加入模型链'),
+                  p.configured ? h('button', {
+                    style: Object.assign({}, S.btn(false), { padding: '0 8px', fontSize: '11px', color: 'var(--dsw-alias-state-error-primary)' }),
+                    onClick: () => {
+                      if (typeof window !== 'undefined' && !window.confirm('确定从付费池删除「' + p.label + '」的凭证？（模型链里的条目不会自动删除）')) return
+                      api('/accounts/remove', { method: 'POST', body: JSON.stringify({ id: p.id }) })
+                        .then((r) => { setMsg(r.ok ? { ok: true, text: '已删除 ' + p.label + ' 的凭证' } : { ok: false, error: r.error || '删除失败' }); reload(); reloadCh() })
+                        .catch((e) => setMsg({ ok: false, error: String((e && e.message) || e) }))
+                    },
+                  }, '删除') : null))))
+
+          return h('div', null, head, intro, addForm, list,
             h('div', { style: Object.assign({ marginTop: '8px' }, S.dim) },
-              '「DeepSeek 账户余额」「火山方舟余额」在同一页下方；预算限额与付费授权见「设置」页。')) 
+              '「DeepSeek 账户余额」「火山方舟余额」在同一页下方；预算限额与付费授权见「设置」页。'))
         })(),
 
         // design/21 §1：额度健康并入供给源（复用旧 HealthZone 渲染，不删源码）
@@ -2198,9 +2241,13 @@ window.__ModuleLoader__.load({
               ? h('div', { style: Object.assign({ marginTop: '6px' }, S.dim, S.warn) }, '⚠️ 页面这份链与运行时不一致：保存后需重启插件/宿主才生效')
               : h('div', { style: Object.assign({ marginTop: '6px' }, S.dim) }, '（后端未报告该链是否已应用到运行时）')),
 
-        h('div', { style: { fontWeight: 600, margin: '14px 0 8px' } }, '模型链配置（平台与模型分两层 + 跨平台搜索）'),
-        h('div', { style: S.dim }, 'T1 最先尝试，失败后依次降级。同 provider+model ⇒ 替换内置条目的 tier；新的 ⇒ 追加。留空的条目保存时会被忽略。'),
-        h('div', { style: S.dim }, '每行三个控件：① 平台下拉（只决定在哪家平台找）② 跨平台搜索框（只输模型关键词）③ 模型下拉（默认只列该平台的模型；搜索有命中时展开为「平台 / 模型」，选中会同时切换平台）。保存提交的仍是 { 平台, 模型 }。'),
+        // 🔴 用户反馈 2026-11-16：「模型链和降级链还没合并 UI」
+        //    根因：ChainZone 内部自己又写了一个标题「模型链配置（平台与模型分两层…）」，
+        //    与外层「模型链（决定对话里能选哪些）」并列 ⇒ 看起来像两块东西。
+        //    这里删掉内层标题，只保留外层唯一标题；说明文字仍保留（它讲的是操作方式）。
+        h('div', { style: Object.assign({ margin: '10px 0 6px' }, S.dim) },
+          'T1 最先尝试，失败后依次降级。同 provider+model 会替换内置条目的 tier；新的条目追加到链尾。',
+          '每行三个控件：平台下拉（在哪家平台找）、跨平台搜索（只输模型关键词）、模型下拉（默认只列该平台的模型）。'),
 
         cat.error ? h('div', { style: Object.assign({}, S.dim, S.warn) }, '可选项加载失败：' + cat.error + '（仍可保存已有配置）') : null,
         draft.length === 0 ? h('div', { style: Object.assign({ margin: '10px 0' }, S.dim) }, '（空 —— 保存后完全使用内置链）') : null,
@@ -4671,12 +4718,22 @@ window.__ModuleLoader__.load({
                 h('button', { style: S.btn(false), onClick: () => props.onGoTab('settings') }, '去「设置」页调整'))
             : null),
 
-        // 模型链（用户口径 2026-11-16：模型链 = 可被选择的模型集合）
+        // ══════════════════════════════════════════════════════════════════
+        // 模型链（唯一入口：合并了原「降级链」与「模型链」两块 UI）
+        //
+        // 用户口径 2026-11-16：
+        //   「模型链替代降级链，不叫精选模型链，降级链内置有规则逻辑，
+        //    模型链按照级别可以添加免费、付费模型，
+        //    只有官方（含我自行添加的）和模型链中明确的可以被选择」
+        // ⇒ 一块 UI 同时承担两件事：① 哪些模型可选 ② 失败时按什么顺序降级
+        // ══════════════════════════════════════════════════════════════════
         h('div', { style: { marginTop: '12px' } },
-          h('div', { style: { fontWeight: 600, marginBottom: '2px' } }, '模型链（决定对话里能选哪些 + 尝试顺序）'),
+          h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap', marginBottom: '2px' } },
+            h('span', { style: { fontWeight: 600 } }, '模型链'),
+            h('span', { style: S.badge('good') }, '可选项 + 降级顺序'),
+            h('span', { style: S.dim }, '（已合并原「降级链」）')),
           h('div', { style: Object.assign({ marginBottom: '6px' }, S.dim) },
-            '这就是「模型链」：链里列出的模型「才会出现在对话的模型选择器里」；'
-            + '级别（T1→T2→…）就是实际尝试顺序，上一级失败自动降级到下一级。'
+            '链里列出的模型「才会出现在对话的模型选择器里」；级别（T1→T2→…）就是实际尝试顺序，上一级失败自动降级到下一级。'
             + (autoOn ? '自动路由开着时，链的顺序仍决定优先尝试谁。' : '自动路由已关：严格按这份链逐个尝试。')),
           h(ChainZone)),
 
