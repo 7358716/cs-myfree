@@ -34,6 +34,7 @@ import { createAccountStore } from './pools/channels/accounts.js'
 import { readCachedModels, channelModelsAsList, parseModelId, makeModelId, refreshAll } from './pools/channels/catalog.js'
 import { streamChat as channelStream } from './pools/channels/driver.js'
 import { CHANNELS, AUTH } from './pools/channels/protocols.js'
+import { createRequire } from 'node:module'
 import { createHintRegistry, installGlobalHints, HINTS_VERSION } from './adapter/routing-hints.js'
 import { getSharedGate, snapshotStats, DEFAULT_LIMITS } from './adapter/concurrency.js'
 import { createRoutingSnapshot } from './web/routing.js'
@@ -46,7 +47,21 @@ import { refreshLogin } from './pools/channels/login/refresh.js'
 import { fetchAllCredits } from './pools/channels/credits/index.js'
 
 const NAME = 'cs-myfree'
-const VERSION = '1.9.23'
+
+/**
+ * 版本号 —— **从 package.json 读，绝不硬编码**。
+ *
+ * 🔴 2026-11-18 真实事故：此前这里写死 `'1.9.23'`，而 package.json 已到 1.9.28
+ *    ⇒ 启动日志显示旧版本、client.js 用旧版本注册 ⇒ 前端一直加载旧缓存 bundle，
+ *    用户装新版后界面仍是旧的（排查了很久才定位）。
+ *
+ * 用 createRequire 同步读包元数据：零依赖、同步（apply 是同步的）、无网络。
+ */
+const VERSION = (() => {
+  try {
+    return createRequire(import.meta.url)('../package.json').version
+  } catch { return '0.0.0-unknown' }
+})()
 
 export const name = NAME
 export const version = VERSION

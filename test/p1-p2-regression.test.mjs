@@ -255,3 +255,34 @@ test('自加免费 API：内置渠道不会因 body.baseUrl 被劫持', async ()
   } catch { /* ignore */ }
   assert.ok(calledUrl && !calledUrl.includes('evil.example'), '内置渠道必须用静态端点，忽略外部 baseUrl：' + calledUrl)
 })
+
+// ─────────────────── 版本号一致性（2026-11-18 真实事故防回归）───────────────────
+
+test('🔴 插件内部 VERSION 必须等于 package.json 的 version（硬编码会导致前端加载旧缓存）', async () => {
+  const { createRequire } = await import('node:module')
+  const pkg = createRequire(import.meta.url)('../package.json')
+  const mod = await import('../src/index.js')
+  assert.equal(mod.version, pkg.version,
+    `src/index.js 的 VERSION(${mod.version}) 与 package.json(${pkg.version}) 不一致 —— `
+    + '这会让启动日志显示旧版本、前端加载旧 bundle')
+})
+
+test('🔴 src 下不得再出现硬编码的 1.9.x 版本字面量', async () => {
+  const { readFile, readdir } = await import('node:fs/promises')
+  const { join } = await import('node:path')
+  const dir = new URL('../src/', import.meta.url).pathname
+  const offenders = []
+  async function walk(d) {
+    for (const e of await readdir(d, { withFileTypes: true })) {
+      const p = join(d, e.name)
+      if (e.isDirectory()) { await walk(p); continue }
+      if (!e.name.endsWith('.js')) continue
+      const src = await readFile(p, 'utf8')
+      // 匹配 const VERSION = '1.9.x' 这类硬编码
+      const m = src.match(/const\s+VERSION\s*=\s*['"]\d+\.\d+\.\d+/)
+      if (m) offenders.push(p.replace(dir, '') + ' → ' + m[0])
+    }
+  }
+  await walk(dir)
+  assert.deepEqual(offenders, [], '禁止硬编码版本号，必须从 package.json 读：' + offenders.join('; '))
+})

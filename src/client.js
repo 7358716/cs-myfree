@@ -16,7 +16,10 @@ window.__ModuleLoader__.load({
     const react = require('react')
     const h = react.createElement
 
-    const VERSION = '1.9.20'
+    // 🔴 版本号由后端通过 /state 下发（client bundle 无法读 package.json）。
+    //    此前硬编码 '1.9.20' 且从未使用，是死变量 —— 保留占位以免外部引用断裂，
+    //    真实版本一律以 /state 的 version 字段为准（见 SettingsPage）。
+    const VERSION = 'dynamic'
     const API = '/cs-myfree'
     const CASH_PATH = '/cs-myfree/cash'
 
