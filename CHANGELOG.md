@@ -3,6 +3,34 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循 semver。
 **每条修复都写「根因」与「回归用例」，防止同一个坑再踩一次。**
 
+## [未发布] - 2026-11-22
+
+### 文档
+
+- **探测路由明确降级为实验特性（P0-③）**：在 README 新增「⚠️ 实验特性（未接线，不生效）」一节
+  - 事实核对（不是猜测，含线上实测）：
+    · **选路**：`planRoute()` 在选路/降级主循环里零调用，没接进 `adapter.stream()`；
+    · **开关**：`routing.useProbeRoute` 只被读入并上报，**不参与任何分支判断** ⇒ 开与关选路一致；
+    · **HTTP**：`/model-chain` 给 `opts.planRoute` 留了口子，但 `src/index.js` 注册路由时
+      没注入 ⇒ 线上实测 `route: null`、`/probe/refresh` 返回 `probe not configured`；
+    · 整个模块里只有 `buildDetailedError()` 真正在用（拼错误文案）。
+  - 因此**不建议**在任何地方把 `useProbeRoute` 说成可用能力；启用它是独立改造项
+    （接 `planRoute()` 进 `stream()` + 探测器真跑 + 端到端测试 + 灰度）。
+- `src/adapter/probe-route.js` 文件头、`src/adapter/index.js` 的 import 处与开关赋值处
+  均加了显式「未接线」注释。
+
+### 测试
+
+- 新增 `test/probe-route.test.mjs`（10 例）作为最小护栏：
+  构造失败→选路、全挂时候选为空、付费 fail-closed、冷启动兜底、重试计划累加、
+  详细错误文案区分付费拦截与真全挂；
+  以及**事实核对**四条：选路主循环不调用 `planRoute`、HTTP 层未注入（`route` 恒 null）、开关开/关选路一致、文件头保留「未接线」声明。
+  → 一旦有人真的接线，这三条会立刻变红，提醒同步文档。
+
+### 顺带
+
+- README 安装示例版本号 v1.9.8 → v1.9.30（落后 21 个版本）；测试条数 692 → 1080。
+
 ## [1.9.30] - 2026-11-22
 
 ### 修复

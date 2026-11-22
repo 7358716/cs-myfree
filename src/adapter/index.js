@@ -32,7 +32,11 @@ import { DEFAULT_TTL_MS } from './failure-map.js'
 // 契约 E3 的唯一判定点（`config/scope.js` 已实现并导出；这里只负责**消费**，不重写语义）
 import { resolveSubagentRouting } from '../config/scope.js'
 // ── 探测路由（P2，2026-11-13 定稿设计）─────────────────────────────────────
-//    受 `routing.useProbeRoute` 开关保护（默认 false ⇒ 行为与冻结版一致，零回归）。
+//    ⚠️【未接线 · 实验特性，2026-11-22 核定 + 线上实测】这里**只用到 `buildDetailedError`**
+//    （拼「全部可用模型失败」的文案）。`planRoute()` 在本文件**零调用** —— 探测路由没有接进
+//    stream()；`routing.useProbeRoute` 开关**不参与任何分支判断**（见下方说明）；
+//    HTTP 层 /model-chain 虽然给 opts.planRoute 留了口子，但 index.js 注册路由时没注入
+//    （线上实测 route: null）。import 里仍保留 planRoute 会让后人误以为它在用，故显式注明。
 import { planRoute, buildDetailedError } from './probe-route.js'
 import { readJson as readJsonFile, atomicWrite } from '../config/store.js'
 import { join } from 'node:path'
@@ -578,6 +582,10 @@ export function createAdapter(opts = {}) {
     routingEffective.globalCooldownMs = gc !== null ? gc : null
 
     // ⑦ 探测路由开关（P2，默认 false ⇒ 走原 ladder 逻辑，零回归）
+    // ⚠️【未接线 · 实验特性】useProbeRoute 只被**读入并上报**给设置页/诊断，
+    //    **从不参与任何分支判断** ⇒ 无论 true 还是 false，选路行为完全一致。
+    //    探测路由若要启用，必须单独立项（把 planRoute() 接进 stream() + 探测真跑
+    //    + 端到端测试 + 灰度），详见 probe-route.js 文件头说明。
     routingEffective.configured.useProbeRoute = typeof routing.useProbeRoute === 'boolean'
     routingEffective.useProbeRoute = routingEffective.configured.useProbeRoute
       ? routing.useProbeRoute
