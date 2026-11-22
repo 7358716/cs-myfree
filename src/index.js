@@ -170,6 +170,24 @@ export function routeTarget({ provider, model } = {}) {
 }
 
 /**
+ * 纯函数：用户请求的模型若不在链/目录里，能否**直连**解析成候选（P0-④）。
+ *
+ * 这就是装配到 adapter 的 `directModel`（`createAdapter({ directModel })`）——
+ * `adapter.resolveRequested()` 会拿它的返回值把用户选的模型 **pinned 排第一**，
+ * 从而保证「选 X 就发 X」，而不是退回默认链。
+ *
+ * 单独导出是为了能被测试**直接调用生产实现**：此前测试都是各自重写一份 stub，
+ * 装配函数被改坏时全量测试仍然是绿的（实测：把返回值改成 null，只有防漂移那条会红）。
+ *
+ * @param {string} id 形如 `<渠道>/<模型>`
+ * @returns {{provider:string, model:string, name:string, channelModel:true}|null}
+ */
+export function directModelOf(id) {
+  const p = parseModelId(id)
+  return p ? { provider: p.channelId, model: id, name: id, channelModel: true } : null
+}
+
+/**
  * 插件入口（**经 guardApply 包装：任何异常都不会弄坏宿主启动**）
  *
  * 教训：DSH 在插件加载抛错时会报 `N entry did not activate`
@@ -641,10 +659,9 @@ export const apply = guardApply(function applyInner(ctx, rawConfig = {}) {
       // 覆盖层 = UI 写的那份（唯一事实来源）；profile 的 chain 只在首启时播种
       overrides: chainOverrides,
       // 请求的模型若不在链/目录里但形如 <渠道>/<模型> ⇒ 允许直连（失败再降级）
-      directModel: (id) => {
-        const p = parseModelId(id)
-        return p ? { provider: p.channelId, model: id, name: id, channelModel: true } : null
-      },
+      // 🔴 用导出的纯函数（`directModelOf`），不再写内联闭包 —— 这样测试能直接调用
+      //    生产实现，而不是各写一份 stub 测自己（见 test/direct-model.test.mjs）。
+      directModel: directModelOf,
       send: cfg.transportBaseUrl ? send : sendDispatch,
       budget: cfg.budgetTurns ?? {},
       // 契约 B：路由配置**必须传函数**而不是快照 —— `cfg` 是热更的 `let` 变量
