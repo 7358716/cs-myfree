@@ -5,6 +5,25 @@
 
 ## [未发布] - 2026-11-22
 
+### 修复
+
+- **模型选择器里同一模型重复 22 次**（P0，方案①已批准）
+  - 根因：为修 NO_ADAPTER，`src/index.js` 把**同一个 adapter 注册到 22 个 provider id**
+    （`cs-myfree` + 21 个渠道别名）；而宿主 `buildModelCatalog()`
+    （dsh-api-session-controller:524-573）**遍历 `listProviders()` 逐个取 `listModels`
+    并各自成组**、**不做跨组去重**。旧实现对所有别名都返回整条链
+    ⇒ 3 个模型 × 22 = **66 条**，用户看到「一堆重复的 myfree 模型」。
+  - 修复：`listModels()` 只对**主 provider** 声明模型，别名一律返回 `[]`。
+  - 效果：provider 组 **22 → 1**、选择器条目 **66 → 3**、每个模型只出现 1 次。
+  - **路由与故障切换完全不变**：宿主 `listModels` 与 `prepareCall`/路由走的是同一个
+    `registration(provider).adapter` 查找（dsh-llm:2193 与 :2264），**不经过 catalog**
+    ⇒ 别名照样能 `resolveModel` / `prepareCall` / 发请求 / 降级切换。
+  - **别名注册未动**（NO_ADAPTER 的修复 commit `29bdf05` 保留）。
+  - 回归用例：`test/model-list-dedupe.test.mjs`（11 例，含「复刻 buildModelCatalog
+    断言组数=1 且无重复 id」与「链首渠道挂掉仍能切到下一个」）
+  - 语义变更：`test/p1-p2-regression.test.mjs` 里「listModels 接受渠道名别名」一条
+    改为「别名不声明模型」，其余别名能力（providerInfo/retryPolicy/resolveModel）不变。
+
 ### 文档
 
 - **探测路由明确降级为实验特性（P0-③）**：在 README 新增「⚠️ 实验特性（未接线，不生效）」一节
@@ -29,7 +48,8 @@
 
 ### 顺带
 
-- README 安装示例版本号 v1.9.8 → v1.9.30（落后 21 个版本）；测试条数 692 → 1080。
+- README 安装示例版本号 v1.9.8 → v1.9.30（落后 21 个版本）；测试条数 692 → 1092。
+- 排查证据留档：`docs/investigation/P0-model-duplicate-evidence.md`。
 
 ## [1.9.30] - 2026-11-22
 

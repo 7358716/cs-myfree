@@ -82,7 +82,7 @@ dsh plugin --profile web add github:7358716/cs-myfree#v1.9.30
 ## 验证
 
 ```bash
-npm test             # 1081 项
+npm test             # 1092 项
 npm run test:static  # 零依赖 / exports / 语法 / 结构
 ```
 

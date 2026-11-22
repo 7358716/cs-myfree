@@ -36,11 +36,16 @@ test('P1: providerRetryPolicy 接受渠道名别名', () => {
   assert.equal(p.maxRetries, 1)
 })
 
-test('P1: listModels 接受渠道名别名', () => {
+test('P1: listModels 只认主 provider —— 别名**不声明模型**（2026-11-22 方案①）', () => {
   const a = createAdapter({ builtin: [{ provider: 'codearts', model: 'deepseek-v4.1-flash', tier: 1 }], send: async () => [] })
-  const models = a.listModels('codearts')
-  assert.ok(models.length > 0, '渠道名别名必须返回模型列表')
-  assert.equal(models[0].provider, 'codearts')
+  // ⚠️ 语义变更说明：这里**曾经**断言「别名也返回模型列表」，那是 NO_ADAPTER 修复时期的口径。
+  //    但它带来的副作用是模型选择器里同一模型重复 22 次（宿主 buildModelCatalog 会把
+  //    每个已注册 provider 各成一组、且不做跨组去重）。方案①把「声明模型」收回到主 provider，
+  //    **别名照样能路由**（见本文件下一条 resolveModel 与前一条 providerInfo/retryPolicy）。
+  assert.deepEqual(a.listModels('codearts'), [], '别名不得对外声明模型（否则选择器里会出现 22 组）')
+  const main = a.listModels(PROVIDER_ID)
+  assert.ok(main.length > 0, '主 provider 必须照常声明模型')
+  assert.equal(main[0].provider, PROVIDER_ID)
 })
 
 test('P1: resolveModel 接受渠道名别名', () => {

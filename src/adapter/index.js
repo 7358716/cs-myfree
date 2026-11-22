@@ -1083,7 +1083,27 @@ export function createAdapter(opts = {}) {
     //    所以这里返回**链内模型**，而不是全量 catalog。
     //    ⇒ 解决「模型选择目前特别多」；用户想让某个模型可选，就把它加进模型链。
     listModels(provider) {
-      if (provider !== providerId && !providerAliases().includes(provider)) return []
+      // 🔴 只有**主 provider** 对外声明模型；渠道别名一律返回空（2026-11-22，方案①）
+      //
+      // 为什么（真实缺陷：模型选择器里同一模型重复 22 次）：
+      //   `src/index.js` 为修 NO_ADAPTER，把**同一个 adapter 注册到 22 个 provider id**
+      //   （`cs-myfree` + 21 个渠道别名）。而宿主 `buildModelCatalog()`
+      //   （dsh-api-session-controller:524-573）会**遍历 listProviders() 逐个取
+      //   listModels 并各自成组**，且**不做跨组去重**：
+      //       const providers = ctx.llm.listProviders();                  // 22 个
+      //       const models = await ctx.llm.listModels(provider.id);       // 各取一次
+      //       return { kind:'group', group:{ id: provider.id, models } }  // 各自成组
+      //   旧实现这里对**所有别名**都返回整条链 ⇒ 3 个模型 × 22 = 66 条，肉眼就是「重复」。
+      //
+      // 为什么这样改是安全的（已实测，见 `test/model-list-dedupe.test.mjs`）：
+      //   宿主的 `listModels` 与 `prepareCall`/路由走的是**同一个**
+      //   `registration(provider).adapter` 查找（dsh-llm:2193 与 :2264），**不经过 catalog**。
+      //   所以别名 `listModels` 返回 [] 只影响「选择器里为它另开一组」，
+      //   **按别名选中、发请求、降级切换全部照旧**。
+      //
+      // ⚠️ 别名注册本身**必须保留**（NO_ADAPTER 的修复，commit 29bdf05），
+      //    砍掉注册会把「按渠道名发请求」这条路一起弄坏 —— 改的只是**声明模型**这一步。
+      if (provider !== providerId) return []
       return chainCatalog().map((e) => makeModelInfo(provider, {
         id: e.model,
         name: e.name || e.model,
