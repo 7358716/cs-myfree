@@ -156,6 +156,11 @@ export function createLadder(budget = {}) {
       if (want === 5) return { layer: 5, action: 'report', reason: `无法归类的失败（${verdict?.kind}）` }
 
       // L0：原地重试有上限
+      //
+      // 🔴「原地」必须是**在同一个候选上**重试（P0-① 配套约束）：
+      //    `routesTried` 按 `provider/model` 累计，若主循环收到 `retry` 却翻到下一个候选，
+      //    这条计数会被**下一个路由**继承（它第一次失败就 `tried > retryPerRoute`），
+      //    与「按路由重试」的语义正好相反。所以主循环必须先确认 ctx 与刚才失败的是同一路由。
       if (want === 0) {
         if (tried > cfg.retryPerRoute) return { layer: 2, action: 'swap-channel', reason: `同路由已试 ${tried} 次` }
         return { layer: 0, action: 'retry', reason: `瞬态失败（${verdict?.kind}），原地重试 ${tried}/${cfg.retryPerRoute}` }

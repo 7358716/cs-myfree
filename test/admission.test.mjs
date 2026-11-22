@@ -364,7 +364,10 @@ test('准入不改降级语义：付费候选在 paid_allowed 下失败仍继续
     model: 'x', messages: [], metadata: { billing_tier: 'paid_allowed' },
   }))
   assert.ok(chunks.some((c) => c.type === 'text-delta'))
-  assert.deepEqual(attempts.map((a) => a.provider), ['paid-src', 'free-src'], '按 tier 升序逐层降级')
+  // 降级语义不变：paid-src 先用完 retryPerRoute 原地重试，再降级到 free-src
+  assert.deepEqual(attempts.map((a) => a.provider), ['paid-src', 'paid-src', 'paid-src', 'free-src'],
+    '按 tier 升序逐层降级（每层先原地重试）')
+  assert.deepEqual([...new Set(attempts.map((a) => a.provider))], ['paid-src', 'free-src'], '降级顺序不变')
 })
 
 test('pinned 保留首位：请求的模型（链里存在）仍第一个尝试', async () => {

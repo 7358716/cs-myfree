@@ -267,13 +267,15 @@ test('🔴 重试只打「本轮没发送过」的候选（冷却中的 B 会被
     onEvent: (e) => events.push(e),
   })
   await assert.rejects(() => drain(adapter.stream({ model: 'x', messages: [] })))
-  // 前两次：主循环 a + 重试里的 b（b 被冷却跳过、本轮未发送过）
-  assert.deepEqual(calls.slice(0, 2), ['a', 'b'], 'A 只试一次；B（被冷却跳过）在兜底重试里试一次')
-  // 第三次来自 v1.4「二次尝试」（对最后失败的 b 再试一次；不再叠加 last-resort）
-  assert.equal(calls.length, 3, '非 429 瞬时失败允许一次二次尝试')
-  assert.deepEqual(calls, ['a', 'b', 'b'])
+  // 🔴 P0-① 之后：A 先在**自己身上**用完 retryPerRoute（首试 + 2 次原地重试），
+  //    然后才轮到「兜底重试」里的 B（B 起初在冷却、本轮从未发送过）。
+  //    本条用例真正要守的契约是**「已失败的 A 不会被兜底重试重复打」**，
+  //    所以断言改成：B 之前去重后的集合只有 A，且 B 只出现在末尾。
+  assert.deepEqual([...new Set(calls.slice(0, -1))], ['a'], 'A 用完重试后不再参与兜底重试')
+  assert.deepEqual(calls, ['a', 'a', 'a', 'b'], 'A 原地重试 2 次；B（被冷却跳过）在兜底重试里试一次')
   assert.equal(events.filter((e) => e.type === 'cooldown-retry').length, 1)
-  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 1)
+  assert.equal(events.filter((e) => e.type === 'in-place-retry').length, 2, 'P0-① 原地重试用满')
+  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 0, 'P0-① 后二次尝试不叠加')
   assert.equal(events.filter((e) => e.type === 'last-resort').length, 0)
 })
 
@@ -318,6 +320,6 @@ test('🔴 有上游发送的失败 ⇒ **不**补第二段（避免变成排队
   })
   await assert.rejects(() => drain(adapter.stream({ model: 'x', messages: [] })))
   assert.equal(events.filter((e) => e.type === 'cooldown-retry').length, 1, '有发送 ⇒ 只做一次有界重试')
-  assert.deepEqual(calls.slice(0, 2), ['a', 'b'], '主循环 a + 重试 b')
-  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 1, '非 429 瞬时失败 ⇒ 恰好一次二次尝试')
+  assert.deepEqual(calls, ['a', 'a', 'a', 'b'], '主循环 a（含 2 次原地重试）+ 兜底重试 b')
+  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 0, 'P0-① 后改由原地重试承担，不再叠加二次尝试')
 })

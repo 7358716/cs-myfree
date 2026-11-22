@@ -41,9 +41,12 @@ test('① 非 429 瞬时失败（SERVER）⇒ 同一候选第 2 次尝试成功�
   const out = []
   for await (const c of adapter.stream({ model: 'x', messages: [] })) out.push(c)
   assert.ok(out.some((c) => c.type === 'text-delta'), '第 2 次成功后必须正常出流')
-  assert.deepEqual(calls, ['p', 'p'], '同一候选被尝试 2 次（第 2 次来自二次尝试）')
-  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 1)
-  assert.ok(events.some((e) => e.type === 'success' && e.afterSecondAttempt === true))
+  // 🔴 P0-①：这次「同一候选再试一次」现在由**主循环的原地重试**（L0）完成，
+  //    不再等走完整条链之后再由 second-attempt 补救。
+  assert.deepEqual(calls, ['p', 'p'], '同一候选被尝试 2 次（第 2 次来自原地重试）')
+  assert.equal(events.filter((e) => e.type === 'in-place-retry').length, 1)
+  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 0, 'P0-① 后二次尝试不再叠加')
+  assert.ok(events.some((e) => e.type === 'success'))
 })
 
 test('② 第 2 次也失败 ⇒ 如实失败，且每请求只补 1 次（不叠加 last-resort）', async () => {
@@ -51,9 +54,11 @@ test('② 第 2 次也失败 ⇒ 如实失败，且每请求只补 1 次（不�
   const { calls, send } = recorder(() => err(500))
   const adapter = mk({ builtin: [{ provider: 'p', model: 'm', tier: 1 }], send, events })
   await assert.rejects(() => drain(adapter.stream({ model: 'x', messages: [] })))
-  assert.deepEqual(calls, ['p', 'p'], '主循环 1 次 + 二次尝试 1 次，不再有第 3 次')
-  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 1)
-  assert.equal(events.filter((e) => e.type === 'last-resort').length, 0, '已用二次尝试 ⇒ 不叠加 last-resort')
+  // 🔴 P0-①：retryPerRoute=2 ⇒ 首次 + 原地重试 2 次 = 同一候选共 3 次，到此为止。
+  assert.deepEqual(calls, ['p', 'p', 'p'], '同一候选最多 1+retryPerRoute 次')
+  assert.equal(events.filter((e) => e.type === 'in-place-retry').length, 2, '原地重试用满 2 次')
+  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 0, 'P0-① 后二次尝试不再叠加')
+  assert.equal(events.filter((e) => e.type === 'last-resort').length, 0, '已原地重试 ⇒ 不叠加 last-resort')
 })
 
 test('③ 429（rate 冷却）⇒ **不**触发二次尝试（限流窗口里重打只有白打）', async () => {
@@ -65,7 +70,7 @@ test('③ 429（rate 冷却）⇒ **不**触发二次尝试（限流窗口里重
   assert.equal(events.filter((e) => e.type === 'second-attempt').length, 0)
 })
 
-test('④ 每请求 ≤1 次：三个候选全 SERVER 失败 ⇒ 只补 1 次（共 4 次发送）', async () => {
+test('④ 三个候选全 SERVER 失败 ⇒ 每个候选按 retryPerRoute 重试后换源（共 9 次发送）', async () => {
   const events = []
   const { calls, send } = recorder(() => err(500))
   const adapter = mk({
@@ -78,8 +83,12 @@ test('④ 每请求 ≤1 次：三个候选全 SERVER 失败 ⇒ 只补 1 次（
     events,
   })
   await assert.rejects(() => drain(adapter.stream({ model: 'x', messages: [] })))
-  assert.equal(calls.length, 4, '主循环 3 次 + 二次尝试 1 次')
-  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 1)
+  // 🔴 P0-①：每个候选 = 首次 + 2 次原地重试，耗尽才换下一个 ⇒ 3 × 3 = 9。
+  //    改造前是「3 个候选各打 1 次 + 事后补 1 次 = 4 次」，一次 503 就换源。
+  assert.equal(calls.length, 9, '3 个候选 × (1 次 + retryPerRoute=2)')
+  assert.deepEqual(calls, ['a', 'a', 'a', 'b', 'b', 'b', 'p', 'p', 'p'], '同渠道连续打完才换源')
+  assert.equal(events.filter((e) => e.type === 'in-place-retry').length, 6, '每个候选 2 次')
+  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 0, 'P0-① 后二次尝试不再叠加')
 })
 
 test('⑤ free_only ⇒ 二次尝试也只打免费候选（不碰 paid）', async () => {
@@ -94,8 +103,11 @@ test('⑤ free_only ⇒ 二次尝试也只打免费候选（不碰 paid）', asy
     events,
   })
   await assert.rejects(() => drain(adapter.stream({ model: 'x', messages: [] })))
-  assert.equal(calls.includes('paid-src'), false, 'free_only 下二次尝试也不得试 paid')
-  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 1)
+  assert.equal(calls.includes('paid-src'), false, 'free_only 下原地重试也不得试 paid')
+  // 免费候选 a：首次 + 2 次原地重试 ⇒ 3 次；paid 一次都不许打
+  assert.deepEqual(calls, ['a', 'a', 'a'], '只打免费候选，且用完 retryPerRoute')
+  assert.equal(events.filter((e) => e.type === 'in-place-retry').length, 2)
+  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 0)
 })
 
 test('⑥ 预算耗尽 ⇒ 不触发二次尝试', async () => {

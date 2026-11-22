@@ -187,7 +187,8 @@ test('准入排序用闸门 failRate：弱源在真实 adapter 里被排到后�
     concurrency: gate,
   })
   await assert.rejects(() => drain(adapter.stream({ model: 'x', messages: [] })))
-  assert.deepEqual(order.slice(0, 2), ['strong', 'weak'], '失败率低的候选必须先被尝试')
-  // 第 3 次是 v1.4「二次尝试」：对最后失败的 weak 再试一次（仍不改准入顺序）
-  assert.deepEqual(order, ['strong', 'weak', 'weak'])
+  // 准入顺序只看「候选首次登场」的先后 ⇒ 用去重后的序列断言（P0-① 后每个候选会连续打 3 次）
+  assert.deepEqual([...new Set(order)], ['strong', 'weak'], '失败率低的候选必须先被尝试')
+  assert.deepEqual(order, ['strong', 'strong', 'strong', 'weak', 'weak', 'weak'],
+    '准入顺序不变：strong 先用完 retryPerRoute，再轮到 weak')
 })

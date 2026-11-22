@@ -39,7 +39,7 @@ const mkAdapter = ({ builtin, send, gateLimits, budget, events }) => createAdapt
   onEvent: (e) => events.push(e),
 })
 
-test('① 全部候选瞬时失败（SERVER）⇒ v1.4 起由「二次尝试」接管（last-resort 不再叠加）', async () => {
+test('① 全部候选瞬时失败（SERVER）⇒ 由「原地重试」接管（last-resort 不再叠加）', async () => {
   const events = []
   const { calls, send } = recorder(() => fail(500))
   const adapter = mkAdapter({
@@ -51,16 +51,17 @@ test('① 全部候选瞬时失败（SERVER）⇒ v1.4 起由「二次尝试」�
     events,
   })
   await assert.rejects(() => drain(adapter.stream({ model: 'x', messages: [] })))
-  assert.equal(events.filter((e) => e.type === 'last-resort').length, 0, '已用二次尝试 ⇒ 不再叠加 last-resort')
-  const sa = events.filter((e) => e.type === 'second-attempt')
-  assert.equal(sa.length, 1, '每请求至多一次二次尝试')
-  assert.equal(sa[0].kind, 'SERVER')
-  assert.equal(calls.length, 3, '主循环 2 次 + 二次尝试 1 次（不循环）')
+  assert.equal(events.filter((e) => e.type === 'last-resort').length, 0, '已原地重试 ⇒ 不再叠加 last-resort')
+  const ipr = events.filter((e) => e.type === 'in-place-retry')
+  assert.equal(ipr.length, 4, 'P0-①：两个候选各原地重试 2 次')
+  assert.equal(ipr[0].kind, 'SERVER')
+  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 0, 'P0-① 后二次尝试不叠加')
+  assert.equal(calls.length, 6, '2 个候选 ×（1 次首试 + 2 次原地重试），不循环')
 })
 
-test('② 二次尝试成功 ⇒ 正常返回文本，不再抛错', async () => {
+test('② 原地重试成功 ⇒ 正常返回文本，不再抛错', async () => {
   const events = []
-  // 前两次失败，第三次（last-resort）成功
+  // 前两次失败，第三次（原地重试）成功
   const { send } = recorder((i) => (i >= 2 ? 'ok' : fail(500)))
   const adapter = mkAdapter({
     builtin: [
@@ -72,9 +73,10 @@ test('② 二次尝试成功 ⇒ 正常返回文本，不再抛错', async () =>
   })
   const out = []
   for await (const c of adapter.stream({ model: 'x', messages: [] })) out.push(c)
-  assert.ok(out.some((c) => c.type === 'text-delta'), 'last-resort 成功后应正常出流')
-  assert.equal(events.filter((e) => e.type === 'second-attempt').length, 1)
-  assert.ok(events.some((e) => e.type === 'success' && e.afterSecondAttempt === true))
+  assert.ok(out.some((c) => c.type === 'text-delta'), '原地重试成功后应正常出流')
+  assert.equal(events.filter((e) => e.type === 'in-place-retry').length, 2, 'a 上重试 2 次后成功')
+  assert.equal(events.filter((e) => e.type === 'last-resort').length, 0)
+  assert.ok(events.some((e) => e.type === 'success'))
 })
 
 test('③ 非瞬时类失败（AUTH）⇒ 不触发 last-resort', async () => {
@@ -105,10 +107,10 @@ test('④ free_only ⇒ last-resort 也不碰 paid（Billing 硬过滤优先于�
   })
   await assert.rejects(() => drain(adapter.stream({ model: 'x', messages: [] })))
   assert.equal(calls.some((c) => c.provider === 'paid-src'), false, 'free_only 下 last-resort 也不得试 paid')
-  assert.equal(events.filter((e) => e.type === 'last-resort').length, 0, '已由二次尝试接管')
-  const sa = events.filter((e) => e.type === 'second-attempt')
-  assert.equal(sa.length, 1)
-  assert.equal(sa[0].provider, 'a', '二次尝试也只能打免费候选')
+  assert.equal(events.filter((e) => e.type === 'last-resort').length, 0, '已由原地重试接管')
+  const sa = events.filter((e) => e.type === 'in-place-retry')
+  assert.equal(sa.length, 2, '免费候选 a 上原地重试 2 次')
+  assert.ok(sa.every((e) => e.provider === 'a'), '原地重试也只能打免费候选')
 })
 
 test('⑤ 预算已耗尽 ⇒ 不触发 last-resort（不突破预算）', async () => {

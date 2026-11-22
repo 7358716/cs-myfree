@@ -1235,12 +1235,56 @@ export function createAdapter(opts = {}) {
       let lastFailedCand = null
       /** 二次尝试是否已用过（每请求 ≤1 次） */
       let secondAttemptDone = false
+      /** P0-①：本轮是否发生过「候选内原地重试」（有 ⇒ 二次尝试这条补救路径不再叠加） */
+      let inPlaceRetryHappened = false
+      /** 是否发生过「已提交后失败」：内容已吐给用户 ⇒ 一切换源/重试补救都必须关闭 */
+      let committedFailureHappened = false
       /** 账本 code 覆盖（仅并发满 ⇒ RATE_LIMIT；不影响路由/梯子） */
       let ledgerCode = null
       /** 整条链都忙时，做一次**有界的短重试**（不排队、不多等） */
       let busyRetried = false
 
-      for (const cand of ordered) {
+      // ── P0-① 候选内原地重试（L0）────────────────────────────────────
+      //
+      // 🔴 真实缺陷：`ladder.onFailure()` 早就按 `retryPerRoute`（默认 2）判好了
+      //    「瞬态失败 ⇒ 原地重试 / 超限 ⇒ 换渠道」，但主循环**只消费了 `'report'`**
+      //    —— 收到 `action:'retry'` 与收到 `'swap-channel'` 一样，都是直接进下一轮 for，
+      //    等于**一失败就换源**：一次 503 之后 0ms 就换了渠道，`retryPerRoute` 从未生效。
+      //
+      // 现在的语义（改的只有「失败了要不要就地再打一次」这一件事）：
+      //   · 失败 ⇒ 照旧 `ladder.onFailure()`；
+      //   · 它说 `retry` ⇒ **不换候选**，退避后原地再打（上限 = `retryPerRoute`）；
+      //   · 它说别的（swap-*/report/downgrade）⇒ 与改造前完全一致，`break` 换下一个候选。
+      //
+      // 四条硬约束（越界即 bug）：
+      //   ① **绝不进 for 的下一轮**：只能在**同一候选**上重试。`ladder.routesTried` 按
+      //      provider/model 累计，若 retry 翻到了别的候选，那计数会被下一个路由继承
+      //      （它第一次失败就 over 上限），与「按路由重试」正好相反。
+      //   ② **提交后绝不重试**：内容已经吐给用户，再打一次会让答案重复/错乱
+      //      （held.isCommitted ⇒ 直接 break，交给上层）。
+      //   ③ **只对瞬态类**：`retry` 只可能由 TRANSPORT/TIMEOUT/SERVER/EMPTY_RESPONSE 产生，
+      //      429（rate 冷却）按 nextLayerFor 走 L1，**不受影响**；这里再加一道
+      //      `isRateCooling` 守卫，绝不在限流窗口里重打（白打）。
+      //   ④ **不占用忙名额、不越预算**：每次重试重新 `gate.acquire()`，
+      //      `countAttempt()` 如实记账，`ladder.exhausted()` 一到立即停。
+      //
+      // 退避：200/400ms（×2）线性增长，且**不超过**上游 Retry-After 与本次回合剩余时长；
+      //       signal 已 abort 时立刻放弃等待。
+      const RETRY_BACKOFF_BASE_MS = 200
+      const sleepUnlessAborted = async (ms, signal) => {
+        if (!(ms > 0)) return
+        if (signal?.aborted) return
+        await new Promise((resolve) => {
+          const t = setTimeout(done, ms)
+          function done() {
+            try { signal?.removeEventListener?.('abort', done) } catch { /* ignore */ }
+            clearTimeout(t); resolve()
+          }
+          try { signal?.addEventListener?.('abort', done, { once: true }) } catch { /* ignore */ }
+        })
+      }
+
+      mainLoop: for (const cand of ordered) {
         if (ladder.exhausted(now())) {
           onEvent({ type: 'budget-exhausted', at: now() })
           break
@@ -1254,7 +1298,15 @@ export function createAdapter(opts = {}) {
         const held = createHeld()
         ledgerCode = null
 
+        // P0-①：同一候选的原地重试次数（0 = 本次是该候选的第一次尝试）
+        let inPlaceRetries = 0
+        /** 收到 ladder 的 `retry` ⇒ 不换候选，退避后回到本循环顶部 */
+        let retryHere = false
+
         let releaseSlot = () => {}
+        // 原地重试只复用同一个 cand ⇒ 这个循环**绝不放宽候选集**（billing/黑名单都不动）
+        do {
+        retryHere = false
         try {
           onEvent({ type: 'attempt', provider: cand.provider, model: cand.model, layer: ladder.snapshot().layer })
 
@@ -1299,10 +1351,21 @@ export function createAdapter(opts = {}) {
           //    上一版只搬 `released`（空数组）⇒ 提交点之后的每个增量都被丢弃，
           //    用户只看到第一个 text-delta。必须两者都收。
           const buffered = []
-          for await (const chunk of iter) {
-            const r = held.push(chunk)
-            if (r.released?.length) buffered.push(...r.released)
-            if (r.chunk) buffered.push(r.chunk)
+          try {
+            for await (const chunk of iter) {
+              const r = held.push(chunk)
+              if (r.released?.length) buffered.push(...r.released)
+              if (r.chunk) buffered.push(r.chunk)
+            }
+          } catch (streamErr) {
+            // 🔴 失败尝试**绝不能留下任何增量**（P0-① 暴露的真缺陷）：
+            //    此前 `held.discard()` 从未被调用，`buffered` 里已经装进缓冲区的
+            //    reasoning 增量没被清掉。改造前因为「一失败就换源、buffered 是局部变量」
+            //    侥幸没漏；接上原地重试后，同一段输出会在恢复时一起放出去 ⇒
+            //    用户看到「他想了一下」重复两次，然后才是答案。
+            held.discard()
+            buffered.length = 0
+            throw streamErr
           }
 
           if (!held.isCommitted) {
@@ -1423,11 +1486,60 @@ export function createAdapter(opts = {}) {
           } catch { /* ignore */ }
           const step = ladder.onFailure(lastErr, cand, now())
           onEvent({ type: 'ladder', layer: step.layer, action: step.action, reason: step.reason })
-          if (step.action === 'report') break
+          // 跳出**两层**（内层 do-while 只负责原地重试）
+          if (step.action === 'report') break mainLoop
+
+          // 🔴 已提交后失败 ⇒ **整轮结束**，绝不换源（内容收不回来）。
+          //    ⚠️ 这里必须是 `report` —— 在 `do{}while` 里只 `break` 只会跳出内层，
+          //    外层 for 会继续翻到下一个候选（P0-① 改造时踩到过：已提交的答案又重发了一遍）。
+          if (held.isCommitted) {
+            committedFailureHappened = true
+            onEvent({ type: 'committed-failure', provider: cand.provider, model: cand.model, kind: lastErr?.kind ?? null, at: now() })
+            break mainLoop
+          }
+
+          // ── P0-① 原地重试（L0）──
+          //
+          // 改造前：这里不管 step.action 是什么都会落到 for 的下一轮 ⇒ 一失败就换源，
+          //         `retryPerRoute=2` 形同虚设（一次 503 后 0ms 换渠道）。
+          // 改造后：**只有** `retry` 才留在本候选上再打一次；其余动作（swap-account /
+          //         swap-channel / swap-model / downgrade）语义不变，继续 break 换候选。
+          const canRetryInPlace = step.action === 'retry'
+            // ② 已提交 ⇒ 内容收不回来，绝不重试
+            && !held.isCommitted
+            // ④ 预算没耗尽（不越 maxAttempts / maxElapsed）
+            && !ladder.exhausted(now())
+            // ③ 429 rate 冷却窗口里重打只有白打，绝不重试
+            && !gateProbe.isRateCooling(cand.provider, accountIdOfCandidate(cand))
+            // 守卫：inPlaceRetries 与 retryPerRoute 是同一个上限（ladder 也已按 routesTried 卡过）
+            && inPlaceRetries < Number(budget?.retryPerRoute ?? DEFAULT_BUDGET.retryPerRoute)
+
+          if (canRetryInPlace) {
+            inPlaceRetries += 1
+            inPlaceRetryHappened = true
+            // 退避：200 / 400ms…（不越过上游 Retry-After，也不越过本回合剩余时长）
+            const retryAfterMs = Number(err?.retryAfterMs ?? err?.retryAfter ?? 0) || 0
+            const remainMs = Math.max(0, DEFAULT_BUDGET.maxElapsedMs - (now() - (ladder.snapshot().startedAt || now())))
+            const backoffMs = Math.min(
+              RETRY_BACKOFF_BASE_MS * (2 ** (inPlaceRetries - 1)),
+              retryAfterMs > 0 ? retryAfterMs : RETRY_BACKOFF_BASE_MS * (2 ** (inPlaceRetries - 1)),
+              remainMs,
+            )
+            onEvent({
+              type: 'in-place-retry', provider: cand.provider, model: cand.model,
+              attempt: inPlaceRetries, of: Number(budget?.retryPerRoute ?? DEFAULT_BUDGET.retryPerRoute),
+              kind: lastErr?.kind ?? null, backoffMs, at: now(),
+            })
+            await sleepUnlessAborted(backoffMs, options.signal)
+            // 等待期间被取消 ⇒ 别假装还在干活
+            if (options.signal?.aborted) break mainLoop
+            retryHere = true
+          }
         } finally {
           // 🔴 无论成功/失败/抛错，都必须释放名额（否则会话名额泄漏 ⇒ 后续全挂）
           releaseSlot()
         }
+        } while (retryHere)
       }
 
       // 🔴 整轮被「并发满 / 冷却」挡过 ⇒ 做**一次**有界兜底重试（不排队、不循环）
@@ -1616,9 +1728,18 @@ export function createAdapter(opts = {}) {
       // 对**同一个候选**再试一次。目的：救回"这条渠道只是一时抽风"的尾事件。
       // 硬约束：429（rate 冷却）与 CHANNEL_BUSY 一律不重试；不碰处于 rate 冷却的候选；
       //         `ladder.countAttempt()` 如实记账；失败同样 `markFailure`。
+      //
+      // 🔴 P0-① 之后这里是**兼容分支，默认不再触发**：
+      //    主循环已经会在同一候选上原地重试（L0），这条补救路径与它完全重叠。
+      //    旧实现的伤害是「主循环 1 次 + 这里 1 次 = 同一渠道被打 2 次，但中间隔着一堆
+      //    cooldown-retry / local-saturation 的补救」，本轮实测会打到 3~4 次。
+      //    因此：只有当主循环**明确没有**做过原地重试（历史预算配置兼容：某候选恰好
+      //    一次成功、另一次失败等边缘组合）时才保留它，语义与改造前一致。
       const SECOND_ATTEMPT_KINDS = new Set([KIND.TRANSPORT, KIND.TIMEOUT, KIND.SERVER, KIND.EMPTY_RESPONSE])
       if (rt.autoSwitch !== false
         && !secondAttemptDone
+        && !inPlaceRetryHappened
+        && !committedFailureHappened
         && lastFailedCand
         && SECOND_ATTEMPT_KINDS.has(lastErr?.kind)
         && !gateProbe.isRateCooling(lastFailedCand.provider, accountIdOfCandidate(lastFailedCand))
@@ -1692,7 +1813,10 @@ export function createAdapter(opts = {}) {
       //   · billing 硬过滤照旧（free_only 下不会碰 paid）；
       //   · 每请求最多 1 次、无循环。
       const TRANSIENT_KINDS = new Set([KIND.TRANSPORT, KIND.TIMEOUT, KIND.SERVER, KIND.RATE_LIMIT, KIND.EMPTY_RESPONSE])
-      if (rt.autoSwitch !== false && !secondAttemptDone && TRANSIENT_KINDS.has(lastErr?.kind) && !ladder.exhausted(now())) {
+      // 🔴 P0-① 之后同样不叠加：主循环已经在同一候选上原地重试过（inPlaceRetryHappened），
+      //    last-resort 再补一次只会让「同一渠道被打 3~4 次」，与 retryPerRoute 的预算相悖。
+      if (rt.autoSwitch !== false && !secondAttemptDone && !inPlaceRetryHappened && !committedFailureHappened
+        && TRANSIENT_KINDS.has(lastErr?.kind) && !ladder.exhausted(now())) {
         const lrAdmitted = admitCandidates({
           candidates: candidatesWithBilling(options.model),
           billingTier,                       // ⚠️ 授权绝不放宽
