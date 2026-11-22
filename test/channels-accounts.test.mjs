@@ -50,10 +50,10 @@ test('删除账号', async () => {
   assert.equal((await s.list()).length, 0)
 })
 
-test('20 个渠道都有登录指引', async () => {
+test('22 个渠道都有登录指引', async () => {
   const home = await tmpHome()
   const list = await listChannels(createAccountStore(home))
-  assert.equal(list.length, 21)
+  assert.equal(list.length, 22)
   for (const c of list) {
     assert.ok(c.guideTitle, c.id + ' 缺 guideTitle')
     assert.ok(Array.isArray(c.guideSteps) && c.guideSteps.length > 0, c.id + ' 缺步骤')

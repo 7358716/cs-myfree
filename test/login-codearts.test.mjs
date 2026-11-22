@@ -126,9 +126,9 @@ test('过期会话 poll 返回 expired', async () => {
 })
 
 // ── flow-map 覆盖度 ──
-test('20 家渠道全部有登录流类型', async () => {
+test('22 家渠道全部有登录流类型', async () => {
   const ids = Object.keys(CHANNELS)
-  assert.equal(ids.length, 21)
+  assert.equal(ids.length, 22)
   for (const id of ids) {
     const f = FLOW_MAP[id]
     assert.ok(f, `${id} 缺 flow 定义`)

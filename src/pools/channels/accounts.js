@@ -19,8 +19,25 @@
 
 import { readFile, writeFile, rename, mkdir, chmod, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
+import { CHANNELS } from './protocols.js'
 
 export const ACCOUNTS_FILE = 'accounts.json'
+
+/**
+ * 该渠道声明的「凭据环境变量名」（没有 ⇒ null）。
+ *
+ * 刻意用动态 import 之外的最轻方式：`protocols.js` 与本模块同层且无反向依赖，
+ * 静态 import 不会成环，但这里仍做成函数以求「拿不到就 null」的容错。
+ */
+function credentialEnvOf(provider) {
+  try {
+    const id = String(provider ?? '')
+    const ch = CHANNELS?.[id]
+    return typeof ch?.credentialEnv === 'string' && ch.credentialEnv !== '' ? ch.credentialEnv : null
+  } catch {
+    return null
+  }
+}
 
 function dirOf(dshHome) {
   return join(dshHome || process.env.DSH_HOME || join(process.env.HOME || '.', '.dsh'), 'cs-myfree')
@@ -97,6 +114,21 @@ export function createAccountStore(dshHome) {
         if (a.provider !== provider) continue
         if (a.ak && a.sk) return `${a.ak}:${a.sk}`
         if (a.credential) return a.credential
+      }
+      // 🔴 环境变量兜底（2026-11-23，阿里 Token Plan 等**计划型付费源**用）
+      //
+      // 为什么需要：这类源的 Key 由用户在宿主侧配置（如 `QWEN_TOKEN_PLAN_CN_API_KEY`
+      //   已存在 `~/.dsh/.credentials.yaml` 的 refs 里），用户不需要再在插件里粘贴一遍；
+      //   而插件目前拿不到宿主 credentials 服务（只 inject 了 llm/web/webServer）。
+      //
+      // 边界（很重要）：
+      //   · **只对声明了 `credentialEnv` 的渠道生效** —— 其它渠道行为一字不变；
+      //   · 只读 `process.env`，**不解析宿主的 .credentials.yaml**（那属于越界）；
+      //   · 取不到就返回 null ⇒ 上层如实报「渠道未登录」，不假装成功。
+      const envName = credentialEnvOf(provider)
+      if (envName) {
+        const v = process.env[envName]
+        if (typeof v === 'string' && v.trim() !== '') return v.trim()
       }
       return null
     },

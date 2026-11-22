@@ -156,8 +156,14 @@ export const CHANNEL_GROUP_LABELS = Object.freeze({
 export const HUAWEI_SOURCE_IDS = Object.freeze(['codearts', 'officeace'])
 /** 免密免费源（能力可用、不需要账号） */
 export const FREE_SOURCE_IDS = Object.freeze(['kilo', 'ovh', 'pollinations', 'custom-free'])
-/** 用户自加 API（付费/自带 key，不走登录态） */
-export const SELFAPI_SOURCE_IDS = Object.freeze(['deepseek-official', 'ark', 'custom-paid'])
+/**
+ * 付费池 / 用户自加 API（自带 key 或计划型付费源，**不走账号登录**）
+ *
+ * 2026-11-23 改造：`deepseek-official` 与 `deepseek-web` 已移出渠道包与付费池
+ * （前者由宿主自带适配器承担，后者不再由本插件声明）；`qwen-token-plan-cn`
+ * （阿里云百炼）新增为付费源。`ark` 保留但转为 agentPlan 模式。
+ */
+export const SELFAPI_SOURCE_IDS = Object.freeze(['ark', 'custom-paid', 'qwen-token-plan-cn'])
 /** 名字以 deepseek 开头的一律算「deepseek 系」 */
 export const DEEPSEEK_SOURCE_RE = /^deepseek/i
 

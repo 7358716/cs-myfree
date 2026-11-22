@@ -1758,47 +1758,8 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontWeight: 600 } }, k.label),
           h('div', { style: S.dim }, k.note || '')))),
 
-        // ══════════════════════════════════════════════════════════════════
-        // ② 模型预设（用户需求 2026-11-16）
-        //   「免费渠道增加一个模型预设入口，和免密源、渠道并列」
-        //
-        //   与「自加免费 API」的区别：
-        //     · 自加免费 API = 一个**端点**（Base URL + Key），可能有多个模型
-        //     · 模型预设   = 一个**模型**（往现有端点里加一个可选模型）
-        //   ⇒ 预设是「快速往模型链里塞一个常用免费模型」的捷径，
-        //     不必为每个模型都配一遍完整端点。
-        // ══════════════════════════════════════════════════════════════════
-        h('div', { style: { fontWeight: 600, margin: '16px 0 8px', fontSize: '12px' } },
-          '② 模型预设',
-          h('span', { style: Object.assign({ marginLeft: '8px' }, S.dim) },
-            '常用免费模型一键加进模型链（免密源模型 / 渠道模型）')),
-        (() => {
-          const presets = [
-            { provider: 'kilo', model: 'kilo-auto/free', label: 'Kilo 免费池 · kilo-auto/free', note: '完全免密' },
-            { provider: 'ovh', model: 'Qwen3.5-397B-A17B', label: 'OVH · Qwen3.5-397B', note: '实测最快 1.9s' },
-            { provider: 'ovh', model: 'Qwen2.5-VL-72B-Instruct', label: 'OVH · Qwen2.5-VL-72B', note: '视觉能力强' },
-            { provider: 'pollinations', model: 'openai', label: 'Pollinations · openai', note: '免密，能力较弱' },
-          ]
-          const inChain = (p) => {
-            const cs = (d.chain && Array.isArray(d.chain.tiers)) ? d.chain.tiers : []
-            return cs.some((t) => String(t.provider) === p.provider)
-          }
-          return h('div', { style: S.grid }, presets.map((p) => h('div', { key: p.provider + '/' + p.model, style: S.tile },
-            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' } },
-              h('span', { style: { fontWeight: 600, fontSize: '12px' } }, p.label),
-              inChain(p) ? h('span', { style: S.badge('good') }, '已入链') : null),
-            h('div', { style: S.dim }, p.note),
-            h('button', {
-              style: Object.assign({}, S.btn(false), { marginTop: '6px', padding: '0 8px', fontSize: '11px' }),
-              onClick: () => {
-                if (typeof props.onGoTab === 'function') props.onGoTab('models')
-                setMsg({ ok: true, text: '请在「模型与路由 → 模型链」里用下拉把 ' + p.label + ' 加进去（可指定级别）' })
-              },
-            }, '加进模型链'))))
-        })(),
-
         h('div', { style: { fontWeight: 600, margin: '16px 0 4px', fontSize: '12px' } },
-          '③ 账号渠道（' + (chData ? chData.total : d.sources.counts.channels) + ' 家 · 已登录 ' + loggedChannels.length + ' 家' +
+          '② 账号渠道（' + (chData ? chData.total : d.sources.counts.channels) + ' 家 · 已登录 ' + loggedChannels.length + ' 家' +
           (statusList.length ? ' · 已验证 ' + verifiedCount + '/' + statusList.length : '') + '）'),
         h('div', { style: Object.assign({ marginBottom: '10px' }, S.dim) },
           '「一键登录」按各渠道流程自动完成；未验证 = 后端登录端点尚未真机验证，可能失败，请以实际结果为准。凭证只存本机。'),
@@ -1876,7 +1837,7 @@ window.__ModuleLoader__.load({
                     style: Object.assign({}, S.btn(false), { padding: '0 8px', fontSize: '11px' }),
                     onClick: () => {
                       if (typeof props.onGoTab === 'function') props.onGoTab('sources')
-                      setMsg({ ok: true, text: '请在下方「③ 账号渠道」里找到「' + p.label + '」配置 API Key' })
+                      setMsg({ ok: true, text: '请在下方「② 账号渠道」里找到「' + p.label + '」配置 API Key' })
                     },
                   }, p.configured ? '更换 Key' : '去配置 Key'),
                   h('button', {

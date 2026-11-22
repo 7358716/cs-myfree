@@ -375,6 +375,13 @@ export const CHANNELS = Object.freeze({
     credRef: 'ARK_API_KEY',
     loginPage: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
     note: '火山方舟：粘贴 API Key 即可用；模型以控制台「在线推理」里开通的为准',
+    // 🔴 agentPlan 模式（2026-11-23）：方舟的「计划型」额度走 Agent Plan，
+    //    模型清单来自用户的 `plan-models-user.json`（约在 ~/.dsh/cs-myfree/）。
+    //    ⚠️ 如实说明：目前插件**只标记不读取** —— 该文件尚无代码解析，
+    //       模型仍以 /models 探测 + 控制台开通为准。要真正读它需另做（见 Ts-202611034 备注）。
+    agentPlan: true,
+    planModelsFile: 'plan-models-user.json',
+    planId: 'agent-plan',
   },
   'deepseek-web': {
     // DeepSeek 网页版（chat.deepseek.com）：**不消耗 API token**，走网页会话。
@@ -461,6 +468,35 @@ export const CHANNELS = Object.freeze({
     loginPage: null,
     note: '粘贴 OpenAI 兼容端点的 Base URL + API Key（按量计费；需在「设置」里授权付费才会被调用）',
     userBaseUrl: true,
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 阿里云百炼 Token Plan（国内站，2026-11-23 新增）
+  //
+  // 与 custom-paid 的差别：端点与凭据名**固定**（用户不必自己填 Base URL），
+  // 用户只需在设置里保存 Key；Key 从宿主凭据库按 `credRef` 读取。
+  //
+  //   baseURL: https://dashscope.aliyuncs.com/compatible-mode/v1（OpenAI 兼容）
+  //   Key    : 环境变量 / 宿主凭据 `QWEN_TOKEN_PLAN_CN_API_KEY`
+  //
+  // ⚠️ 本文件**不含任何密钥**，只写环境变量名。
+  // ══════════════════════════════════════════════════════════════════════════
+  'qwen-token-plan-cn': {
+    concurrencyLimit: 1, limitSource: 'default',
+    billing: 'paid', billingSource: 'declared',
+    label: '阿里云百炼 Token Plan（国内）',
+    family: 'openai',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    chatPath: '/chat/completions',
+    auth: AUTH.BEARER,
+    login: LOGIN.PASTE_KEY,
+    refresh: REFRESH.NONE,
+    checkin: { supported: false },
+    credRef: 'QWEN_TOKEN_PLAN_CN_API_KEY',
+    // 环境变量名：插件取 Key 时**优先读它**（用户已在宿主凭据里配过就不必再粘贴）
+    credentialEnv: 'QWEN_TOKEN_PLAN_CN_API_KEY',
+    loginPage: 'https://bailian.console.aliyun.com/',
+    note: '阿里云百炼 Token Plan：粘贴 API Key 即可用（OpenAI 兼容端点）；需在「设置」里授权付费才会被调用',
   },
 })
 

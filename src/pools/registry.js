@@ -35,10 +35,26 @@ export const SOURCES = Object.freeze([
   { id: 'officeace', label: 'OfficeAce（华为 MaaS）', kind: KIND.ACCOUNT, checkin: true },
   { id: 'accio', label: 'Accio（阿里）', kind: KIND.ACCOUNT, checkin: false },
 
-  { id: 'deepseek-official', label: 'DeepSeek 官方', kind: KIND.SELFAPI, paid: true },
+  // ── 付费池（2026-11-23 改造）────────────────────────────────────────
+  //
+  // 🔴 这里只放「**不是账号登录**、而是 API / 计划型付费源」。
+  //    此前 deepseek-official / ark / deepseek-web 三条混在渠道包里，与
+  //    「登录账号用积分」的语义不符 ⇒ 已移出渠道包：
+  //      · `ark`（火山方舟）改由**付费池**承接（见下方 agentPlan 标记）；
+  //      · `deepseek-official` / `deepseek-web` 由宿主自带适配器 / 模型链承担，
+  //        不再由本插件声明（宿主对 deepseek-official 有自己的 adapter，
+  //        这里再声明一遍会重复）。
   { id: 'custom-paid', label: '自加付费 API（OpenAI 兼容）', kind: KIND.SELFAPI, paid: true, note: '你自己粘贴的付费端点' },
-  { id: 'ark', label: '火山方舟', kind: KIND.SELFAPI, paid: true },
-  { id: 'deepseek-web', label: 'DeepSeek 网页版', kind: KIND.SELFAPI, paid: false },
+  // 火山方舟：保留为付费源，但标记 **agentPlan** 模式
+  //   （模型清单来自 `plan-models-user.json`，不是普通 API 的 /models 探测）
+  { id: 'ark', label: '火山方舟（Agent Plan）', kind: KIND.SELFAPI, paid: true, agentPlan: true,
+    note: '计划型付费源：模型清单读 plan-models-user.json' },
+  // 阿里云百炼 Token Plan（2026-11-23 新增）
+  //   🔴 key 一律从**宿主凭据库 / 环境变量**读，绝不硬编码（本文件不含任何密钥）。
+  { id: 'qwen-token-plan-cn', label: '阿里云百炼 Token Plan（国内）', kind: KIND.SELFAPI, paid: true,
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    credentialEnv: 'QWEN_TOKEN_PLAN_CN_API_KEY',
+    note: 'OpenAI 兼容端点；Key 来自宿主凭据 QWEN_TOKEN_PLAN_CN_API_KEY' },
 ])
 
 export function sourceById(id) { return SOURCES.find((s) => s.id === id) ?? null }
